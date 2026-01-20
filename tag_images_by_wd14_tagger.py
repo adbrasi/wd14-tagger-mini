@@ -229,9 +229,18 @@ def dedupe_tags(tags: List[str]) -> List[str]:
 
 
 def add_tags_to_map(result_map: Dict[str, List[str]], image_path: str, tags: List[str], dedupe: bool) -> None:
-    if dedupe:
-        tags = dedupe_tags(tags)
-    result_map[image_path] = tags
+    if not tags:
+        return
+
+    if not dedupe:
+        result_map[image_path].extend(tags)
+        return
+
+    seen = set(result_map[image_path])
+    for tag in tags:
+        if tag not in seen:
+            result_map[image_path].append(tag)
+            seen.add(tag)
 
 
 # -------------------------
@@ -285,6 +294,8 @@ def run_wd14(
     batch_size: int,
     dedupe: bool,
     result_map: Dict[str, List[str]],
+    general_threshold: float,
+    character_threshold: float,
 ) -> None:
     model_location = os.path.join(model_dir, repo_id.replace("/", "_"))
     if not os.path.exists(model_location) or args.force_download:
@@ -310,9 +321,9 @@ def run_wd14(
         for image_path, prob in zip(batch_paths, probs):
             tags: List[str] = []
             for i, p in enumerate(prob[4:]):
-                if i < len(general_tags) and p >= args.general_threshold:
+                if i < len(general_tags) and p >= general_threshold:
                     tags.append(general_tags[i])
-                elif i >= len(general_tags) and p >= args.character_threshold:
+                elif i >= len(general_tags) and p >= character_threshold:
                     tag_name = character_tags[i - len(general_tags)]
                     if args.character_tags_first:
                         tags.insert(0, tag_name)
@@ -360,6 +371,8 @@ def run_camie(
     batch_size: int,
     dedupe: bool,
     result_map: Dict[str, List[str]],
+    general_threshold: float,
+    character_threshold: float,
 ) -> None:
     model_location = os.path.join(model_dir, repo_id.replace("/", "_"))
     if not os.path.exists(model_location) or args.force_download:
@@ -392,7 +405,7 @@ def run_camie(
                     continue
                 category = tag_to_category.get(tag, "general")
                 if category.lower() == "character":
-                    if p >= args.character_threshold:
+                    if p >= character_threshold:
                         if args.character_tags_first:
                             tags.insert(0, tag)
                         else:
@@ -403,7 +416,7 @@ def run_camie(
                     elif args.use_rating_tags_as_last_tag:
                         tags.append(tag)
                 else:
-                    if p >= args.general_threshold:
+                    if p >= general_threshold:
                         tags.append(tag)
 
             tags = postprocess_tags(tags, args)
@@ -513,6 +526,8 @@ def run_pixai(
     batch_size: int,
     dedupe: bool,
     result_map: Dict[str, List[str]],
+    general_threshold: float,
+    character_threshold: float,
 ) -> None:
     model_location = os.path.join(model_dir, repo_id.replace("/", "_"))
     if not os.path.exists(model_location) or args.force_download:
@@ -551,9 +566,9 @@ def run_pixai(
                 th = thresholds.get(tag)
                 if th is None:
                     if category.lower() == "character":
-                        th = args.character_threshold
+                        th = character_threshold
                     else:
-                        th = args.general_threshold
+                        th = general_threshold
                 if p >= th:
                     if category.lower() == "character" and args.character_tags_first:
                         tags_out.insert(0, tag)
@@ -605,47 +620,36 @@ def load_image(path: str, preprocess_fn) -> Tuple[str, np.ndarray]:
 # Output helpers
 # -------------------------
 
-def output_suffix_for_tagger(tagger: str) -> str:
-    return f".{tagger}"
+def write_json_output(output_path: str, combined: Dict[str, List[str]], sep: str) -> None:
+    with open(output_path, "wt", encoding="utf-8") as f:
+        json.dump({k: sep.join(v) for k, v in combined.items()}, f, ensure_ascii=False, indent=4)
+    logger.info(f"captions saved to {output_path}")
 
 
-def write_json_outputs(output_path: str, per_tagger: Dict[str, Dict[str, List[str]]]) -> None:
-    base, ext = os.path.splitext(output_path)
-    for tagger, tag_map in per_tagger.items():
-        path = f"{base}{output_suffix_for_tagger(tagger)}{ext or '.json'}"
-        with open(path, "wt", encoding="utf-8") as f:
-            json.dump(tag_map, f, ensure_ascii=False, indent=4)
-        logger.info(f"captions saved to {path}")
+def write_jsonl_output(output_path: str, combined: Dict[str, List[str]], sep: str) -> None:
+    with open(output_path, "wt", encoding="utf-8") as f:
+        for image_path, tags in combined.items():
+            f.write(json.dumps({"image_path": image_path, "caption": sep.join(tags)}) + "\n")
+    logger.info(f"captions saved to {output_path}")
 
 
-def write_jsonl_outputs(output_path: str, per_tagger: Dict[str, Dict[str, List[str]]], sep: str) -> None:
-    base, _ = os.path.splitext(output_path)
-    for tagger, tag_map in per_tagger.items():
-        path = f"{base}{output_suffix_for_tagger(tagger)}.jsonl"
-        with open(path, "wt", encoding="utf-8") as f:
-            for image_path, tags in tag_map.items():
-                f.write(json.dumps({"image_path": image_path, "caption": sep.join(tags)}) + "\n")
-        logger.info(f"captions saved to {path}")
+def write_caption_files(combined: Dict[str, List[str]], args) -> None:
+    for image_path, tags in combined.items():
+        caption_file = os.path.splitext(image_path)[0] + args.caption_extension
+        tag_text = args.caption_separator.join(tags)
 
+        if args.append_tags and os.path.exists(caption_file):
+            with open(caption_file, "rt", encoding="utf-8") as f:
+                existing = [
+                    t.strip()
+                    for t in f.read().strip("\n").split(args.caption_separator.strip())
+                    if t.strip()
+                ]
+            new_tags = [t for t in tags if t not in existing]
+            tag_text = args.caption_separator.join(existing + new_tags)
 
-def write_caption_files(per_tagger: Dict[str, Dict[str, List[str]]], args) -> None:
-    for tagger, tag_map in per_tagger.items():
-        for image_path, tags in tag_map.items():
-            caption_file = os.path.splitext(image_path)[0] + output_suffix_for_tagger(tagger) + args.caption_extension
-            tag_text = args.caption_separator.join(tags)
-
-            if args.append_tags and os.path.exists(caption_file):
-                with open(caption_file, "rt", encoding="utf-8") as f:
-                    existing = [
-                        t.strip()
-                        for t in f.read().strip("\n").split(args.caption_separator.strip())
-                        if t.strip()
-                    ]
-                new_tags = [t for t in tags if t not in existing]
-                tag_text = args.caption_separator.join(existing + new_tags)
-
-            with open(caption_file, "wt", encoding="utf-8") as f:
-                f.write(tag_text + "\n")
+        with open(caption_file, "wt", encoding="utf-8") as f:
+            f.write(tag_text + "\n")
 
 
 # -------------------------
@@ -661,27 +665,74 @@ def main(args):
     args.character_threshold = args.character_threshold if args.character_threshold is not None else args.thresh
 
     taggers = [t.strip() for t in args.taggers.split(",") if t.strip()]
-    per_tagger: Dict[str, Dict[str, List[str]]] = {
-        tagger: {p: [] for p in paths} for tagger in taggers
-    }
+    combined: Dict[str, List[str]] = {p: [] for p in paths}
+
+    if args.append_tags:
+        for image_path in paths:
+            caption_file = os.path.splitext(image_path)[0] + args.caption_extension
+            if not os.path.exists(caption_file):
+                continue
+            with open(caption_file, "rt", encoding="utf-8") as f:
+                existing = [
+                    t.strip()
+                    for t in f.read().strip("\n").split(args.caption_separator.strip())
+                    if t.strip()
+                ]
+            add_tags_to_map(combined, image_path, existing, not args.no_dedupe)
 
     for tagger in taggers:
         if tagger == "wd14":
-            run_wd14(paths, args, args.wd14_repo_id, args.model_dir, args.batch_size, args.dedupe, per_tagger[tagger])
+            general_threshold = args.wd14_general_threshold or args.wd14_thresh or args.general_threshold
+            character_threshold = args.wd14_character_threshold or args.wd14_thresh or args.character_threshold
+            run_wd14(
+                paths,
+                args,
+                args.wd14_repo_id,
+                args.model_dir,
+                args.batch_size,
+                not args.no_dedupe,
+                combined,
+                general_threshold,
+                character_threshold,
+            )
         elif tagger == "camie":
-            run_camie(paths, args, args.camie_repo_id, args.model_dir, args.batch_size, args.dedupe, per_tagger[tagger])
+            general_threshold = args.camie_general_threshold or args.camie_thresh or args.general_threshold
+            character_threshold = args.camie_character_threshold or args.camie_thresh or args.character_threshold
+            run_camie(
+                paths,
+                args,
+                args.camie_repo_id,
+                args.model_dir,
+                args.batch_size,
+                not args.no_dedupe,
+                combined,
+                general_threshold,
+                character_threshold,
+            )
         elif tagger == "pixai":
-            run_pixai(paths, args, args.pixai_repo_id, args.model_dir, args.batch_size, args.dedupe, per_tagger[tagger])
+            general_threshold = args.pixai_general_threshold or args.pixai_thresh or args.general_threshold
+            character_threshold = args.pixai_character_threshold or args.pixai_thresh or args.character_threshold
+            run_pixai(
+                paths,
+                args,
+                args.pixai_repo_id,
+                args.model_dir,
+                args.batch_size,
+                not args.no_dedupe,
+                combined,
+                general_threshold,
+                character_threshold,
+            )
         else:
             raise ValueError(f"Unknown tagger: {tagger}")
 
     if args.output_path:
         if args.output_path.endswith(".jsonl"):
-            write_jsonl_outputs(args.output_path, per_tagger, args.caption_separator)
+            write_jsonl_output(args.output_path, combined, args.caption_separator)
         else:
-            write_json_outputs(args.output_path, per_tagger)
+            write_json_output(args.output_path, combined, args.caption_separator)
     else:
-        write_caption_files(per_tagger, args)
+        write_caption_files(combined, args)
 
     logger.info("done")
 
@@ -697,6 +748,16 @@ def setup_parser() -> argparse.ArgumentParser:
     parser.add_argument("--wd14_repo_id", type=str, default=DEFAULT_WD14_TAGGER_REPO)
     parser.add_argument("--camie_repo_id", type=str, default=DEFAULT_CAMIE_REPO)
     parser.add_argument("--pixai_repo_id", type=str, default=DEFAULT_PIXAI_REPO)
+
+    parser.add_argument("--wd14_thresh", type=float, default=None)
+    parser.add_argument("--camie_thresh", type=float, default=None)
+    parser.add_argument("--pixai_thresh", type=float, default=None)
+    parser.add_argument("--wd14_general_threshold", type=float, default=None)
+    parser.add_argument("--wd14_character_threshold", type=float, default=None)
+    parser.add_argument("--camie_general_threshold", type=float, default=None)
+    parser.add_argument("--camie_character_threshold", type=float, default=None)
+    parser.add_argument("--pixai_general_threshold", type=float, default=None)
+    parser.add_argument("--pixai_character_threshold", type=float, default=None)
 
     parser.add_argument("--batch_size", type=int, default=1)
     parser.add_argument("--max_workers", type=int, default=4)
@@ -722,7 +783,7 @@ def setup_parser() -> argparse.ArgumentParser:
     parser.add_argument("--character_tag_expand", action="store_true")
     parser.add_argument("--undesired_tags", type=str, default="")
 
-    parser.add_argument("--dedupe", action="store_true", default=True)
+    parser.add_argument("--no_dedupe", action="store_true", help="disable de-duplication (not recommended)")
     parser.add_argument("--pixai_use_thresholds", action="store_true")
     return parser
 

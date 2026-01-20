@@ -5,7 +5,8 @@ Ferramenta enxuta para taguear imagens em lote usando **múltiplos taggers** via
 - Camie: `Camais03/camie-tagger-v2`
 - PixAI: `deepghs/pixai-tagger-v0.9-onnx`
 
-A saída é **separada por tagger** (não mistura vocabularios diferentes). Cada tagger gera seus próprios arquivos.
+**Saída única por imagem**: `nome_da_imagem.txt` com tags separadas por vírgulas.
+Quando você usa vários taggers, eles são executados em sequência e as tags vão sendo **anexadas**. As duplicadas são removidas **preservando as tags existentes primeiro**.
 
 ## Requisitos
 - Python 3.10+
@@ -23,33 +24,33 @@ pip install -r requirements.txt
 python tag_images_by_wd14_tagger.py /caminho/para/imagens --batch_size 8 --recursive
 ```
 
-## Usar vários taggers (sem misturar)
+## Usar vários taggers (sem misturar vocabularios)
 ```bash
 python tag_images_by_wd14_tagger.py /caminho/para/imagens \
   --taggers wd14,camie,pixai \
   --batch_size 8 --recursive
 ```
 
-Saída padrão (sem `--output_path`):
-- `imagem.wd14.txt`
-- `imagem.camie.txt`
-- `imagem.pixai.txt`
+## Prioridade de tags existentes (append)
+Se já existir um `.txt` com tags, use `--append_tags`.
+As tags existentes ficam **na frente** e as novas entram depois, sem duplicatas.
 
-Se usar `--output_path` (JSON/JSONL), gera um arquivo por tagger:
-- `saida.wd14.json` / `saida.wd14.jsonl`
-- `saida.camie.json` / `saida.camie.jsonl`
-- `saida.pixai.json` / `saida.pixai.jsonl`
+Exemplo:
+- existente: `boy,girl,hug,kiss`
+- taggers: `boy,muscular,lipstick,girl,hug,kiss,couple,dog,mature_female`
+- final: `boy,girl,hug,kiss,muscular,lipstick,couple,dog,mature_female`
 
-## Opções principais
-- `--taggers`: lista separada por vírgula (`wd14,camie,pixai`)
-- `--wd14_repo_id`, `--camie_repo_id`, `--pixai_repo_id`: repos HF
-- `--batch_size`: tamanho do batch no ONNX
-- `--recursive`: varre subpastas
-- `--append_tags`: adiciona tags ao invés de sobrescrever
-- `--output_path`: salva JSON/JSONL ao invés de .txt por imagem
-- `--thresh`, `--general_threshold`, `--character_threshold`: controle de cortes
-- `--character_tags_first`: coloca tags de personagem antes das gerais
-- `--always_first_tags`: força tags iniciais (ex: `1girl, 1boy`)
+## Thresholds por tagger
+- `--wd14_thresh`, `--camie_thresh`, `--pixai_thresh`
+- `--wd14_general_threshold`, `--wd14_character_threshold`
+- `--camie_general_threshold`, `--camie_character_threshold`
+- `--pixai_general_threshold`, `--pixai_character_threshold`
+
+## Script pronto (para /workspace ou /root)
+Use `run_tagger.sh`:
+```bash
+./run_tagger.sh /caminho/para/imagens 8
+```
 
 ## Observações
 - O primeiro uso baixa os modelos para `models/`.
