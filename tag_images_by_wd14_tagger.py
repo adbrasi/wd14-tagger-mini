@@ -501,7 +501,13 @@ def build_pixai_transform() -> transforms.Compose:
     )
 
 
-def load_pixai_assets(model_location: str, repo_id: str, force: bool, hf_token: Optional[str]) -> Tuple[str, str, str]:
+def load_pixai_assets(
+    model_location: str,
+    repo_id: str,
+    force: bool,
+    hf_token: Optional[str],
+) -> Tuple[str, str, str, Dict[str, str]]:
+    download_errors: Dict[str, str] = {}
     if not os.path.exists(model_location) or force:
         os.makedirs(model_location, exist_ok=True)
         logger.info(f"downloading PixAI model from HF: {repo_id}")
@@ -519,13 +525,15 @@ def load_pixai_assets(model_location: str, repo_id: str, force: bool, hf_token: 
                     force_download=True,
                     token=hf_token,
                 )
-            except Exception:
-                pass
+            except Exception as exc:
+                msg = str(exc).strip()
+                download_errors[file] = msg
+                logger.warning(f"PixAI download failed for {file}: {msg}")
 
     weights_path = os.path.join(model_location, PIXAI_PTH_FILE)
     tags_path = os.path.join(model_location, PIXAI_TAGS_JSON_FILE)
     ip_map_path = os.path.join(model_location, PIXAI_CHAR_IP_MAP_FILE)
-    return weights_path, tags_path, ip_map_path
+    return weights_path, tags_path, ip_map_path, download_errors
 
 
 def load_pixai_tag_map(tags_path: str) -> Tuple[Dict[int, str], int, int, int]:
@@ -643,14 +651,20 @@ def run_pixai(
     progress=None,
 ) -> None:
     model_location = os.path.join(model_dir, repo_id.replace("/", "_"))
-    weights_path, tags_path, ip_map_path = load_pixai_assets(model_location, repo_id, args.force_download, args.hf_token)
+    weights_path, tags_path, ip_map_path, download_errors = load_pixai_assets(
+        model_location, repo_id, args.force_download, args.hf_token
+    )
 
     missing = [p for p in (weights_path, tags_path, ip_map_path) if not os.path.exists(p)]
     if missing:
+        details = ""
+        if download_errors:
+            lines = [f"- {k}: {v}" for k, v in download_errors.items()]
+            details = "\nDownload errors:\n" + "\n".join(lines)
         raise FileNotFoundError(
             "PixAI assets not found. The repo is gated/private and requires a HF token.\n"
             "Set env HF_TOKEN (or HUGGINGFACE_HUB_TOKEN) or pass --hf_token.\n"
-            f"Missing: {', '.join(missing)}"
+            f"Missing: {', '.join(missing)}{details}"
         )
 
     index_to_tag, gen_count, char_count, total_tags = load_pixai_tag_map(tags_path)
@@ -868,6 +882,8 @@ def main(args):
             or os.environ.get("HUGGINGFACE_TOKEN")
             or os.environ.get("HUGGINGFACEHUB_API_TOKEN")
         )
+    if args.hf_token:
+        os.environ["HUGGINGFACE_HUB_TOKEN"] = args.hf_token
 
     args.general_threshold = args.general_threshold if args.general_threshold is not None else args.thresh
     args.character_threshold = args.character_threshold if args.character_threshold is not None else args.thresh
