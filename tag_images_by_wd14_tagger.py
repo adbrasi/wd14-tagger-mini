@@ -296,6 +296,7 @@ def run_wd14(
     result_map: Dict[str, List[str]],
     general_threshold: float,
     character_threshold: float,
+    progress=None,
 ) -> None:
     model_location = os.path.join(model_dir, repo_id.replace("/", "_"))
     if not os.path.exists(model_location) or args.force_download:
@@ -313,8 +314,9 @@ def run_wd14(
         batch_size = fixed_batch
 
     batches = batch_loader(paths, batch_size, args.max_workers, preprocess_wd14)
+    iterable = batches if progress is not None or args.no_progress else tqdm(batches, smoothing=0.0, desc="wd14", total=count_batches(len(paths), batch_size))
 
-    for batch_paths, batch_imgs in tqdm(batches, smoothing=0.0, desc="wd14"):
+    for batch_paths, batch_imgs in iterable:
         probs = session.run(None, {input_name: batch_imgs})[0]
         probs = probs[: len(batch_paths)]
 
@@ -340,6 +342,8 @@ def run_wd14(
 
             tags = postprocess_tags(tags, args)
             add_tags_to_map(result_map, image_path, tags, dedupe)
+        if progress is not None:
+            progress.update(1)
 
     del session
     cleanup_memory()
@@ -373,6 +377,7 @@ def run_camie(
     result_map: Dict[str, List[str]],
     general_threshold: float,
     character_threshold: float,
+    progress=None,
 ) -> None:
     model_location = os.path.join(model_dir, repo_id.replace("/", "_"))
     if not os.path.exists(model_location) or args.force_download:
@@ -391,8 +396,9 @@ def run_camie(
         batch_size = fixed_batch
 
     batches = batch_loader(paths, batch_size, args.max_workers, lambda img: preprocess_imagenet(img, img_size))
+    iterable = batches if progress is not None or args.no_progress else tqdm(batches, smoothing=0.0, desc="camie", total=count_batches(len(paths), batch_size))
 
-    for batch_paths, batch_imgs in tqdm(batches, smoothing=0.0, desc="camie"):
+    for batch_paths, batch_imgs in iterable:
         outputs = session.run(None, {input_name: batch_imgs})
         logits = outputs[1] if len(outputs) >= 2 else outputs[0]
         probs = sigmoid(logits)
@@ -421,6 +427,8 @@ def run_camie(
 
             tags = postprocess_tags(tags, args)
             add_tags_to_map(result_map, image_path, tags, dedupe)
+        if progress is not None:
+            progress.update(1)
 
     del session
     cleanup_memory()
@@ -528,6 +536,7 @@ def run_pixai(
     result_map: Dict[str, List[str]],
     general_threshold: float,
     character_threshold: float,
+    progress=None,
 ) -> None:
     model_location = os.path.join(model_dir, repo_id.replace("/", "_"))
     if not os.path.exists(model_location) or args.force_download:
@@ -550,8 +559,9 @@ def run_pixai(
     thresholds = load_pixai_thresholds(model_location) if args.pixai_use_thresholds else {}
 
     batches = batch_loader(paths, batch_size, args.max_workers, lambda img: preprocess_pixai(img, image_size, mean, std))
+    iterable = batches if progress is not None or args.no_progress else tqdm(batches, smoothing=0.0, desc="pixai", total=count_batches(len(paths), batch_size))
 
-    for batch_paths, batch_imgs in tqdm(batches, smoothing=0.0, desc="pixai"):
+    for batch_paths, batch_imgs in iterable:
         logits = session.run(None, {input_name: batch_imgs})[0]
         probs = sigmoid(logits)
 
@@ -577,6 +587,8 @@ def run_pixai(
 
             tags_out = postprocess_tags(tags_out, args)
             add_tags_to_map(result_map, image_path, tags_out, dedupe)
+        if progress is not None:
+            progress.update(1)
 
     del session
     cleanup_memory()
@@ -652,6 +664,41 @@ def write_caption_files(combined: Dict[str, List[str]], args) -> None:
             f.write(tag_text + "\n")
 
 
+def count_batches(num_images: int, batch_size: int) -> int:
+    if batch_size <= 0:
+        return 0
+    return (num_images + batch_size - 1) // batch_size
+
+
+def recommend_batch_by_vram() -> Optional[int]:
+    try:
+        import subprocess
+
+        result = subprocess.run(
+            [
+                "nvidia-smi",
+                "--query-gpu=memory.free",
+                "--format=csv,noheader,nounits",
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if result.returncode != 0:
+            return None
+        free_mb = int(result.stdout.strip().splitlines()[0])
+    except Exception:
+        return None
+
+    if free_mb >= 30000:
+        return 16
+    if free_mb >= 20000:
+        return 8
+    if free_mb >= 12000:
+        return 4
+    return 2
+
+
 # -------------------------
 # Main
 # -------------------------
@@ -664,8 +711,25 @@ def main(args):
     args.general_threshold = args.general_threshold if args.general_threshold is not None else args.thresh
     args.character_threshold = args.character_threshold if args.character_threshold is not None else args.thresh
 
-    taggers = [t.strip() for t in args.taggers.split(",") if t.strip()]
+    if args.one_tagger:
+        taggers = [args.one_tagger]
+    else:
+        taggers = [t.strip() for t in args.taggers.split(",") if t.strip()]
+
+    if args.smoke_test_image:
+        if not os.path.exists(args.smoke_test_image):
+            raise FileNotFoundError(f"smoke_test_image not found: {args.smoke_test_image}")
+        paths = [args.smoke_test_image]
+        if not args.one_tagger and not args.taggers:
+            taggers = ["wd14", "camie", "pixai"]
+        logger.info(f"smoke test on image: {args.smoke_test_image}")
+
     combined: Dict[str, List[str]] = {p: [] for p in paths}
+
+    if args.suggest_batch:
+        suggestion = recommend_batch_by_vram()
+        if suggestion is not None:
+            logger.info(f"Suggested batch_size based on free VRAM: {suggestion}")
 
     if args.append_tags:
         for image_path in paths:
@@ -679,6 +743,15 @@ def main(args):
                     if t.strip()
                 ]
             add_tags_to_map(combined, image_path, existing, not args.no_dedupe)
+
+    total_batches = 0
+    if not args.no_progress:
+        for tagger in taggers:
+            bs = args.batch_size
+            total_batches += count_batches(len(paths), bs)
+        overall = tqdm(total=total_batches, desc="total", smoothing=0.0) if total_batches > 0 else None
+    else:
+        overall = None
 
     for tagger in taggers:
         if tagger == "wd14":
@@ -694,6 +767,7 @@ def main(args):
                 combined,
                 general_threshold,
                 character_threshold,
+                overall,
             )
         elif tagger == "camie":
             general_threshold = args.camie_general_threshold or args.camie_thresh or args.general_threshold
@@ -708,6 +782,7 @@ def main(args):
                 combined,
                 general_threshold,
                 character_threshold,
+                overall,
             )
         elif tagger == "pixai":
             general_threshold = args.pixai_general_threshold or args.pixai_thresh or args.general_threshold
@@ -722,9 +797,13 @@ def main(args):
                 combined,
                 general_threshold,
                 character_threshold,
+                overall,
             )
         else:
             raise ValueError(f"Unknown tagger: {tagger}")
+
+    if overall is not None:
+        overall.close()
 
     if args.output_path:
         if args.output_path.endswith(".jsonl"):
@@ -742,8 +821,10 @@ def setup_parser() -> argparse.ArgumentParser:
     parser.add_argument("train_data_dir", type=str, help="directory for images")
 
     parser.add_argument("--taggers", type=str, default="wd14", help="comma list: wd14,camie,pixai")
+    parser.add_argument("--one_tagger", type=str, choices=["wd14", "camie", "pixai"], default=None)
     parser.add_argument("--model_dir", type=str, default="models")
     parser.add_argument("--force_download", action="store_true")
+    parser.add_argument("--smoke_test_image", type=str, default=None)
 
     parser.add_argument("--wd14_repo_id", type=str, default=DEFAULT_WD14_TAGGER_REPO)
     parser.add_argument("--camie_repo_id", type=str, default=DEFAULT_CAMIE_REPO)
@@ -761,6 +842,8 @@ def setup_parser() -> argparse.ArgumentParser:
 
     parser.add_argument("--batch_size", type=int, default=1)
     parser.add_argument("--max_workers", type=int, default=4)
+    parser.add_argument("--no_progress", action="store_true")
+    parser.add_argument("--suggest_batch", action="store_true")
 
     parser.add_argument("--output_path", type=str, default=None)
     parser.add_argument("--caption_extension", type=str, default=".txt")

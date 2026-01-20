@@ -40,6 +40,22 @@ Exemplo:
 - taggers: `boy,muscular,lipstick,girl,hug,kiss,couple,dog,mature_female`
 - final: `boy,girl,hug,kiss,muscular,lipstick,couple,dog,mature_female`
 
+## Progress
+- Por padrão há barra de progresso por tagger e total.
+- Para desligar: `--no_progress`
+
+## Rodar apenas um tagger
+```bash
+python tag_images_by_wd14_tagger.py /caminho/para/imagens --one_tagger wd14
+```
+
+## Smoke test (uma imagem)
+```bash
+python tag_images_by_wd14_tagger.py /caminho/para/imagens \
+  --smoke_test_image /caminho/para/uma_imagem.png \
+  --taggers wd14,camie,pixai
+```
+
 ## Thresholds por tagger
 - `--wd14_thresh`, `--camie_thresh`, `--pixai_thresh`
 - `--wd14_general_threshold`, `--wd14_character_threshold`
