@@ -19,6 +19,16 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
+## PixAI gated model (token HF)
+O modelo `pixai-labs/pixai-tagger-v0.9` é **gated**. Você precisa de token:
+```bash
+export HF_TOKEN=seu_token
+```
+Ou use:
+```bash
+--hf_token seu_token
+```
+
 ## Uso básico
 ```bash
 python tag_images_by_wd14_tagger.py /caminho/para/imagens --batch_size 8 --recursive
