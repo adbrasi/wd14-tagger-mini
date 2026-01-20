@@ -11,6 +11,9 @@ from typing import Dict, Iterable, List, Optional, Tuple
 import numpy as np
 import onnx
 import onnxruntime as ort
+import timm
+import torch
+import torchvision.transforms as transforms
 from huggingface_hub import hf_hub_download
 from PIL import Image
 from tqdm import tqdm
@@ -24,20 +27,18 @@ IMAGE_SIZE = 448
 
 DEFAULT_WD14_TAGGER_REPO = "SmilingWolf/wd-eva02-large-tagger-v3"
 DEFAULT_CAMIE_REPO = "Camais03/camie-tagger-v2"
-DEFAULT_PIXAI_REPO = "deepghs/pixai-tagger-v0.9-onnx"
+DEFAULT_PIXAI_REPO = "pixai-labs/pixai-tagger-v0.9"
 
 WD14_CSV_FILE = "selected_tags.csv"
 WD14_ONNX_NAME = "model.onnx"
 
 CAMIE_ONNX_FILE = "camie-tagger-v2.onnx"
 CAMIE_META_FILE = "camie-tagger-v2-metadata.json"
+CAMIE_CATEGORY_THRESHOLDS_FILE = "category_thresholds.csv"
 
-PIXAI_ONNX_FILE = "model.onnx"
-PIXAI_TAGS_FILE = "selected_tags.csv"
-PIXAI_CATEGORIES_FILE = "categories.json"
-PIXAI_PREPROCESS_FILE = "preprocess.json"
-PIXAI_THRESHOLDS_FILE = "thresholds.csv"
+PIXAI_PTH_FILE = "model_v0.9.pth"
 PIXAI_TAGS_JSON_FILE = "tags_v0.9_13k.json"
+PIXAI_CHAR_IP_MAP_FILE = "char_ip_map.json"
 PIXAI_CATEGORY_THRESHOLDS_FILE = "category_thresholds.csv"
 
 
@@ -148,26 +149,6 @@ def preprocess_imagenet(image: Image.Image, image_size: int) -> np.ndarray:
     mean = np.array([0.485, 0.456, 0.406], dtype=np.float32)
     std = np.array([0.229, 0.224, 0.225], dtype=np.float32)
     img = (img - mean) / std
-    img = img.transpose(2, 0, 1)
-    return img
-
-
-def preprocess_pixai(image: Image.Image, image_size: int, mean: List[float], std: List[float]) -> np.ndarray:
-    if image.mode in ("RGBA", "LA") or "transparency" in image.info:
-        image = image.convert("RGBA")
-    elif image.mode != "RGB":
-        image = image.convert("RGB")
-
-    if image.mode == "RGBA":
-        background = Image.new("RGB", image.size, (255, 255, 255))
-        background.paste(image, mask=image.split()[3])
-        image = background
-
-    image = image.resize((image_size, image_size), Image.Resampling.LANCZOS)
-    img = np.array(image).astype(np.float32) / 255.0
-    mean_arr = np.array(mean, dtype=np.float32)
-    std_arr = np.array(std, dtype=np.float32)
-    img = (img - mean_arr) / std_arr
     img = img.transpose(2, 0, 1)
     return img
 
@@ -359,6 +340,43 @@ def load_camie_metadata(path: str) -> Tuple[Dict[int, str], Dict[str, str], int]
     return idx_map, tag_to_category, int(img_size)
 
 
+def load_camie_category_thresholds(model_location: str, override_path: Optional[str]) -> Dict[str, float]:
+    thresholds: Dict[str, float] = {}
+    path = override_path or os.path.join(model_location, CAMIE_CATEGORY_THRESHOLDS_FILE)
+    if not path or not os.path.exists(path):
+        return thresholds
+
+    with open(path, "r", encoding="utf-8") as f:
+        reader = csv.reader(f)
+        rows = [row for row in reader]
+
+    if not rows:
+        return thresholds
+
+    header = [c.strip().lower() for c in rows[0]]
+    name_idx = header.index("name") if "name" in header else None
+    category_idx = header.index("category") if "category" in header else None
+    th_idx = header.index("threshold") if "threshold" in header else None
+    start_row = 1 if (name_idx is not None or category_idx is not None) else 0
+
+    for row in rows[start_row:]:
+        if not row:
+            continue
+        try:
+            th = float(row[th_idx]) if th_idx is not None else float(row[-1])
+        except Exception:
+            continue
+        name = row[name_idx].strip().lower() if name_idx is not None and name_idx < len(row) else ""
+        category = row[category_idx].strip().lower() if category_idx is not None and category_idx < len(row) else ""
+
+        if name:
+            thresholds[name] = th
+        elif category:
+            thresholds[category] = th
+
+    return thresholds
+
+
 def run_camie(
     paths: List[str],
     args,
@@ -377,11 +395,21 @@ def run_camie(
         logger.info(f"downloading Camie model from HF: {repo_id}")
         hf_hub_download(repo_id=repo_id, filename=CAMIE_ONNX_FILE, local_dir=model_location, force_download=True)
         hf_hub_download(repo_id=repo_id, filename=CAMIE_META_FILE, local_dir=model_location, force_download=True)
+        try:
+            hf_hub_download(repo_id=repo_id, filename=CAMIE_CATEGORY_THRESHOLDS_FILE, local_dir=model_location, force_download=True)
+        except Exception:
+            pass
 
     onnx_path = os.path.join(model_location, CAMIE_ONNX_FILE)
     meta_path = os.path.join(model_location, CAMIE_META_FILE)
 
     idx_to_tag, tag_to_category, img_size = load_camie_metadata(meta_path)
+    category_thresholds = load_camie_category_thresholds(model_location, args.camie_category_thresholds_file)
+    min_confidence = args.camie_min_confidence
+    if not category_thresholds and not args.camie_thresh and not args.camie_general_threshold and not args.camie_character_threshold:
+        # Default to macro-optimized threshold (from official docs)
+        general_threshold = 0.492
+        character_threshold = 0.492
     session, input_name, fixed_batch = build_session(onnx_path)
     if fixed_batch and fixed_batch > 0 and batch_size != fixed_batch:
         logger.warning(f"Camie batch {batch_size} != model batch {fixed_batch}; using {fixed_batch}")
@@ -398,24 +426,35 @@ def run_camie(
         for image_path, prob in zip(batch_paths, probs):
             tags: List[str] = []
             for idx, p in enumerate(prob):
+                if p < min_confidence:
+                    continue
                 tag = idx_to_tag.get(idx)
                 if tag is None:
                     continue
                 category = tag_to_category.get(tag, "general")
-                if category.lower() == "character":
-                    if p >= character_threshold:
-                        if args.character_tags_first:
-                            tags.insert(0, tag)
-                        else:
-                            tags.append(tag)
-                elif category.lower() == "rating":
+                category_key = category.lower()
+                cat_threshold = category_thresholds.get(category_key)
+                if cat_threshold is None:
+                    if category_key == "character":
+                        cat_threshold = character_threshold
+                    else:
+                        cat_threshold = general_threshold
+
+                if p < cat_threshold:
+                    continue
+
+                if category_key == "character":
+                    if args.character_tags_first:
+                        tags.insert(0, tag)
+                    else:
+                        tags.append(tag)
+                elif category_key == "rating":
                     if args.use_rating_tags:
                         tags.insert(0, tag)
                     elif args.use_rating_tags_as_last_tag:
                         tags.append(tag)
                 else:
-                    if p >= general_threshold:
-                        tags.append(tag)
+                    tags.append(tag)
 
             tags = postprocess_tags(tags, args)
             add_tags_to_map(result_map, image_path, tags, dedupe)
@@ -427,138 +466,85 @@ def run_camie(
 
 
 # -------------------------
-# PixAI tagger (ONNX)
+# PixAI tagger (PyTorch)
 # -------------------------
 
-def load_pixai_tags(model_location: str) -> Tuple[List[str], Dict[str, str]]:
-    categories: Dict[str, str] = {}
-    categories_path = os.path.join(model_location, PIXAI_CATEGORIES_FILE)
-    if os.path.exists(categories_path):
-        with open(categories_path, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        if isinstance(data, dict):
-            categories = {str(k): v for k, v in data.items()}
-        elif isinstance(data, list):
-            for item in data:
-                if not isinstance(item, dict):
-                    continue
-                if "category" in item and "name" in item:
-                    categories[str(item["category"])] = item["name"]
 
-    tags: List[str] = []
-    category_by_tag: Dict[str, str] = {}
+class PixAITaggingHead(torch.nn.Module):
+    def __init__(self, input_dim: int, num_classes: int) -> None:
+        super().__init__()
+        self.head = torch.nn.Sequential(torch.nn.Linear(input_dim, num_classes))
 
-    tags_json_path = os.path.join(model_location, PIXAI_TAGS_JSON_FILE)
-    if os.path.exists(tags_json_path):
-        with open(tags_json_path, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        tag_map = data.get("tag_map", {})
-        tag_split = data.get("tag_split", {})
-        gen_count = int(tag_split.get("gen_tag_count", 0))
-        for tag, idx in sorted(tag_map.items(), key=lambda kv: kv[1]):
-            tags.append(tag)
-            if gen_count:
-                category_by_tag[tag] = "general" if idx < gen_count else "character"
-        return tags, category_by_tag
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        logits = self.head(x)
+        return torch.sigmoid(logits)
 
-    tags_path = os.path.join(model_location, PIXAI_TAGS_FILE)
+
+def pixai_pil_to_rgb(image: Image.Image) -> Image.Image:
+    if image.mode == "RGBA":
+        image.load()
+        background = Image.new("RGB", image.size, (255, 255, 255))
+        background.paste(image, mask=image.split()[3])
+        return background
+    if image.mode == "P":
+        return pixai_pil_to_rgb(image.convert("RGBA"))
+    return image.convert("RGB")
+
+
+def build_pixai_transform() -> transforms.Compose:
+    return transforms.Compose(
+        [
+            transforms.Resize((448, 448)),
+            transforms.ToTensor(),
+            transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5]),
+        ]
+    )
+
+
+def load_pixai_assets(model_location: str, repo_id: str, force: bool) -> Tuple[str, str, str]:
+    if not os.path.exists(model_location) or force:
+        os.makedirs(model_location, exist_ok=True)
+        logger.info(f"downloading PixAI model from HF: {repo_id}")
+        for file in [
+            PIXAI_PTH_FILE,
+            PIXAI_TAGS_JSON_FILE,
+            PIXAI_CHAR_IP_MAP_FILE,
+            PIXAI_CATEGORY_THRESHOLDS_FILE,
+        ]:
+            try:
+                hf_hub_download(repo_id=repo_id, filename=file, local_dir=model_location, force_download=True)
+            except Exception:
+                pass
+
+    weights_path = os.path.join(model_location, PIXAI_PTH_FILE)
+    tags_path = os.path.join(model_location, PIXAI_TAGS_JSON_FILE)
+    ip_map_path = os.path.join(model_location, PIXAI_CHAR_IP_MAP_FILE)
+    return weights_path, tags_path, ip_map_path
+
+
+def load_pixai_tag_map(tags_path: str) -> Tuple[Dict[int, str], int, int, int]:
     with open(tags_path, "r", encoding="utf-8") as f:
-        reader = csv.reader(f)
-        rows = [row for row in reader]
-
-    if not rows:
-        return tags, category_by_tag
-
-    header = [c.strip().lower() for c in rows[0]]
-    has_header = "name" in header or "tag" in header or "tag_id" in header or "id" in header
-    name_idx = header.index("name") if "name" in header else None
-    category_idx = header.index("category") if "category" in header else None
-    start_row = 1 if has_header else 0
-
-    for row in rows[start_row:]:
-        if not row:
-            continue
-        if name_idx is not None and name_idx < len(row):
-            tag_name = row[name_idx].strip()
-        else:
-            tag_name = row[0].strip()
-        if not tag_name:
-            continue
-        tags.append(tag_name)
-        if category_idx is not None and category_idx < len(row):
-            category_id = str(row[category_idx]).strip()
-            if category_id and category_id in categories:
-                category_by_tag[tag_name] = categories[category_id]
-
-    return tags, category_by_tag
+        tag_info = json.load(f)
+    tag_map = tag_info["tag_map"]
+    tag_split = tag_info["tag_split"]
+    gen_count = int(tag_split["gen_tag_count"])
+    char_count = int(tag_split["character_tag_count"])
+    index_to_tag = {int(v): k for k, v in tag_map.items()}
+    return index_to_tag, gen_count, char_count, len(tag_map)
 
 
-def load_pixai_preprocess(model_location: str) -> Tuple[int, List[float], List[float]]:
-    image_size = IMAGE_SIZE
-    mean = [0.5, 0.5, 0.5]
-    std = [0.5, 0.5, 0.5]
-
-    preprocess_path = os.path.join(model_location, PIXAI_PREPROCESS_FILE)
-    if os.path.exists(preprocess_path):
-        with open(preprocess_path, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        for key in ("image_size", "img_size", "input_size", "size"):
-            if key in data:
-                value = data[key]
-                if isinstance(value, list) and value:
-                    image_size = int(value[0])
-                elif isinstance(value, int):
-                    image_size = int(value)
-        if "mean" in data:
-            mean = data["mean"]
-        if "std" in data:
-            std = data["std"]
-
-    return image_size, mean, std
-
-
-def load_pixai_thresholds(model_location: str) -> Dict[str, float]:
-    thresholds: Dict[str, float] = {}
-    thresholds_path = os.path.join(model_location, PIXAI_THRESHOLDS_FILE)
-    if not os.path.exists(thresholds_path):
-        return thresholds
-
-    with open(thresholds_path, "r", encoding="utf-8") as f:
-        reader = csv.reader(f)
-        rows = [row for row in reader]
-
-    if not rows:
-        return thresholds
-
-    header = [c.lower() for c in rows[0]]
-    if "tag" in header or "name" in header:
-        tag_idx = header.index("tag") if "tag" in header else header.index("name")
-        th_idx = header.index("threshold") if "threshold" in header else None
-        for row in rows[1:]:
-            if not row:
-                continue
-            tag = row[tag_idx]
-            try:
-                th = float(row[th_idx]) if th_idx is not None else float(row[-1])
-            except Exception:
-                continue
-            thresholds[tag] = th
-    else:
-        for row in rows:
-            if len(row) < 2:
-                continue
-            try:
-                thresholds[row[0]] = float(row[1])
-            except Exception:
-                continue
-
-    return thresholds
-
-
-def load_pixai_category_thresholds(model_location: str) -> Dict[str, float]:
-    thresholds: Dict[str, float] = {}
-    path = os.path.join(model_location, PIXAI_CATEGORY_THRESHOLDS_FILE)
+def load_pixai_char_ip_map(path: str) -> Dict[str, List[str]]:
     if not os.path.exists(path):
+        return {}
+    with open(path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+    return {k: v for k, v in data.items()}
+
+
+def load_pixai_category_thresholds(model_location: str, override_path: Optional[str] = None) -> Dict[str, float]:
+    thresholds: Dict[str, float] = {}
+    path = override_path or os.path.join(model_location, PIXAI_CATEGORY_THRESHOLDS_FILE)
+    if not path or not os.path.exists(path):
         return thresholds
 
     with open(path, "r", encoding="utf-8") as f:
@@ -592,6 +578,52 @@ def load_pixai_category_thresholds(model_location: str) -> Dict[str, float]:
     return thresholds
 
 
+def build_pixai_model(weights_path: str, device: str, num_classes: int) -> torch.nn.Module:
+    base_model_repo = "hf_hub:SmilingWolf/wd-eva02-large-tagger-v3"
+    encoder = timm.create_model(base_model_repo, pretrained=False)
+    encoder.reset_classifier(0)
+    decoder = PixAITaggingHead(1024, num_classes)
+    model = torch.nn.Sequential(encoder, decoder)
+    try:
+        state_dict = torch.load(weights_path, map_location=device, weights_only=True)
+    except TypeError:
+        state_dict = torch.load(weights_path, map_location=device)
+    model.load_state_dict(state_dict)
+    model.to(device)
+    model.eval()
+    return model
+
+
+def batch_loader_torch(
+    paths: List[str],
+    batch_size: int,
+    max_workers: int,
+    transform,
+) -> Iterable[Tuple[List[str], torch.Tensor]]:
+    batches = [paths[i : i + batch_size] for i in range(0, len(paths), batch_size)]
+
+    def _load(path: str) -> Tuple[str, torch.Tensor]:
+        with Image.open(path) as img:
+            img = pixai_pil_to_rgb(img)
+            tensor = transform(img)
+        return path, tensor
+
+    for batch in batches:
+        if max_workers and max_workers > 1:
+            with ThreadPoolExecutor(max_workers=max_workers) as ex:
+                loaded = list(ex.map(_load, batch))
+        else:
+            loaded = [_load(p) for p in batch]
+
+        if not loaded:
+            yield [], torch.zeros((0, 3, 448, 448), dtype=torch.float32)
+            continue
+
+        paths_b, tensors_b = zip(*loaded)
+        batch_tensor = torch.stack(tensors_b)
+        yield list(paths_b), batch_tensor
+
+
 def run_pixai(
     paths: List[str],
     args,
@@ -605,76 +637,103 @@ def run_pixai(
     progress=None,
 ) -> None:
     model_location = os.path.join(model_dir, repo_id.replace("/", "_"))
-    if not os.path.exists(model_location) or args.force_download:
-        os.makedirs(model_dir, exist_ok=True)
-        logger.info(f"downloading PixAI ONNX model from HF: {repo_id}")
-        for file in [
-            PIXAI_ONNX_FILE,
-            PIXAI_TAGS_FILE,
-            PIXAI_PREPROCESS_FILE,
-            PIXAI_CATEGORIES_FILE,
-            PIXAI_THRESHOLDS_FILE,
-            PIXAI_TAGS_JSON_FILE,
-            PIXAI_CATEGORY_THRESHOLDS_FILE,
-        ]:
-            try:
-                hf_hub_download(repo_id=repo_id, filename=file, local_dir=model_location, force_download=True)
-            except Exception:
-                pass
+    weights_path, tags_path, ip_map_path = load_pixai_assets(model_location, repo_id, args.force_download)
 
-    onnx_path = os.path.join(model_location, PIXAI_ONNX_FILE)
-    session, input_name, fixed_batch = build_session(onnx_path)
-    if fixed_batch and fixed_batch > 0 and batch_size != fixed_batch:
-        logger.warning(f"PixAI batch {batch_size} != model batch {fixed_batch}; using {fixed_batch}")
-        batch_size = fixed_batch
+    index_to_tag, gen_count, char_count, total_tags = load_pixai_tag_map(tags_path)
+    char_ip_map = load_pixai_char_ip_map(ip_map_path)
 
-    tags, categories = load_pixai_tags(model_location)
-    image_size, mean, std = load_pixai_preprocess(model_location)
-    thresholds = load_pixai_thresholds(model_location) if args.pixai_use_thresholds else {}
-    category_thresholds = load_pixai_category_thresholds(model_location)
-
+    category_thresholds = load_pixai_category_thresholds(model_location, args.pixai_category_thresholds_file)
     if not args.pixai_general_threshold and not args.pixai_thresh:
         general_override = category_thresholds.get("general") or category_thresholds.get("0")
         if general_override is not None:
             general_threshold = general_override
+        else:
+            general_threshold = 0.30
     if not args.pixai_character_threshold and not args.pixai_thresh:
         character_override = category_thresholds.get("character") or category_thresholds.get("4")
         if character_override is not None:
             character_threshold = character_override
+        else:
+            character_threshold = 0.85
 
-    batches = batch_loader(paths, batch_size, args.max_workers, lambda img: preprocess_pixai(img, image_size, mean, std))
+    device = args.pixai_device
+    if device == "auto":
+        if torch.cuda.is_available():
+            try:
+                torch.zeros(1).to("cuda")
+                device = "cuda"
+            except Exception:
+                device = "cpu"
+        else:
+            device = "cpu"
+
+    model = build_pixai_model(weights_path, device, total_tags)
+    transform = build_pixai_transform()
+
+    batches = batch_loader_torch(paths, batch_size, args.max_workers, transform)
     iterable = batches if progress is not None or args.no_progress else tqdm(batches, smoothing=0.0, desc="pixai", total=count_batches(len(paths), batch_size))
 
-    for batch_paths, batch_imgs in iterable:
-        logits = session.run(None, {input_name: batch_imgs})[0]
-        probs = sigmoid(logits)
+    mode = args.pixai_mode
+    topk_general = max(0, min(int(args.pixai_topk_general), gen_count))
+    topk_character = max(0, min(int(args.pixai_topk_character), char_count))
 
-        for image_path, prob in zip(batch_paths, probs):
-            tags_out: List[str] = []
-            for idx, p in enumerate(prob):
-                if idx >= len(tags):
+    for batch_paths, batch_tensor in iterable:
+        if device == "cuda":
+            batch_tensor = batch_tensor.pin_memory().to(device, non_blocking=True)
+        else:
+            batch_tensor = batch_tensor.to(device)
+
+        with torch.inference_mode():
+            probs = model(batch_tensor)
+
+        for i, image_path in enumerate(batch_paths):
+            prob = probs[i]
+            if mode == "topk":
+                gen_scores, gen_idx = (torch.tensor([]), torch.tensor([], dtype=torch.long))
+                char_scores, char_idx = (torch.tensor([]), torch.tensor([], dtype=torch.long))
+                if topk_general > 0:
+                    gen_scores, gen_idx = torch.topk(prob[:gen_count], topk_general)
+                if topk_character > 0:
+                    char_scores, char_idx = torch.topk(prob[gen_count : gen_count + char_count], topk_character)
+                    char_idx = char_idx + gen_count
+                combined_idx = torch.cat((gen_idx, char_idx)).cpu()
+            else:
+                general_mask = prob[:gen_count] > general_threshold
+                character_mask = prob[gen_count : gen_count + char_count] > character_threshold
+                gen_idx = general_mask.nonzero(as_tuple=True)[0]
+                char_idx = character_mask.nonzero(as_tuple=True)[0] + gen_count
+                combined_idx = torch.cat((gen_idx, char_idx)).cpu()
+
+            general_tags: List[str] = []
+            character_tags: List[str] = []
+            for idx in combined_idx.tolist():
+                tag = index_to_tag.get(int(idx))
+                if tag is None:
                     continue
-                tag = tags[idx]
-                category = categories.get(tag, "general") if categories else "general"
+                if idx < gen_count:
+                    general_tags.append(tag)
+                else:
+                    character_tags.append(tag)
 
-                th = thresholds.get(tag)
-                if th is None:
-                    if category.lower() == "character":
-                        th = character_threshold
-                    else:
-                        th = general_threshold
-                if p >= th:
-                    if category.lower() == "character" and args.character_tags_first:
-                        tags_out.insert(0, tag)
-                    else:
-                        tags_out.append(tag)
+            ip_tags: List[str] = []
+            if not args.pixai_no_ip:
+                for tag in character_tags:
+                    if tag in char_ip_map:
+                        ip_tags.extend(char_ip_map[tag])
+                ip_tags = sorted(set(ip_tags))
+
+            if args.character_tags_first:
+                tags_out = character_tags + ip_tags + general_tags
+            else:
+                tags_out = general_tags + character_tags + ip_tags
 
             tags_out = postprocess_tags(tags_out, args)
             add_tags_to_map(result_map, image_path, tags_out, dedupe)
+
         if progress is not None:
             progress.update(1)
 
-    del session
+    del model
     cleanup_memory()
 
 
@@ -922,6 +981,9 @@ def setup_parser() -> argparse.ArgumentParser:
     parser.add_argument("--camie_character_threshold", type=float, default=None)
     parser.add_argument("--pixai_general_threshold", type=float, default=None)
     parser.add_argument("--pixai_character_threshold", type=float, default=None)
+    parser.add_argument("--camie_min_confidence", type=float, default=0.1)
+    parser.add_argument("--camie_category_thresholds_file", type=str, default=None)
+    parser.add_argument("--pixai_category_thresholds_file", type=str, default=None)
 
     parser.add_argument("--batch_size", type=int, default=1)
     parser.add_argument("--max_workers", type=int, default=4)
@@ -950,7 +1012,11 @@ def setup_parser() -> argparse.ArgumentParser:
     parser.add_argument("--undesired_tags", type=str, default="")
 
     parser.add_argument("--no_dedupe", action="store_true", help="disable de-duplication (not recommended)")
-    parser.add_argument("--pixai_use_thresholds", action="store_true")
+    parser.add_argument("--pixai_mode", type=str, choices=["threshold", "topk"], default="threshold")
+    parser.add_argument("--pixai_topk_general", type=int, default=25)
+    parser.add_argument("--pixai_topk_character", type=int, default=10)
+    parser.add_argument("--pixai_no_ip", action="store_true")
+    parser.add_argument("--pixai_device", type=str, choices=["auto", "cuda", "cpu"], default="auto")
     return parser
 
 
