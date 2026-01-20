@@ -501,7 +501,7 @@ def build_pixai_transform() -> transforms.Compose:
     )
 
 
-def load_pixai_assets(model_location: str, repo_id: str, force: bool) -> Tuple[str, str, str]:
+def load_pixai_assets(model_location: str, repo_id: str, force: bool, hf_token: Optional[str]) -> Tuple[str, str, str]:
     if not os.path.exists(model_location) or force:
         os.makedirs(model_location, exist_ok=True)
         logger.info(f"downloading PixAI model from HF: {repo_id}")
@@ -512,7 +512,13 @@ def load_pixai_assets(model_location: str, repo_id: str, force: bool) -> Tuple[s
             PIXAI_CATEGORY_THRESHOLDS_FILE,
         ]:
             try:
-                hf_hub_download(repo_id=repo_id, filename=file, local_dir=model_location, force_download=True)
+                hf_hub_download(
+                    repo_id=repo_id,
+                    filename=file,
+                    local_dir=model_location,
+                    force_download=True,
+                    token=hf_token,
+                )
             except Exception:
                 pass
 
@@ -637,7 +643,15 @@ def run_pixai(
     progress=None,
 ) -> None:
     model_location = os.path.join(model_dir, repo_id.replace("/", "_"))
-    weights_path, tags_path, ip_map_path = load_pixai_assets(model_location, repo_id, args.force_download)
+    weights_path, tags_path, ip_map_path = load_pixai_assets(model_location, repo_id, args.force_download, args.hf_token)
+
+    missing = [p for p in (weights_path, tags_path, ip_map_path) if not os.path.exists(p)]
+    if missing:
+        raise FileNotFoundError(
+            "PixAI assets not found. The repo is gated/private and requires a HF token.\n"
+            "Set env HF_TOKEN (or HUGGINGFACE_HUB_TOKEN) or pass --hf_token.\n"
+            f"Missing: {', '.join(missing)}"
+        )
 
     index_to_tag, gen_count, char_count, total_tags = load_pixai_tag_map(tags_path)
     char_ip_map = load_pixai_char_ip_map(ip_map_path)
@@ -847,6 +861,14 @@ def recommend_batch_by_vram() -> Optional[int]:
 # -------------------------
 
 def main(args):
+    if not args.hf_token:
+        args.hf_token = (
+            os.environ.get("HUGGINGFACE_HUB_TOKEN")
+            or os.environ.get("HF_TOKEN")
+            or os.environ.get("HUGGINGFACE_TOKEN")
+            or os.environ.get("HUGGINGFACEHUB_API_TOKEN")
+        )
+
     args.general_threshold = args.general_threshold if args.general_threshold is not None else args.thresh
     args.character_threshold = args.character_threshold if args.character_threshold is not None else args.thresh
 
@@ -1017,6 +1039,7 @@ def setup_parser() -> argparse.ArgumentParser:
     parser.add_argument("--pixai_topk_character", type=int, default=10)
     parser.add_argument("--pixai_no_ip", action="store_true")
     parser.add_argument("--pixai_device", type=str, choices=["auto", "cuda", "cpu"], default="auto")
+    parser.add_argument("--hf_token", type=str, default=None, help="Hugging Face token for gated models")
     return parser
 
 
