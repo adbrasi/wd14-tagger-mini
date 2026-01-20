@@ -38,6 +38,7 @@ PIXAI_CATEGORIES_FILE = "categories.json"
 PIXAI_PREPROCESS_FILE = "preprocess.json"
 PIXAI_THRESHOLDS_FILE = "thresholds.csv"
 PIXAI_TAGS_JSON_FILE = "tags_v0.9_13k.json"
+PIXAI_CATEGORY_THRESHOLDS_FILE = "category_thresholds.csv"
 
 
 # -------------------------
@@ -554,6 +555,43 @@ def load_pixai_thresholds(model_location: str) -> Dict[str, float]:
     return thresholds
 
 
+def load_pixai_category_thresholds(model_location: str) -> Dict[str, float]:
+    thresholds: Dict[str, float] = {}
+    path = os.path.join(model_location, PIXAI_CATEGORY_THRESHOLDS_FILE)
+    if not os.path.exists(path):
+        return thresholds
+
+    with open(path, "r", encoding="utf-8") as f:
+        reader = csv.reader(f)
+        rows = [row for row in reader]
+
+    if not rows:
+        return thresholds
+
+    header = [c.strip().lower() for c in rows[0]]
+    name_idx = header.index("name") if "name" in header else None
+    category_idx = header.index("category") if "category" in header else None
+    th_idx = header.index("threshold") if "threshold" in header else None
+    start_row = 1 if (name_idx is not None or category_idx is not None) else 0
+
+    for row in rows[start_row:]:
+        if not row:
+            continue
+        try:
+            th = float(row[th_idx]) if th_idx is not None else float(row[-1])
+        except Exception:
+            continue
+        name = row[name_idx].strip().lower() if name_idx is not None and name_idx < len(row) else ""
+        category = row[category_idx].strip() if category_idx is not None and category_idx < len(row) else ""
+
+        if name:
+            thresholds[name] = th
+        elif category:
+            thresholds[category] = th
+
+    return thresholds
+
+
 def run_pixai(
     paths: List[str],
     args,
@@ -577,6 +615,7 @@ def run_pixai(
             PIXAI_CATEGORIES_FILE,
             PIXAI_THRESHOLDS_FILE,
             PIXAI_TAGS_JSON_FILE,
+            PIXAI_CATEGORY_THRESHOLDS_FILE,
         ]:
             try:
                 hf_hub_download(repo_id=repo_id, filename=file, local_dir=model_location, force_download=True)
@@ -592,6 +631,16 @@ def run_pixai(
     tags, categories = load_pixai_tags(model_location)
     image_size, mean, std = load_pixai_preprocess(model_location)
     thresholds = load_pixai_thresholds(model_location) if args.pixai_use_thresholds else {}
+    category_thresholds = load_pixai_category_thresholds(model_location)
+
+    if not args.pixai_general_threshold and not args.pixai_thresh:
+        general_override = category_thresholds.get("general") or category_thresholds.get("0")
+        if general_override is not None:
+            general_threshold = general_override
+    if not args.pixai_character_threshold and not args.pixai_thresh:
+        character_override = category_thresholds.get("character") or category_thresholds.get("4")
+        if character_override is not None:
+            character_threshold = character_override
 
     batches = batch_loader(paths, batch_size, args.max_workers, lambda img: preprocess_pixai(img, image_size, mean, std))
     iterable = batches if progress is not None or args.no_progress else tqdm(batches, smoothing=0.0, desc="pixai", total=count_batches(len(paths), batch_size))
