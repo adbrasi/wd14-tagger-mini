@@ -3,7 +3,7 @@
 Ferramenta enxuta para taguear imagens em lote usando **múltiplos taggers** via ONNX Runtime (GPU):
 - WD14: `SmilingWolf/wd-eva02-large-tagger-v3`
 - Camie: `Camais03/camie-tagger-v2`
-- PixAI: `deepghs/pixai-tagger-v0.9-onnx`
+- PixAI: `pixai-labs/pixai-tagger-v0.9` (PyTorch)
 
 **Saída única por imagem**: `nome_da_imagem.txt` com tags separadas por vírgulas.
 Quando você usa vários taggers, eles são executados em sequência e as tags vão sendo **anexadas**. As duplicadas são removidas **preservando as tags existentes primeiro**.
@@ -62,6 +62,14 @@ python tag_images_by_wd14_tagger.py . \
 - `--wd14_general_threshold`, `--wd14_character_threshold`
 - `--camie_general_threshold`, `--camie_character_threshold`
 - `--pixai_general_threshold`, `--pixai_character_threshold`
+- `--camie_min_confidence` (default `0.1`)
+- `--camie_category_thresholds_file` (CSV por categoria)
+
+### PixAI: modos threshold/topk
+```bash
+--pixai_mode threshold --pixai_topk_general 25 --pixai_topk_character 10
+```
+Por padrão, o PixAI usa `threshold` com `general=0.30` e `character=0.85`.
 
 ### PixAI thresholds automáticos por categoria
 Se existir `category_thresholds.csv` no modelo PixAI, ele é lido automaticamente.
@@ -71,6 +79,7 @@ category,name,threshold
 0,general,0.3
 4,character,0.85
 ```
+Para desligar tags de IP do PixAI, use `--pixai_no_ip`.
 
 ## Script pronto (para /workspace ou /root)
 Use `run_tagger.sh`:
@@ -82,3 +91,4 @@ Use `run_tagger.sh`:
 - O primeiro uso baixa os modelos para `models/`.
 - Para máxima velocidade, aumente `--batch_size` até estourar VRAM.
 - Se aparecerem IDs numéricos no PixAI, atualize o repo/script: a leitura correta usa a coluna `name` do `selected_tags.csv`.
+- Camie: se nenhum threshold for informado, usamos 0.492 (macro-optimized).
