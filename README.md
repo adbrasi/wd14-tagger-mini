@@ -63,6 +63,15 @@ python tag_images_by_wd14_tagger.py . \
 - `--camie_general_threshold`, `--camie_character_threshold`
 - `--pixai_general_threshold`, `--pixai_character_threshold`
 
+### PixAI thresholds automáticos por categoria
+Se existir `category_thresholds.csv` no modelo PixAI, ele é lido automaticamente.
+Formato esperado:
+```
+category,name,threshold
+0,general,0.3
+4,character,0.85
+```
+
 ## Script pronto (para /workspace ou /root)
 Use `run_tagger.sh`:
 ```bash
