@@ -37,6 +37,7 @@ PIXAI_TAGS_FILE = "selected_tags.csv"
 PIXAI_CATEGORIES_FILE = "categories.json"
 PIXAI_PREPROCESS_FILE = "preprocess.json"
 PIXAI_THRESHOLDS_FILE = "thresholds.csv"
+PIXAI_TAGS_JSON_FILE = "tags_v0.9_13k.json"
 
 
 # -------------------------
@@ -216,16 +217,6 @@ def postprocess_tags(tags: List[str], args) -> List[str]:
     if args.always_first_tags:
         tags = apply_always_first(tags, args.always_first_tags, args.caption_separator)
     return tags
-
-
-def dedupe_tags(tags: List[str]) -> List[str]:
-    seen = set()
-    out: List[str] = []
-    for t in tags:
-        if t not in seen:
-            out.append(t)
-            seen.add(t)
-    return out
 
 
 def add_tags_to_map(result_map: Dict[str, List[str]], image_path: str, tags: List[str], dedupe: bool) -> None:
@@ -445,23 +436,60 @@ def load_pixai_tags(model_location: str) -> Tuple[List[str], Dict[str, str]]:
         with open(categories_path, "r", encoding="utf-8") as f:
             data = json.load(f)
         if isinstance(data, dict):
-            categories = {k: v for k, v in data.items()}
+            categories = {str(k): v for k, v in data.items()}
+        elif isinstance(data, list):
+            for item in data:
+                if not isinstance(item, dict):
+                    continue
+                if "category" in item and "name" in item:
+                    categories[str(item["category"])] = item["name"]
 
     tags: List[str] = []
+    category_by_tag: Dict[str, str] = {}
+
+    tags_json_path = os.path.join(model_location, PIXAI_TAGS_JSON_FILE)
+    if os.path.exists(tags_json_path):
+        with open(tags_json_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        tag_map = data.get("tag_map", {})
+        tag_split = data.get("tag_split", {})
+        gen_count = int(tag_split.get("gen_tag_count", 0))
+        for tag, idx in sorted(tag_map.items(), key=lambda kv: kv[1]):
+            tags.append(tag)
+            if gen_count:
+                category_by_tag[tag] = "general" if idx < gen_count else "character"
+        return tags, category_by_tag
+
     tags_path = os.path.join(model_location, PIXAI_TAGS_FILE)
     with open(tags_path, "r", encoding="utf-8") as f:
         reader = csv.reader(f)
         rows = [row for row in reader]
 
-    if rows and rows[0][0] in {"tag_id", "id"}:
-        rows = rows[1:]
+    if not rows:
+        return tags, category_by_tag
 
-    for row in rows:
+    header = [c.strip().lower() for c in rows[0]]
+    has_header = "name" in header or "tag" in header or "tag_id" in header or "id" in header
+    name_idx = header.index("name") if "name" in header else None
+    category_idx = header.index("category") if "category" in header else None
+    start_row = 1 if has_header else 0
+
+    for row in rows[start_row:]:
         if not row:
             continue
-        tags.append(row[1] if len(row) > 1 else row[0])
+        if name_idx is not None and name_idx < len(row):
+            tag_name = row[name_idx].strip()
+        else:
+            tag_name = row[0].strip()
+        if not tag_name:
+            continue
+        tags.append(tag_name)
+        if category_idx is not None and category_idx < len(row):
+            category_id = str(row[category_idx]).strip()
+            if category_id and category_id in categories:
+                category_by_tag[tag_name] = categories[category_id]
 
-    return tags, categories
+    return tags, category_by_tag
 
 
 def load_pixai_preprocess(model_location: str) -> Tuple[int, List[float], List[float]]:
@@ -542,7 +570,14 @@ def run_pixai(
     if not os.path.exists(model_location) or args.force_download:
         os.makedirs(model_dir, exist_ok=True)
         logger.info(f"downloading PixAI ONNX model from HF: {repo_id}")
-        for file in [PIXAI_ONNX_FILE, PIXAI_TAGS_FILE, PIXAI_PREPROCESS_FILE, PIXAI_CATEGORIES_FILE, PIXAI_THRESHOLDS_FILE]:
+        for file in [
+            PIXAI_ONNX_FILE,
+            PIXAI_TAGS_FILE,
+            PIXAI_PREPROCESS_FILE,
+            PIXAI_CATEGORIES_FILE,
+            PIXAI_THRESHOLDS_FILE,
+            PIXAI_TAGS_JSON_FILE,
+        ]:
             try:
                 hf_hub_download(repo_id=repo_id, filename=file, local_dir=model_location, force_download=True)
             except Exception:
@@ -704,10 +739,6 @@ def recommend_batch_by_vram() -> Optional[int]:
 # -------------------------
 
 def main(args):
-    image_paths = glob_images_pathlib(Path(args.train_data_dir), args.recursive)
-    logger.info(f"found {len(image_paths)} images")
-    paths = [str(p) for p in image_paths]
-
     args.general_threshold = args.general_threshold if args.general_threshold is not None else args.thresh
     args.character_threshold = args.character_threshold if args.character_threshold is not None else args.thresh
 
@@ -723,7 +754,10 @@ def main(args):
         if not args.one_tagger and not args.taggers:
             taggers = ["wd14", "camie", "pixai"]
         logger.info(f"smoke test on image: {args.smoke_test_image}")
-
+    else:
+        image_paths = glob_images_pathlib(Path(args.train_data_dir), args.recursive)
+        logger.info(f"found {len(image_paths)} images")
+        paths = [str(p) for p in image_paths]
     combined: Dict[str, List[str]] = {p: [] for p in paths}
 
     if args.suggest_batch:
@@ -818,7 +852,7 @@ def main(args):
 
 def setup_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser()
-    parser.add_argument("train_data_dir", type=str, help="directory for images")
+    parser.add_argument("train_data_dir", type=str, nargs="?", default=".", help="directory for images")
 
     parser.add_argument("--taggers", type=str, default="wd14", help="comma list: wd14,camie,pixai")
     parser.add_argument("--one_tagger", type=str, choices=["wd14", "camie", "pixai"], default=None)
