@@ -50,8 +50,9 @@ python tag_images_by_wd14_tagger.py /caminho/para/imagens --one_tagger wd14
 ```
 
 ## Smoke test (uma imagem)
+`train_data_dir` é opcional no smoke test. Você pode passar `.` só para cumprir o argumento.
 ```bash
-python tag_images_by_wd14_tagger.py /caminho/para/imagens \
+python tag_images_by_wd14_tagger.py . \
   --smoke_test_image /caminho/para/uma_imagem.png \
   --taggers wd14,camie,pixai
 ```
@@ -71,3 +72,4 @@ Use `run_tagger.sh`:
 ## Observações
 - O primeiro uso baixa os modelos para `models/`.
 - Para máxima velocidade, aumente `--batch_size` até estourar VRAM.
+- Se aparecerem IDs numéricos no PixAI, atualize o repo/script: a leitura correta usa a coluna `name` do `selected_tags.csv`.
