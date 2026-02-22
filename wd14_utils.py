@@ -91,11 +91,8 @@ def glob_videos_pathlib(base_dir: Path, recursive: bool) -> List[Path]:
     return videos
 
 
-def extract_frame(video_path: str, frame_number: int = 12) -> Optional[Image.Image]:
-    """Extract a specific frame from a video file and return as PIL Image.
-
-    Falls back to nearest available frame if the requested frame doesn't exist.
-    """
+def extract_first_frame(video_path: str, output_path: Optional[str] = None) -> Optional[Image.Image]:
+    """Extract the first frame from a video file and return as PIL Image."""
     try:
         import cv2
     except ImportError:
@@ -107,77 +104,21 @@ def extract_frame(video_path: str, frame_number: int = 12) -> Optional[Image.Ima
         logger.warning(f"Could not open video: {video_path}")
         return None
 
-    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-    if total_frames <= 0:
-        total_frames = 9999
-
-    target = min(frame_number, total_frames - 1)
-    cap.set(cv2.CAP_PROP_POS_FRAMES, target)
     ret, frame = cap.read()
-
-    # Fallback: if target frame is bad, try frame 0
-    if (not ret or frame is None) and target > 0:
-        logger.debug(f"Frame {target} failed for {video_path}, falling back to frame 0")
-        cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
-        ret, frame = cap.read()
-
     cap.release()
 
     if not ret or frame is None:
-        logger.warning(f"Could not read any frame from: {video_path}")
+        logger.warning(f"Could not read frame from: {video_path}")
         return None
 
     frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-    return Image.fromarray(frame_rgb)
+    pil_image = Image.fromarray(frame_rgb)
 
+    if output_path:
+        pil_image.save(output_path)
+        logger.debug(f"Saved frame to: {output_path}")
 
-def extract_frames(video_path: str, frame_numbers: List[int]) -> List[Optional[Image.Image]]:
-    """Extract multiple frames from a video. Returns list aligned with frame_numbers."""
-    try:
-        import cv2
-    except ImportError:
-        logger.error("opencv-python-headless is required for video support.")
-        return [None] * len(frame_numbers)
-
-    cap = cv2.VideoCapture(video_path)
-    if not cap.isOpened():
-        logger.warning(f"Could not open video: {video_path}")
-        return [None] * len(frame_numbers)
-
-    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-    if total_frames <= 0:
-        total_frames = 9999
-
-    results: List[Optional[Image.Image]] = []
-    for fn in frame_numbers:
-        target = min(fn, total_frames - 1)
-        cap.set(cv2.CAP_PROP_POS_FRAMES, target)
-        ret, frame = cap.read()
-
-        # Fallback to frame 0 if target failed
-        if (not ret or frame is None) and target > 0:
-            logger.debug(f"Frame {target} failed for {video_path}, trying frame 0")
-            cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
-            ret, frame = cap.read()
-
-        if not ret or frame is None:
-            logger.debug(f"Frame extraction failed for {video_path}")
-            results.append(None)
-        else:
-            frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            results.append(Image.fromarray(frame_rgb))
-
-    cap.release()
-    return results
-
-
-# Keep backward compat alias
-def extract_first_frame(video_path: str, output_path: Optional[str] = None) -> Optional[Image.Image]:
-    """Legacy wrapper - extracts frame 12 by default."""
-    img = extract_frame(video_path, frame_number=12)
-    if img and output_path:
-        img.save(output_path)
-    return img
+    return pil_image
 
 
 def get_pil_interpolation(interpolation: Optional[str]) -> Optional[Image.Resampling]:

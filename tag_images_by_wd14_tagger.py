@@ -2,15 +2,12 @@ import argparse
 import base64
 import csv
 import gc
-import hashlib
 import io
 import json
 import logging
 import os
-import re
 import tempfile
-import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Tuple
 
@@ -26,8 +23,7 @@ from PIL import Image
 from tqdm import tqdm
 
 from wd14_utils import (
-    extract_frame,
-    extract_frames,
+    extract_first_frame,
     glob_images_pathlib,
     glob_videos_pathlib,
     resize_image,
@@ -784,35 +780,15 @@ def run_pixai(
 # -------------------------
 
 DEFAULT_GROK_MODEL = "x-ai/grok-2-vision-1212"
+DEFAULT_GROK_SYSTEM_PROMPT = (
+    "You are an expert image tagger for AI training datasets. "
+    "Describe the image in a single detailed caption suitable for training a video LoRA. "
+    "Focus on the subject, action, style, lighting, camera angle, and mood. "
+    "Output ONLY the caption text, nothing else."
+)
+DEFAULT_GROK_PROMPT = "Describe this image in detail for an AI training caption."
+
 OPENROUTER_API_URL = "https://openrouter.ai/api/v1/chat/completions"
-
-PROMPTS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "prompts")
-
-
-def load_prompt_file(path: str) -> str:
-    """Load a prompt from a .md file."""
-    with open(path, "r", encoding="utf-8") as f:
-        return f.read().strip()
-
-
-def get_system_prompt(args) -> str:
-    """Load system prompt from file or use CLI override."""
-    if args.grok_system_prompt_file:
-        return load_prompt_file(args.grok_system_prompt_file)
-    default_path = os.path.join(PROMPTS_DIR, "system_prompt.md")
-    if os.path.exists(default_path):
-        return load_prompt_file(default_path)
-    return "You are an expert image captioner for AI training datasets."
-
-
-def get_user_prompt_template(args) -> str:
-    """Load user prompt template from file or use CLI override."""
-    if args.grok_prompt_file:
-        return load_prompt_file(args.grok_prompt_file)
-    default_path = os.path.join(PROMPTS_DIR, "user_prompt.md")
-    if os.path.exists(default_path):
-        return load_prompt_file(default_path)
-    return "Analyze this image and the following tags:\n\n{tags}"
 
 
 def image_to_base64(image: Image.Image, max_size: int = 1024) -> str:
@@ -834,147 +810,39 @@ def call_openrouter(
     model: str,
     system_prompt: str,
     user_prompt: str,
-    image_data_uris: List[str],
+    image_data_uri: str,
     temperature: float = 0.3,
-    max_retries: int = 3,
-    json_mode: bool = True,
 ) -> Optional[str]:
-    """Call OpenRouter API with one or more images and return the text response.
-
-    Uses json_object response_format + response-healing plugin for reliable JSON output.
-    Retries with exponential backoff on 429/5xx errors.
-    """
+    """Call OpenRouter API with an image and return the text response."""
     headers = {
         "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json",
     }
-
-    # OpenRouter docs: text first, then images
-    content_parts = [{"type": "text", "text": user_prompt}]
-    for uri in image_data_uris:
-        content_parts.append({"type": "image_url", "image_url": {"url": uri}})
-
     payload = {
         "model": model,
         "messages": [
             {"role": "system", "content": system_prompt},
-            {"role": "user", "content": content_parts},
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": user_prompt},
+                    {"type": "image_url", "image_url": {"url": image_data_uri}},
+                ],
+            },
         ],
         "temperature": temperature,
-        "max_tokens": 2048,
+        "max_tokens": 1024,
     }
-
-    if json_mode:
-        payload["response_format"] = {"type": "json_object"}
-        # response-healing auto-fixes malformed JSON from the model
-        payload["plugins"] = [{"id": "response-healing"}]
-
-    for attempt in range(max_retries + 1):
-        try:
-            resp = requests.post(OPENROUTER_API_URL, headers=headers, json=payload, timeout=90)
-
-            # Retry on rate limit (429) and server errors (5xx)
-            if resp.status_code == 429 or resp.status_code >= 500:
-                wait = min(2 ** attempt * 2, 30)
-                logger.warning(f"OpenRouter {resp.status_code} (attempt {attempt + 1}), retrying in {wait}s...")
-                time.sleep(wait)
-                continue
-
-            resp.raise_for_status()
-            data = resp.json()
-            return data["choices"][0]["message"]["content"].strip()
-        except requests.exceptions.RequestException as e:
-            logger.warning(f"OpenRouter API error (attempt {attempt + 1}/{max_retries + 1}): {e}")
-            if hasattr(e, "response") and e.response is not None:
-                logger.warning(f"Response: {e.response.text[:500]}")
-            if attempt < max_retries:
-                wait = min(2 ** attempt * 2, 30)
-                time.sleep(wait)
-            else:
-                logger.error(f"OpenRouter API failed after {max_retries + 1} attempts")
-                return None
-    return None
-
-
-def parse_grok_json_output(raw: str) -> Optional[Dict]:
-    """Parse JSON output from grok, handling markdown code blocks and edge cases."""
-    text = raw.strip()
-
-    # Strip markdown code blocks if present
-    if text.startswith("```"):
-        # Remove ```json or ``` at start and ``` at end
-        text = re.sub(r"^```(?:json)?\s*\n?", "", text)
-        text = re.sub(r"\n?```\s*$", "", text)
-        text = text.strip()
-
     try:
-        return json.loads(text)
-    except json.JSONDecodeError:
-        pass
-
-    # Try to find the first { ... } block
-    start = text.find("{")
-    end = text.rfind("}")
-    if start != -1 and end != -1 and end > start:
-        try:
-            return json.loads(text[start : end + 1])
-        except json.JSONDecodeError:
-            pass
-
-    logger.warning(f"Could not parse JSON from grok output: {text[:200]}...")
-    return None
-
-
-def _grok_single_task(
-    api_key: str,
-    model: str,
-    system_prompt: str,
-    user_prompt_template: str,
-    image_path: str,
-    tags_str: str,
-    extra_image_paths: Optional[List[str]] = None,
-) -> Tuple[str, Optional[str]]:
-    """Process a single image through grok. Returns (image_path, caption_or_none).
-
-    The raw API response is JSON. We parse it and extract the caption field.
-    The full JSON is returned as the caption string (written to .txt).
-    """
-    image_data_uris = []
-    try:
-        with Image.open(image_path) as img:
-            img = img.convert("RGB")
-            image_data_uris.append(image_to_base64(img))
-    except Exception as e:
-        logger.warning(f"Failed to load image {image_path}: {e}")
-        return image_path, None
-
-    if extra_image_paths:
-        for ep in extra_image_paths:
-            try:
-                with Image.open(ep) as img:
-                    img = img.convert("RGB")
-                    image_data_uris.append(image_to_base64(img))
-            except Exception as e:
-                logger.warning(f"Failed to load extra image {ep}: {e}")
-
-    user_prompt = user_prompt_template.replace("{tags}", tags_str)
-    raw = call_openrouter(api_key, model, system_prompt, user_prompt, image_data_uris)
-
-    if not raw:
-        return image_path, None
-
-    # Try to parse JSON and extract just the caption for the .txt file
-    parsed = parse_grok_json_output(raw)
-    if parsed and "caption" in parsed:
-        return image_path, parsed["caption"]
-
-    # If JSON parsing worked but no caption field, use the whole JSON
-    if parsed:
-        logger.debug(f"JSON parsed but no 'caption' key, using full JSON for {image_path}")
-        return image_path, json.dumps(parsed, ensure_ascii=False)
-
-    # Fallback: use raw text as-is (model didn't return valid JSON)
-    return image_path, raw
+        resp = requests.post(OPENROUTER_API_URL, headers=headers, json=payload, timeout=60)
+        resp.raise_for_status()
+        data = resp.json()
+        return data["choices"][0]["message"]["content"].strip()
+    except requests.exceptions.RequestException as e:
+        logger.error(f"OpenRouter API error: {e}")
+        if hasattr(e, "response") and e.response is not None:
+            logger.error(f"Response: {e.response.text[:500]}")
+        return None
 
 
 def run_grok(
@@ -982,21 +850,9 @@ def run_grok(
     args,
     dedupe: bool,
     result_map: Dict[str, List[str]],
-    existing_tags: Optional[Dict[str, List[str]]] = None,
-    extra_frames: Optional[Dict[str, List[str]]] = None,
     progress=None,
 ) -> None:
-    """Run grok tagger via OpenRouter API with concurrent batch processing.
-
-    Args:
-        paths: list of image paths to process
-        args: CLI arguments
-        dedupe: whether to deduplicate tags
-        result_map: output map of image_path -> tags
-        existing_tags: tags from previous taggers (pixai/wd14/camie) per image
-        extra_frames: additional frame paths per image (for pro mode)
-        progress: tqdm progress bar
-    """
+    """Run grok tagger via OpenRouter API on a list of image paths."""
     api_key = args.grok_api_key
     if not api_key:
         raise ValueError(
@@ -1005,114 +861,54 @@ def run_grok(
         )
 
     model = args.grok_model
-    system_prompt = get_system_prompt(args)
-    user_prompt_template = get_user_prompt_template(args)
-    max_workers = args.grok_concurrency
+    system_prompt = args.grok_system_prompt
+    user_prompt = args.grok_prompt
 
-    existing_tags = existing_tags or {}
-    extra_frames = extra_frames or {}
+    iterable = paths if progress is not None or args.no_progress else tqdm(paths, smoothing=0.0, desc="grok")
 
-    pbar = None
-    if progress is None and not args.no_progress:
-        pbar = tqdm(total=len(paths), smoothing=0.0, desc="grok")
-
-    futures = {}
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        for image_path in paths:
-            tags_list = existing_tags.get(image_path, [])
-            tags_str = args.caption_separator.join(tags_list) if tags_list else "(no prior tags)"
-            extras = extra_frames.get(image_path)
-
-            future = executor.submit(
-                _grok_single_task,
-                api_key,
-                model,
-                system_prompt,
-                user_prompt_template,
-                image_path,
-                tags_str,
-                extras,
-            )
-            futures[future] = image_path
-
-        for future in as_completed(futures):
-            try:
-                image_path, caption = future.result()
-            except Exception as e:
-                image_path = futures[future]
-                logger.error(f"Grok task failed for {image_path}: {e}")
-                caption = None
-            if caption:
-                add_tags_to_map(result_map, image_path, [caption], dedupe)
-            else:
-                logger.warning(f"No caption returned for {image_path}")
-
-            if pbar is not None:
-                pbar.update(1)
+    for image_path in iterable:
+        try:
+            with Image.open(image_path) as img:
+                img = img.convert("RGB")
+                data_uri = image_to_base64(img)
+        except Exception as e:
+            logger.warning(f"Failed to load image {image_path}: {e}")
             if progress is not None:
                 progress.update(1)
+            continue
 
-    if pbar is not None:
-        pbar.close()
+        caption = call_openrouter(api_key, model, system_prompt, user_prompt, data_uri)
+        if caption:
+            add_tags_to_map(result_map, image_path, [caption], dedupe)
+        else:
+            logger.warning(f"No caption returned for {image_path}")
+
+        if progress is not None:
+            progress.update(1)
 
 
 # -------------------------
 # Video processing
 # -------------------------
 
-def extract_video_frames(
+def extract_frames_for_videos(
     video_paths: List[str],
     temp_dir: str,
-    frame_number: int = 12,
-    pro_mode: bool = False,
-    pro_frames: Tuple[int, int] = (6, 30),
-) -> Tuple[Dict[str, str], Dict[str, List[str]]]:
-    """Extract frames from videos for processing.
-
-    Returns:
-        frame_to_video: mapping of primary temp_frame_path -> original_video_path
-        extra_frames_map: mapping of primary temp_frame_path -> [extra_frame_paths] (pro mode only)
-    """
+) -> Dict[str, str]:
+    """Extract first frame from each video, returns mapping of temp_image_path -> original_video_path."""
     frame_to_video: Dict[str, str] = {}
-    extra_frames_map: Dict[str, List[str]] = {}
-
-    for vpath in tqdm(video_paths, desc="extracting frames", smoothing=0.0):
+    for vpath in video_paths:
+        frame = extract_first_frame(vpath)
+        if frame is None:
+            logger.warning(f"Skipping video (no frame extracted): {vpath}")
+            continue
         video_stem = Path(vpath).stem
-        uid = hashlib.md5(vpath.encode()).hexdigest()[:10]
-
-        if pro_mode:
-            frames = extract_frames(vpath, list(pro_frames))
-            primary = frames[0]
-            secondary = frames[1] if len(frames) > 1 else None
-
-            # If primary failed, try secondary as primary
-            if primary is None and secondary is not None:
-                primary = secondary
-                secondary = None
-
-            if primary is None:
-                logger.warning(f"Skipping video (no frames extracted): {vpath}")
-                continue
-
-            primary_path = os.path.join(temp_dir, f"{video_stem}_{uid}_f{pro_frames[0]}.jpg")
-            primary.save(primary_path, "JPEG", quality=95)
-            frame_to_video[primary_path] = vpath
-
-            if secondary is not None:
-                secondary_path = os.path.join(temp_dir, f"{video_stem}_{uid}_f{pro_frames[1]}.jpg")
-                secondary.save(secondary_path, "JPEG", quality=95)
-                extra_frames_map[primary_path] = [secondary_path]
-        else:
-            frame = extract_frame(vpath, frame_number)
-            if frame is None:
-                logger.warning(f"Skipping video (no frame extracted): {vpath}")
-                continue
-
-            frame_path = os.path.join(temp_dir, f"{video_stem}_{uid}_f{frame_number}.jpg")
-            frame.save(frame_path, "JPEG", quality=95)
-            frame_to_video[frame_path] = vpath
-
-    return frame_to_video, extra_frames_map
+        video_parent = Path(vpath).parent
+        # Save temp frame in same directory as video for consistent output
+        frame_path = os.path.join(temp_dir, f"{video_stem}_{id(vpath)}.jpg")
+        frame.save(frame_path, "JPEG", quality=95)
+        frame_to_video[frame_path] = vpath
+    return frame_to_video
 
 
 # -------------------------
@@ -1331,19 +1127,10 @@ def main(args):
     else:
         taggers = [t.strip() for t in args.taggers.split(",") if t.strip()]
 
-    # Video mode setup
+    # Video mode: extract first frames from videos, map results back to video filenames
     video_mode = args.video
-    pro_mode = args.pro
     frame_to_video: Dict[str, str] = {}
-    extra_frames_map: Dict[str, List[str]] = {}
     temp_dir_obj = None
-
-    # In pro mode, also include extra frame paths for tagger processing
-    pro_extra_paths: List[str] = []
-
-    # Load processing log for skip logic
-    base_dir = os.path.abspath(args.train_data_dir)
-    processing_log = load_processing_log(base_dir)
 
     if args.smoke_test_image:
         if not os.path.exists(args.smoke_test_image):
@@ -1359,85 +1146,28 @@ def main(args):
             logger.warning("No videos found in the specified directory.")
             return
         video_str_paths = [str(p) for p in video_paths_list]
-
-        # Skip already-processed videos unless --force
-        if not args.force:
-            video_str_paths, skipped = filter_already_processed(video_str_paths, processing_log, taggers)
-            if skipped:
-                logger.info(f"skipping {skipped} already-processed videos (use --force to reprocess)")
-            if not video_str_paths:
-                logger.info("all videos already processed. nothing to do.")
-                return
-
         temp_dir_obj = tempfile.TemporaryDirectory(prefix="tagger_frames_")
-
-        frame_number = args.frame_number
-        pro_frames = (args.pro_frame_a, args.pro_frame_b)
-
-        logger.info(f"extracting frames from {len(video_str_paths)} videos (pro={pro_mode})...")
-        frame_to_video, extra_frames_map = extract_video_frames(
-            video_str_paths,
-            temp_dir_obj.name,
-            frame_number=frame_number,
-            pro_mode=pro_mode,
-            pro_frames=pro_frames,
-        )
+        logger.info("extracting first frames from videos...")
+        frame_to_video = extract_frames_for_videos(video_str_paths, temp_dir_obj.name)
         if not frame_to_video:
             logger.error("Could not extract frames from any video.")
             temp_dir_obj.cleanup()
             return
-        logger.info(f"extracted frames for {len(frame_to_video)} videos")
+        logger.info(f"extracted {len(frame_to_video)} frames from videos")
         paths = list(frame_to_video.keys())
-
-        # In pro mode, collect extra frame paths so taggers process both frames
-        if pro_mode:
-            for extras in extra_frames_map.values():
-                pro_extra_paths.extend(extras)
     else:
         image_paths = glob_images_pathlib(Path(args.train_data_dir), args.recursive)
         logger.info(f"found {len(image_paths)} images")
-        all_image_paths = [str(p) for p in image_paths]
+        paths = [str(p) for p in image_paths]
 
-        # Skip already-processed images unless --force
-        if not args.force:
-            all_image_paths, skipped = filter_already_processed(all_image_paths, processing_log, taggers)
-            if skipped:
-                logger.info(f"skipping {skipped} already-processed images (use --force to reprocess)")
-            if not all_image_paths:
-                logger.info("all images already processed. nothing to do.")
-                return
-
-        paths = all_image_paths
-
-    # For taggers: in pro mode, process both primary + extra frames
-    tagger_paths = paths + pro_extra_paths
-    combined: Dict[str, List[str]] = {p: [] for p in tagger_paths}
+    combined: Dict[str, List[str]] = {p: [] for p in paths}
 
     if args.suggest_batch:
         suggestion = recommend_batch_by_vram()
         if suggestion is not None:
             logger.info(f"Suggested batch_size based on free VRAM: {suggestion}")
 
-    # Load existing .txt files and merge with new tags
-    if video_mode:
-        # In video mode: check for existing .txt next to the video files
-        existing_count = 0
-        for frame_path, video_path in frame_to_video.items():
-            caption_file = os.path.splitext(video_path)[0] + args.caption_extension
-            if not os.path.exists(caption_file):
-                continue
-            with open(caption_file, "rt", encoding="utf-8") as f:
-                existing = [
-                    t.strip()
-                    for t in f.read().strip("\n").split(args.caption_separator.strip())
-                    if t.strip()
-                ]
-            if existing:
-                add_tags_to_map(combined, frame_path, existing, not args.no_dedupe)
-                existing_count += 1
-        if existing_count:
-            logger.info(f"loaded existing tags from {existing_count} .txt files")
-    elif args.append_tags:
+    if args.append_tags and not video_mode:
         for image_path in paths:
             caption_file = os.path.splitext(image_path)[0] + args.caption_extension
             if not os.path.exists(caption_file):
@@ -1456,10 +1186,13 @@ def main(args):
 
     total_batches = 0
     if not args.no_progress:
-        for tagger in booru_taggers:
-            bs = args.batch_size
-            total_batches += count_batches(len(tagger_paths), bs)
-        overall = tqdm(total=total_batches, desc="taggers", smoothing=0.0) if total_batches > 0 else None
+        for tagger in taggers:
+            if tagger == "grok":
+                total_batches += len(paths)
+            else:
+                bs = args.batch_size
+                total_batches += count_batches(len(paths), bs)
+        overall = tqdm(total=total_batches, desc="total", smoothing=0.0) if total_batches > 0 else None
     else:
         overall = None
 
@@ -1509,39 +1242,19 @@ def main(args):
                 character_threshold,
                 overall,
             )
+        elif tagger == "grok":
+            run_grok(
+                paths,
+                args,
+                not args.no_dedupe,
+                combined,
+                overall,
+            )
         else:
             raise ValueError(f"Unknown tagger: {tagger}")
 
     if overall is not None:
         overall.close()
-
-    # In pro mode: merge extra frame tags into primary frame (deduplicated)
-    if pro_mode and extra_frames_map:
-        logger.info("merging tags from multiple frames (pro mode)...")
-        for primary_path, extra_paths in extra_frames_map.items():
-            for ep in extra_paths:
-                extra_tags = combined.get(ep, [])
-                add_tags_to_map(combined, primary_path, extra_tags, dedupe=True)
-                # Remove extra frame entry from combined
-                combined.pop(ep, None)
-
-    # Run grok AFTER booru taggers so it has access to their tags
-    if has_grok:
-        logger.info("running grok captioner with booru tags as context...")
-        # Build existing_tags map for grok (only primary paths)
-        existing_tags_for_grok = {p: combined.get(p, []) for p in paths}
-        # Grok result goes into a separate map (it's a full caption, not tags)
-        grok_combined: Dict[str, List[str]] = {p: [] for p in paths}
-        run_grok(
-            paths,
-            args,
-            not args.no_dedupe,
-            grok_combined,
-            existing_tags=existing_tags_for_grok,
-            extra_frames=extra_frames_map if pro_mode else None,
-        )
-        # Replace combined with grok output (grok caption is the final output)
-        combined = grok_combined
 
     # In video mode, remap frame paths to original video paths for output
     if video_mode and frame_to_video:
@@ -1559,15 +1272,6 @@ def main(args):
     else:
         write_caption_files(combined, args)
 
-    # Update processing log with successfully processed files
-    if video_mode:
-        processed_files = list(combined.keys())
-    else:
-        processed_files = paths
-    update_processing_log(processing_log, processed_files, taggers)
-    save_processing_log(base_dir, processing_log)
-    logger.info(f"processing log updated ({len(processed_files)} files logged)")
-
     # Cleanup temp frames
     if temp_dir_obj is not None:
         temp_dir_obj.cleanup()
@@ -1581,11 +1285,7 @@ def setup_parser() -> argparse.ArgumentParser:
 
     parser.add_argument("--taggers", type=str, default="wd14", help="comma list: wd14,camie,pixai,grok")
     parser.add_argument("--one_tagger", type=str, choices=["wd14", "camie", "pixai", "grok"], default=None)
-    parser.add_argument("--video", action="store_true", help="video mode: extract frames from videos and tag them")
-    parser.add_argument("--pro", action="store_true", help="pro mode: use 2 frames per video (better quality, 2x tagger cost)")
-    parser.add_argument("--frame_number", type=int, default=12, help="which frame to extract in normal video mode (default: 12)")
-    parser.add_argument("--pro_frame_a", type=int, default=6, help="first frame number for pro mode (default: 6)")
-    parser.add_argument("--pro_frame_b", type=int, default=30, help="second frame number for pro mode (default: 30)")
+    parser.add_argument("--video", action="store_true", help="video mode: extract first frame from videos and tag them")
     parser.add_argument("--model_dir", type=str, default="models")
     parser.add_argument("--force_download", action="store_true")
     parser.add_argument("--smoke_test_image", type=str, default=None)
@@ -1645,9 +1345,8 @@ def setup_parser() -> argparse.ArgumentParser:
     # Grok (OpenRouter) options
     parser.add_argument("--grok_api_key", type=str, default=None, help="OpenRouter API key (or set OPENROUTER_API_KEY env)")
     parser.add_argument("--grok_model", type=str, default=DEFAULT_GROK_MODEL, help="OpenRouter model ID")
-    parser.add_argument("--grok_system_prompt_file", type=str, default=None, help="path to system prompt .md file")
-    parser.add_argument("--grok_prompt_file", type=str, default=None, help="path to user prompt template .md file")
-    parser.add_argument("--grok_concurrency", type=int, default=8, help="max concurrent API calls for grok (default: 8)")
+    parser.add_argument("--grok_system_prompt", type=str, default=DEFAULT_GROK_SYSTEM_PROMPT, help="system prompt for grok")
+    parser.add_argument("--grok_prompt", type=str, default=DEFAULT_GROK_PROMPT, help="user prompt for grok")
 
     return parser
 
