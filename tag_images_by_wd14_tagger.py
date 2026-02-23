@@ -868,8 +868,6 @@ def call_openrouter(
         payload["response_format"] = {"type": "json_object"}
         # response-healing auto-fixes malformed JSON from the model
         payload["plugins"] = [{"id": "response-healing"}]
-        # Only route to providers that support json_object
-        payload["provider"] = {"require_parameters": True}
 
     for attempt in range(max_retries + 1):
         try:
@@ -1343,6 +1341,10 @@ def main(args):
     # In pro mode, also include extra frame paths for tagger processing
     pro_extra_paths: List[str] = []
 
+    # Load processing log for skip logic
+    base_dir = os.path.abspath(args.train_data_dir)
+    processing_log = load_processing_log(base_dir)
+
     if args.smoke_test_image:
         if not os.path.exists(args.smoke_test_image):
             raise FileNotFoundError(f"smoke_test_image not found: {args.smoke_test_image}")
@@ -1357,6 +1359,16 @@ def main(args):
             logger.warning("No videos found in the specified directory.")
             return
         video_str_paths = [str(p) for p in video_paths_list]
+
+        # Skip already-processed videos unless --force
+        if not args.force:
+            video_str_paths, skipped = filter_already_processed(video_str_paths, processing_log, taggers)
+            if skipped:
+                logger.info(f"skipping {skipped} already-processed videos (use --force to reprocess)")
+            if not video_str_paths:
+                logger.info("all videos already processed. nothing to do.")
+                return
+
         temp_dir_obj = tempfile.TemporaryDirectory(prefix="tagger_frames_")
 
         frame_number = args.frame_number
@@ -1384,7 +1396,18 @@ def main(args):
     else:
         image_paths = glob_images_pathlib(Path(args.train_data_dir), args.recursive)
         logger.info(f"found {len(image_paths)} images")
-        paths = [str(p) for p in image_paths]
+        all_image_paths = [str(p) for p in image_paths]
+
+        # Skip already-processed images unless --force
+        if not args.force:
+            all_image_paths, skipped = filter_already_processed(all_image_paths, processing_log, taggers)
+            if skipped:
+                logger.info(f"skipping {skipped} already-processed images (use --force to reprocess)")
+            if not all_image_paths:
+                logger.info("all images already processed. nothing to do.")
+                return
+
+        paths = all_image_paths
 
     # For taggers: in pro mode, process both primary + extra frames
     tagger_paths = paths + pro_extra_paths
@@ -1535,6 +1558,15 @@ def main(args):
             write_json_output(args.output_path, combined, args.caption_separator)
     else:
         write_caption_files(combined, args)
+
+    # Update processing log with successfully processed files
+    if video_mode:
+        processed_files = list(combined.keys())
+    else:
+        processed_files = paths
+    update_processing_log(processing_log, processed_files, taggers)
+    save_processing_log(base_dir, processing_log)
+    logger.info(f"processing log updated ({len(processed_files)} files logged)")
 
     # Cleanup temp frames
     if temp_dir_obj is not None:

@@ -207,6 +207,7 @@ processing:
   --max_workers N             Image loading threads (default: 4)
   --recursive                 Search subdirectories
   --remove_underscore         Replace _ with space in tags
+  --force                     Reprocess all files (ignore processing log)
 
 output:
   --output_path FILE          Write to JSON/JSONL instead of .txt files
@@ -217,6 +218,14 @@ output:
 tokens:
   --hf_token TOKEN            HuggingFace token for gated models
 ```
+
+## Processing Log
+
+The pipeline saves a `.tagger_log.json` file in your input directory to track which files have been processed and with which taggers. On subsequent runs, already-processed files are **automatically skipped**.
+
+- To reprocess everything: add `--force`
+- The log tracks: file path, taggers used, timestamp
+- If you add new taggers (e.g., ran with `pixai` before, now adding `grok`), unprocessed combinations are detected and run
 
 ## Notes
 

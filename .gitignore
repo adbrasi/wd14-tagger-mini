@@ -4,3 +4,4 @@ __pycache__/
 models/
 .env
 .env.*
+.tagger_log.json
