@@ -783,7 +783,7 @@ def run_pixai(
 # Grok tagger (OpenRouter API)
 # -------------------------
 
-DEFAULT_GROK_MODEL = "x-ai/grok-2-vision-1212"
+DEFAULT_GROK_MODEL = "x-ai/grok-4.1-fast"
 OPENROUTER_API_URL = "https://openrouter.ai/api/v1/chat/completions"
 
 PROMPTS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "prompts")
@@ -860,8 +860,7 @@ def call_openrouter(
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": content_parts},
         ],
-        "temperature": temperature,
-        "max_tokens": 2048,
+        "reasoning": {"effort": "low"},
     }
 
     if json_mode:

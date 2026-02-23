@@ -211,7 +211,7 @@ def main():
     print(f"  Taggers:      {taggers}")
     print(f"  Batch size:   {batch_size}")
     if has_grok:
-        print(f"  Grok model:   x-ai/grok-2-vision-1212")
+        print(f"  Grok model:   x-ai/grok-4.1-fast")
         print(f"  Concurrency:  {grok_concurrency}")
     print(f"  Recursive:    {recursive}")
     print(f"  Force:        {force}")
