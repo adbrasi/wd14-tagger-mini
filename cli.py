@@ -173,9 +173,6 @@ def main():
     # Recursive
     recursive = ask_yes_no("Search subdirectories recursively?", default=True)
 
-    # Force reprocess
-    force = ask_yes_no("Force reprocess already-processed files?", default=False)
-
     # Build command
     cmd = [python, TAGGER_SCRIPT, input_dir]
     cmd.extend(["--taggers", taggers])
@@ -187,8 +184,6 @@ def main():
         cmd.append("--pro")
     if recursive:
         cmd.append("--recursive")
-    if force:
-        cmd.append("--force")
 
     cmd.append("--remove_underscore")
 
@@ -214,7 +209,6 @@ def main():
         print(f"  Grok model:   x-ai/grok-2-vision-1212")
         print(f"  Concurrency:  {grok_concurrency}")
     print(f"  Recursive:    {recursive}")
-    print(f"  Force:        {force}")
     print("-" * 60)
 
     if not ask_yes_no("\nStart processing?", default=True):
