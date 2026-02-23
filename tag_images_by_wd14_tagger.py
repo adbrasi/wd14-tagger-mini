@@ -7,7 +7,9 @@ import io
 import json
 import logging
 import os
+import re
 import tempfile
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Tuple
@@ -834,14 +836,20 @@ def call_openrouter(
     user_prompt: str,
     image_data_uris: List[str],
     temperature: float = 0.3,
-    max_retries: int = 2,
+    max_retries: int = 3,
+    json_mode: bool = True,
 ) -> Optional[str]:
-    """Call OpenRouter API with one or more images and return the text response."""
+    """Call OpenRouter API with one or more images and return the text response.
+
+    Uses json_object response_format + response-healing plugin for reliable JSON output.
+    Retries with exponential backoff on 429/5xx errors.
+    """
     headers = {
         "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json",
     }
 
+    # OpenRouter docs: text first, then images
     content_parts = [{"type": "text", "text": user_prompt}]
     for uri in image_data_uris:
         content_parts.append({"type": "image_url", "image_url": {"url": uri}})
@@ -856,9 +864,24 @@ def call_openrouter(
         "max_tokens": 2048,
     }
 
+    if json_mode:
+        payload["response_format"] = {"type": "json_object"}
+        # response-healing auto-fixes malformed JSON from the model
+        payload["plugins"] = [{"id": "response-healing"}]
+        # Only route to providers that support json_object
+        payload["provider"] = {"require_parameters": True}
+
     for attempt in range(max_retries + 1):
         try:
             resp = requests.post(OPENROUTER_API_URL, headers=headers, json=payload, timeout=90)
+
+            # Retry on rate limit (429) and server errors (5xx)
+            if resp.status_code == 429 or resp.status_code >= 500:
+                wait = min(2 ** attempt * 2, 30)
+                logger.warning(f"OpenRouter {resp.status_code} (attempt {attempt + 1}), retrying in {wait}s...")
+                time.sleep(wait)
+                continue
+
             resp.raise_for_status()
             data = resp.json()
             return data["choices"][0]["message"]["content"].strip()
@@ -866,9 +889,41 @@ def call_openrouter(
             logger.warning(f"OpenRouter API error (attempt {attempt + 1}/{max_retries + 1}): {e}")
             if hasattr(e, "response") and e.response is not None:
                 logger.warning(f"Response: {e.response.text[:500]}")
-            if attempt == max_retries:
+            if attempt < max_retries:
+                wait = min(2 ** attempt * 2, 30)
+                time.sleep(wait)
+            else:
                 logger.error(f"OpenRouter API failed after {max_retries + 1} attempts")
                 return None
+    return None
+
+
+def parse_grok_json_output(raw: str) -> Optional[Dict]:
+    """Parse JSON output from grok, handling markdown code blocks and edge cases."""
+    text = raw.strip()
+
+    # Strip markdown code blocks if present
+    if text.startswith("```"):
+        # Remove ```json or ``` at start and ``` at end
+        text = re.sub(r"^```(?:json)?\s*\n?", "", text)
+        text = re.sub(r"\n?```\s*$", "", text)
+        text = text.strip()
+
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        pass
+
+    # Try to find the first { ... } block
+    start = text.find("{")
+    end = text.rfind("}")
+    if start != -1 and end != -1 and end > start:
+        try:
+            return json.loads(text[start : end + 1])
+        except json.JSONDecodeError:
+            pass
+
+    logger.warning(f"Could not parse JSON from grok output: {text[:200]}...")
     return None
 
 
@@ -881,7 +936,11 @@ def _grok_single_task(
     tags_str: str,
     extra_image_paths: Optional[List[str]] = None,
 ) -> Tuple[str, Optional[str]]:
-    """Process a single image through grok. Returns (image_path, caption_or_none)."""
+    """Process a single image through grok. Returns (image_path, caption_or_none).
+
+    The raw API response is JSON. We parse it and extract the caption field.
+    The full JSON is returned as the caption string (written to .txt).
+    """
     image_data_uris = []
     try:
         with Image.open(image_path) as img:
@@ -901,8 +960,23 @@ def _grok_single_task(
                 logger.warning(f"Failed to load extra image {ep}: {e}")
 
     user_prompt = user_prompt_template.replace("{tags}", tags_str)
-    caption = call_openrouter(api_key, model, system_prompt, user_prompt, image_data_uris)
-    return image_path, caption
+    raw = call_openrouter(api_key, model, system_prompt, user_prompt, image_data_uris)
+
+    if not raw:
+        return image_path, None
+
+    # Try to parse JSON and extract just the caption for the .txt file
+    parsed = parse_grok_json_output(raw)
+    if parsed and "caption" in parsed:
+        return image_path, parsed["caption"]
+
+    # If JSON parsing worked but no caption field, use the whole JSON
+    if parsed:
+        logger.debug(f"JSON parsed but no 'caption' key, using full JSON for {image_path}")
+        return image_path, json.dumps(parsed, ensure_ascii=False)
+
+    # Fallback: use raw text as-is (model didn't return valid JSON)
+    return image_path, raw
 
 
 def run_grok(
@@ -1321,7 +1395,26 @@ def main(args):
         if suggestion is not None:
             logger.info(f"Suggested batch_size based on free VRAM: {suggestion}")
 
-    if args.append_tags and not video_mode:
+    # Load existing .txt files and merge with new tags
+    if video_mode:
+        # In video mode: check for existing .txt next to the video files
+        existing_count = 0
+        for frame_path, video_path in frame_to_video.items():
+            caption_file = os.path.splitext(video_path)[0] + args.caption_extension
+            if not os.path.exists(caption_file):
+                continue
+            with open(caption_file, "rt", encoding="utf-8") as f:
+                existing = [
+                    t.strip()
+                    for t in f.read().strip("\n").split(args.caption_separator.strip())
+                    if t.strip()
+                ]
+            if existing:
+                add_tags_to_map(combined, frame_path, existing, not args.no_dedupe)
+                existing_count += 1
+        if existing_count:
+            logger.info(f"loaded existing tags from {existing_count} .txt files")
+    elif args.append_tags:
         for image_path in paths:
             caption_file = os.path.splitext(image_path)[0] + args.caption_extension
             if not os.path.exists(caption_file):

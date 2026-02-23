@@ -1,15 +1,18 @@
 # Video & Image Tagger for LoRA Training
 
-Multi-tagger pipeline for preparing datasets. Supports **images** and **videos** with automatic frame extraction.
+Multi-tagger pipeline for preparing video/image datasets. Extracts frames from videos, tags them with booru taggers, then sends tags + images to a vision LLM for natural language captioning.
 
-## Taggers
+## How It Works
 
-| Tagger | Type | Description |
-|--------|------|-------------|
-| **wd14** | Local (ONNX) | `SmilingWolf/wd-eva02-large-tagger-v3` booru tags |
-| **camie** | Local (ONNX) | `Camais03/camie-tagger-v2` booru tags |
-| **pixai** | Local (PyTorch) | `pixai-labs/pixai-tagger-v0.9` booru tags |
-| **grok** | API (OpenRouter) | Vision LLM captioning with tag context |
+```
+Videos (.mp4/.avi/...)
+  -> Extract frame 12 (or frames 6+30 in PRO mode)
+  -> Booru taggers (pixai/wd14/camie) generate structured tags
+  -> Existing .txt tags are merged in (no duplicates)
+  -> Grok (OpenRouter) receives: tags + image(s) + system prompt
+  -> Grok returns JSON with natural language caption
+  -> Output: video_name.txt next to video_name.mp4
+```
 
 ## Required API Keys
 
@@ -18,18 +21,17 @@ Multi-tagger pipeline for preparing datasets. Supports **images** and **videos**
 | `OPENROUTER_API_KEY` | grok tagger | `export OPENROUTER_API_KEY=sk-or-...` or `--grok_api_key` |
 | `HF_TOKEN` | pixai (gated model) | `export HF_TOKEN=hf_...` or `--hf_token` |
 
+Get your OpenRouter key at https://openrouter.ai/keys
+
+Get your HuggingFace token at https://huggingface.co/settings/tokens
+
 ## Quick Start (Interactive CLI)
 
 ```bash
 python cli.py
 ```
 
-The CLI will:
-1. Create a virtual environment
-2. Install all dependencies
-3. Ask for your input directory
-4. Let you choose taggers and options
-5. Run the pipeline with progress bars
+The CLI handles everything: venv creation, dependency install, menu-driven options, progress bars.
 
 ## Manual Usage
 
@@ -41,26 +43,7 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-### Tag images
-
-```bash
-python tag_images_by_wd14_tagger.py /path/to/images \
-  --taggers wd14,pixai \
-  --batch_size 8 --recursive
-```
-
-### Tag videos (extract frame 12, tag it)
-
-```bash
-python tag_images_by_wd14_tagger.py /path/to/videos \
-  --video \
-  --taggers pixai,grok \
-  --batch_size 4 --recursive
-```
-
-Output: `video_name.txt` next to `video_name.mp4`
-
-### Video + Grok pipeline (recommended for video LoRA)
+### Tag videos (recommended pipeline)
 
 ```bash
 export OPENROUTER_API_KEY=sk-or-...
@@ -74,9 +57,7 @@ python tag_images_by_wd14_tagger.py /path/to/videos \
   --recursive
 ```
 
-Pipeline: extract frame 12 -> pixai tags -> grok receives tags + image -> JSON caption output
-
-### PRO mode (2 frames per video)
+### PRO mode (2 frames per video, better quality)
 
 ```bash
 python tag_images_by_wd14_tagger.py /path/to/videos \
@@ -85,29 +66,87 @@ python tag_images_by_wd14_tagger.py /path/to/videos \
   --batch_size 4 --recursive
 ```
 
-PRO mode:
-- Extracts **frame 6** and **frame 30** from each video
-- Runs taggers on **both frames**, merges tags (deduped)
-- Sends **both images** + merged tags to grok
-- Better quality captions for videos with motion
+PRO mode extracts **frame 6** and **frame 30**, runs taggers on both (deduped), and sends **both images** to grok.
 
 Custom frame numbers: `--pro_frame_a 10 --pro_frame_b 45`
 
-## Grok Configuration
+### Tag images (no video extraction)
 
-Grok uses prompt files from `prompts/`:
-- `prompts/system_prompt.md` - System instructions for the LLM
-- `prompts/user_prompt.md` - User prompt template (use `{tags}` placeholder for booru tags)
+```bash
+python tag_images_by_wd14_tagger.py /path/to/images \
+  --taggers wd14,pixai \
+  --batch_size 8 --recursive
+```
 
-Override with: `--grok_system_prompt_file /path/to/custom.md`
+## Existing .txt Files
 
-### Grok model
+In video mode, if a `.txt` file already exists next to a video, its tags are **automatically loaded and merged** with the new tagger output (duplicates removed). This means you can run the pipeline multiple times and it accumulates tags.
+
+For image mode, use `--append_tags` to enable the same behavior.
+
+## Taggers
+
+| Tagger | Type | Description |
+|--------|------|-------------|
+| **wd14** | Local (ONNX) | `SmilingWolf/wd-eva02-large-tagger-v3` booru tags |
+| **camie** | Local (ONNX) | `Camais03/camie-tagger-v2` booru tags |
+| **pixai** | Local (PyTorch) | `pixai-labs/pixai-tagger-v0.9` booru tags |
+| **grok** | API (OpenRouter) | Vision LLM - receives tags + image, outputs natural language caption |
+
+**Important:** Grok always runs **last** so it has access to all booru tagger output as context.
+
+## Grok / OpenRouter Details
+
+### How it works
+
+1. Booru taggers run first and generate structured tags
+2. Grok receives: system prompt + user prompt (with `{tags}` replaced by booru tags) + frame image(s)
+3. API call uses `response_format: json_object` for reliable JSON output
+4. The `response-healing` plugin auto-fixes malformed JSON
+5. The `caption` field is extracted from the JSON and written to `.txt`
+
+### Prompt files
+
+Prompts are loaded from `prompts/` directory:
+- `prompts/system_prompt.md` - System instructions (what grok should do)
+- `prompts/user_prompt.md` - User prompt template (`{tags}` is replaced with booru tags)
+
+Override with: `--grok_system_prompt_file /path/to/custom.md` and `--grok_prompt_file /path/to/custom.md`
+
+### JSON output structure
+
+The system prompt instructs grok to return:
+```json
+{
+  "caption": "A detailed natural language caption...",
+  "tags_used": ["tag1", "tag2"],
+  "tags_ignored": ["bad_tag"],
+  "motion_description": "Brief motion/loop description",
+  "style": "anime / realistic / 3d / etc"
+}
+```
+
+Only the `caption` field is written to the `.txt` file.
+
+### Model selection
 
 Default: `x-ai/grok-2-vision-1212`
 
-Change with: `--grok_model google/gemini-2.0-flash-001`
+Any vision model on OpenRouter works:
+```bash
+--grok_model google/gemini-2.0-flash-001
+--grok_model anthropic/claude-sonnet-4
+--grok_model openai/gpt-4o
+```
 
-Any vision model on OpenRouter works.
+### Concurrency
+
+For thousands of videos, increase concurrent API calls:
+```bash
+--grok_concurrency 16
+```
+
+Default is 8. The API uses exponential backoff on rate limits (429).
 
 ## Shell Script
 
@@ -115,8 +154,8 @@ Any vision model on OpenRouter works.
 # Tag videos with pixai+grok
 ./run_tagger.sh /path/to/videos 4 video
 
-# Tag videos with grok only
-./run_tagger.sh /path/to/videos 1 grok
+# PRO mode (2 frames)
+./run_tagger.sh /path/to/videos 4 video-pro
 
 # Tag images (default)
 ./run_tagger.sh /path/to/images 8
@@ -173,7 +212,7 @@ output:
   --output_path FILE          Write to JSON/JSONL instead of .txt files
   --caption_extension EXT     File extension (default: .txt)
   --caption_separator SEP     Tag separator (default: ", ")
-  --append_tags               Append to existing .txt files
+  --append_tags               Append to existing .txt files (image mode)
 
 tokens:
   --hf_token TOKEN            HuggingFace token for gated models
@@ -183,6 +222,8 @@ tokens:
 
 - First run downloads models to `models/` directory
 - For max speed, increase `--batch_size` until VRAM is full
-- Frame 12 is used by default (frame 1 can be black/buggy in some videos)
-- Grok always runs LAST so it has access to booru tagger output
+- Frame 12 is used by default (frame 1 can be black/buggy)
+- Grok uses `json_object` response format + `response-healing` plugin for reliable JSON
+- Retries with exponential backoff on 429 (rate limit) and 5xx errors
 - Supported video formats: mp4, avi, mov, mkv, webm, flv, wmv
+- In video mode, existing .txt files are always merged (no `--append_tags` needed)
