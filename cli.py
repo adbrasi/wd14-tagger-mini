@@ -297,6 +297,19 @@ def list_zip_archives(path: str, recursive: bool = True) -> list[str]:
     return sorted(zips)
 
 
+def count_pending_zips(path: str, recursive: bool = True) -> int:
+    """Count zip archives that haven't been extracted yet (no valid marker file)."""
+    pending = 0
+    for zpath in list_zip_archives(path, recursive=recursive):
+        marker = zpath + ".extracted.ok"
+        try:
+            if not os.path.exists(marker) or os.path.getmtime(marker) < os.path.getmtime(zpath):
+                pending += 1
+        except OSError:
+            pending += 1
+    return pending
+
+
 def extract_zip_archives(path: str, recursive: bool = True):
     """Extract zip archives in place, with marker files for idempotency."""
     zip_files = list_zip_archives(path, recursive=recursive)
@@ -431,15 +444,19 @@ def main():
 
     zip_count = len(list_zip_archives(input_dir, recursive=True))
     if zip_count > 0:
-        print(f"[+] Found {zip_count:,} zip files in {input_dir}")
-        if ask_yes_no("Extract all zip files now?", default=True):
-            report = extract_zip_archives(input_dir, recursive=True)
-            print(
-                f"[+] Zip extraction finished: extracted={report['extracted']}, "
-                f"skipped={report['skipped']}, failed={report['failed']}"
-            )
-            if report["failed"] > 0:
-                print("[!] Some zips failed to extract. Fix them before processing.")
+        pending_zips = count_pending_zips(input_dir, recursive=True)
+        if pending_zips == 0:
+            print(f"[+] Found {zip_count:,} zip files — all already extracted, skipping.")
+        else:
+            print(f"[+] Found {zip_count:,} zip files ({pending_zips:,} pending extraction)")
+            if ask_yes_no("Extract pending zip files now?", default=True):
+                report = extract_zip_archives(input_dir, recursive=True)
+                print(
+                    f"[+] Zip extraction finished: extracted={report['extracted']}, "
+                    f"skipped={report['skipped']}, failed={report['failed']}"
+                )
+                if report["failed"] > 0:
+                    print("[!] Some zips failed to extract. Fix them before processing.")
 
     img_count = count_images_quick(input_dir, recursive=True)
     if img_count > 0:
@@ -526,7 +543,7 @@ def main():
             )
 
             if xai_batch_action == "submit":
-                xai_batch_submit_chunk = ask_input("Requests per submit call", "1000")
+                xai_batch_submit_chunk = ask_input("Requests per submit call (encoding batch size)", "5000")
                 send_images = ask_yes_no(
                     "Include images in each request? (better captions, larger payload)",
                     default=True,

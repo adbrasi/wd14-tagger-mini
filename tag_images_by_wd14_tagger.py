@@ -1364,7 +1364,8 @@ def run_grok_xai_batch(
         chunk_size = args.xai_batch_submit_chunk
         include_images = not args.xai_batch_no_image
         # ThreadPoolExecutor workers for parallel image encoding (I/O + PIL, thread-friendly)
-        encode_workers = min(16, (os.cpu_count() or 4) * 2) if include_images else 1
+        # I/O + PIL encoding is thread-bound, not CPU-bound — use more threads than cores
+        encode_workers = min(64, (os.cpu_count() or 4) * 3) if include_images else 1
 
         use_pbar = not getattr(args, "no_progress", False)
 
