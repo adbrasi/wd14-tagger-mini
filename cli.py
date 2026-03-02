@@ -543,12 +543,16 @@ def main():
             )
 
             if xai_batch_action == "submit":
-                xai_batch_submit_chunk = ask_input("Requests per submit call (encoding batch size)", "5000")
                 send_images = ask_yes_no(
                     "Include images in each request? (better captions, larger payload)",
                     default=True,
                 )
                 xai_batch_no_image = not send_images
+                chunk_default = "500" if send_images else "5000"
+                xai_batch_submit_chunk = ask_input(
+                    "Requests per submit call (encoding batch size)",
+                    chunk_default,
+                )
                 monitor_xai = ask_yes_no("Monitor batch progress after submit?", default=True)
             elif xai_batch_action == "status":
                 monitor_xai = ask_yes_no("Keep monitoring status continuously?", default=True)

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import collections
 import csv
 import gc
 import hashlib
@@ -806,6 +807,13 @@ DEFAULT_GROK_MODEL = "x-ai/grok-4.1-fast"
 DEFAULT_XAI_BATCH_MODEL = "grok-4-1-fast-non-reasoning"
 OPENROUTER_API_URL = "https://openrouter.ai/api/v1/chat/completions"
 XAI_API_BASE_URL = "https://api.x.ai"
+# xAI Batch API documented limits (docs.x.ai/guides/batch-api):
+# - max payload per add-requests call: 25 MB
+# - max add-requests calls per team: 100 every 30 seconds (rolling window)
+XAI_BATCH_MAX_ADD_PAYLOAD_BYTES = 25 * 1024 * 1024
+XAI_BATCH_PAYLOAD_SAFETY_MARGIN_BYTES = 2 * 1024 * 1024
+XAI_BATCH_MAX_ADD_CALLS_PER_30S = 100
+XAI_BATCH_ADD_WINDOW_SECONDS = 30.0
 
 PROMPTS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "prompts")
 GROK_TAG_CATEGORIES = {"character", "artist", "copyright"}
@@ -1128,6 +1136,11 @@ def _xai_request(
                 return {}
             return resp.json()
         except requests.exceptions.RequestException as e:
+            if isinstance(e, requests.exceptions.HTTPError):
+                status = e.response.status_code if e.response is not None else None
+                # 4xx client errors (except 429) are non-retriable for the same request payload.
+                if status is not None and 400 <= status < 500 and status != 429:
+                    raise
             if attempt >= max_retries:
                 raise
             wait = min(2 ** attempt, 30)
@@ -1226,6 +1239,11 @@ def _estimate_request_bytes(request_body: Dict) -> int:
     return total
 
 
+def _json_byte_size(payload: Dict) -> int:
+    """Return serialized JSON size in bytes (compact separators)."""
+    return len(json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
+
+
 def _xai_build_user_content(user_prompt: str, image_path: str, extra_image_paths: Optional[List[str]], include_images: bool):
     if not include_images:
         return user_prompt
@@ -1244,6 +1262,31 @@ def _xai_build_user_content(user_prompt: str, image_path: str, extra_image_paths
         except Exception as e:
             logger.warning(f"failed to load image for xai batch request {ipath}: {e}")
     return content_parts
+
+
+def _xai_strip_images_from_batch_request(batch_item: Dict) -> bool:
+    """Drop image parts from one batch request, keeping only text prompt content."""
+    try:
+        user_msg = batch_item["batch_request"]["chat_get_completion"]["messages"][1]
+        content = user_msg.get("content")
+        if isinstance(content, str):
+            return False
+        if not isinstance(content, list):
+            return False
+
+        text_chunks: List[str] = []
+        for part in content:
+            if not isinstance(part, dict):
+                continue
+            if part.get("type") == "text" and isinstance(part.get("text"), str):
+                text_chunks.append(part["text"])
+
+        fallback_text = "\n".join([t for t in text_chunks if t.strip()]).strip()
+        user_msg["content"] = fallback_text or "(no prompt)"
+        batch_item["_images_stripped"] = True
+        return True
+    except Exception:
+        return False
 
 
 def _resolve_collect_image_path(meta: Dict, train_data_dir: str) -> Optional[str]:
@@ -1360,8 +1403,11 @@ def run_grok_xai_batch(
 
     if action == "submit":
         submitted_now = 0
+        skipped_payload_too_large = 0
         request_map = state.setdefault("request_map", {})
         chunk_size = args.xai_batch_submit_chunk
+        if chunk_size <= 0:
+            raise ValueError("--xai_batch_submit_chunk must be >= 1")
         include_images = not args.xai_batch_no_image
         # ThreadPoolExecutor workers for parallel image encoding (I/O + PIL, thread-friendly)
         # I/O + PIL encoding is thread-bound, not CPU-bound — use more threads than cores
@@ -1399,8 +1445,11 @@ def run_grok_xai_batch(
         )
 
         # Pass 2: encode in parallel per chunk, then POST with size-aware flushing.
-        # Limit each POST to MAX_PAYLOAD_BYTES to avoid 413 errors.
-        MAX_PAYLOAD_BYTES = 12 * 1024 * 1024  # 12 MB conservative per POST
+        # API limit is 25 MB per add-requests call; keep a safety margin to avoid hard-limit failures.
+        MAX_PAYLOAD_BYTES = XAI_BATCH_MAX_ADD_PAYLOAD_BYTES - XAI_BATCH_PAYLOAD_SAFETY_MARGIN_BYTES
+        rate_limit_window = XAI_BATCH_ADD_WINDOW_SECONDS
+        max_add_calls_per_window = max(1, int(XAI_BATCH_MAX_ADD_CALLS_PER_30S * 0.9))  # 10% safety headroom
+        add_call_timestamps = collections.deque()
         submit_pbar = tqdm(total=len(to_process), desc="xai-batch submit", smoothing=0.0, unit="img") if use_pbar else None
 
         def _encode_item(item: Tuple) -> Tuple[str, str, Optional[str], Any]:
@@ -1414,79 +1463,189 @@ def run_grok_xai_batch(
             )
             return req_id, img_abs, rel_p, content
 
-        def _flush_sub_batch(sub_batch: List[Dict]) -> None:
-            """Submit a sub-batch and mark requests as submitted."""
+        def _mark_submitted(sub_batch: List[Dict]) -> None:
             nonlocal submitted_now
-            _xai_request(
-                "POST",
-                f"{args.xai_api_base_url}/v1/batches/{batch_id}/requests",
-                headers,
-                payload={"batch_requests": sub_batch},
-                timeout=300,
-            )
             for item in sub_batch:
-                request_map[item["batch_request_id"]]["state"] = "submitted"
+                req_id = item["batch_request_id"]
+                req_state = request_map.setdefault(req_id, {})
+                req_state["state"] = "submitted"
+                if item.get("_images_stripped"):
+                    req_state["image_payload"] = "stripped_due_to_413"
             submitted_now += len(sub_batch)
             state["submitted_at"] = time.time()
             _save_xai_state(state_file, state)
             if submit_pbar is not None:
-                submit_pbar.set_postfix(submitted=submitted_now)
+                submit_pbar.set_postfix(submitted=submitted_now, skipped=skipped_payload_too_large)
 
-        for chunk_start in range(0, len(to_process), chunk_size):
-            chunk = to_process[chunk_start : chunk_start + chunk_size]
-
-            if include_images and len(chunk) > 1:
-                with ThreadPoolExecutor(max_workers=encode_workers) as ex:
-                    encoded = list(ex.map(_encode_item, chunk))
-            else:
-                encoded = [_encode_item(item) for item in chunk]
-
-            # Size-aware flushing: accumulate items until payload limit, then POST
-            sub_batch: List[Dict] = []
-            sub_batch_bytes = 0
-
-            for req_id, img_abs, rel_p, user_content in encoded:
-                request_body = {
-                    "chat_get_completion": {
-                        "model": model,
-                        "messages": [
-                            {"role": "system", "content": system_prompt},
-                            {"role": "user", "content": user_content},
-                        ],
-                        "response_format": {"type": "json_object"},
-                        "reasoning_effort": "none",
-                    }
-                }
-                item_bytes = _estimate_request_bytes(request_body)
-
-                # Flush before adding if this item would push us over the limit
-                if sub_batch and sub_batch_bytes + item_bytes > MAX_PAYLOAD_BYTES:
-                    _flush_sub_batch(sub_batch)
-                    sub_batch = []
-                    sub_batch_bytes = 0
-
-                sub_batch.append({
-                    "batch_request_id": req_id,
-                    "batch_request": request_body,
-                })
-                sub_batch_bytes += item_bytes
-                request_map[req_id] = {
-                    "image_path": img_abs,
-                    "image_path_rel": rel_p if rel_p and not rel_p.startswith("..") else None,
-                    "state": "queued_for_submission",
-                }
-
-            if sub_batch:
-                _flush_sub_batch(sub_batch)
-
+        def _mark_payload_too_large(item: Dict) -> None:
+            nonlocal skipped_payload_too_large
+            req_id = item["batch_request_id"]
+            req_state = request_map.setdefault(req_id, {})
+            req_state["state"] = "failed_payload_too_large"
+            req_state["error"] = "xai_413_payload_too_large"
+            req_state["updated_at"] = time.time()
+            skipped_payload_too_large += 1
+            _save_xai_state(state_file, state)
             if submit_pbar is not None:
-                submit_pbar.update(len(chunk))
+                submit_pbar.set_postfix(submitted=submitted_now, skipped=skipped_payload_too_large)
 
-        if submit_pbar is not None:
-            submit_pbar.close()
+        def _post_sub_batch(sub_batch: List[Dict]) -> None:
+            # Respect xAI team-level add-requests rolling limit (100 calls / 30s).
+            now = time.monotonic()
+            while add_call_timestamps and now - add_call_timestamps[0] >= rate_limit_window:
+                add_call_timestamps.popleft()
+            if len(add_call_timestamps) >= max_add_calls_per_window:
+                wait = rate_limit_window - (now - add_call_timestamps[0]) + 0.05
+                if wait > 0:
+                    logger.info(
+                        "throttling xAI add-requests calls to respect rolling limit: sleeping %.2fs",
+                        wait,
+                    )
+                    time.sleep(wait)
+                    now = time.monotonic()
+                    while add_call_timestamps and now - add_call_timestamps[0] >= rate_limit_window:
+                        add_call_timestamps.popleft()
+
+            payload = {"batch_requests": sub_batch}
+            payload_bytes = _json_byte_size(payload)
+            if payload_bytes > XAI_BATCH_MAX_ADD_PAYLOAD_BYTES:
+                fake_resp = requests.Response()
+                fake_resp.status_code = 413
+                raise requests.exceptions.HTTPError(
+                    f"local payload too large before POST: {payload_bytes} bytes > "
+                    f"{XAI_BATCH_MAX_ADD_PAYLOAD_BYTES} bytes",
+                    response=fake_resp,
+                )
+            _xai_request(
+                "POST",
+                f"{args.xai_api_base_url}/v1/batches/{batch_id}/requests",
+                headers,
+                payload=payload,
+                timeout=300,
+            )
+            add_call_timestamps.append(time.monotonic())
+
+        def _flush_sub_batch(sub_batch: List[Dict]) -> None:
+            """Submit sub-batch. On 413, split recursively; for 1 item, drop images and retry once."""
+            if not sub_batch:
+                return
+            try:
+                _post_sub_batch(sub_batch)
+                _mark_submitted(sub_batch)
+                return
+            except requests.exceptions.HTTPError as e:
+                status = e.response.status_code if e.response is not None else None
+                if status != 413:
+                    raise
+
+            if len(sub_batch) > 1:
+                mid = len(sub_batch) // 2
+                logger.warning(
+                    "xAI 413 on sub-batch of %d requests; splitting into %d + %d and retrying.",
+                    len(sub_batch),
+                    mid,
+                    len(sub_batch) - mid,
+                )
+                _flush_sub_batch(sub_batch[:mid])
+                _flush_sub_batch(sub_batch[mid:])
+                return
+
+            single = sub_batch[0]
+            req_id = single["batch_request_id"]
+            if include_images and _xai_strip_images_from_batch_request(single):
+                logger.warning(
+                    "xAI 413 on single request %s; retrying once with images removed for this request.",
+                    req_id,
+                )
+                try:
+                    _post_sub_batch([single])
+                    _mark_submitted([single])
+                    return
+                except requests.exceptions.HTTPError as e:
+                    status = e.response.status_code if e.response is not None else None
+                    if status != 413:
+                        raise
+
+            logger.error(
+                "xAI 413 persists for request %s even after payload reduction; marking as failed and continuing.",
+                req_id,
+            )
+            _mark_payload_too_large(single)
+
+        try:
+            for chunk_start in range(0, len(to_process), chunk_size):
+                chunk = to_process[chunk_start : chunk_start + chunk_size]
+
+                if include_images and len(chunk) > 1:
+                    encoded = []
+                    with ThreadPoolExecutor(max_workers=encode_workers) as ex:
+                        futures = [ex.submit(_encode_item, item) for item in chunk]
+                        try:
+                            for future in as_completed(futures):
+                                encoded.append(future.result())
+                        except KeyboardInterrupt:
+                            for future in futures:
+                                future.cancel()
+                            ex.shutdown(wait=False, cancel_futures=True)
+                            logger.warning("interrupted by user while encoding xai batch payloads.")
+                            raise
+                else:
+                    encoded = [_encode_item(item) for item in chunk]
+
+                # Size-aware flushing: accumulate items until payload limit, then POST
+                sub_batch: List[Dict] = []
+                sub_batch_bytes = 0
+
+                for req_id, img_abs, rel_p, user_content in encoded:
+                    request_body = {
+                        "chat_get_completion": {
+                            "model": model,
+                            "messages": [
+                                {"role": "system", "content": system_prompt},
+                                {"role": "user", "content": user_content},
+                            ],
+                            "response_format": {"type": "json_object"},
+                            "reasoning_effort": "none",
+                        }
+                    }
+                    item_bytes = _estimate_request_bytes(request_body)
+
+                    # Flush before adding if this item would push us over the limit
+                    if sub_batch and sub_batch_bytes + item_bytes > MAX_PAYLOAD_BYTES:
+                        _flush_sub_batch(sub_batch)
+                        sub_batch = []
+                        sub_batch_bytes = 0
+
+                    sub_batch.append({
+                        "batch_request_id": req_id,
+                        "batch_request": request_body,
+                    })
+                    sub_batch_bytes += item_bytes
+                    request_map[req_id] = {
+                        "image_path": img_abs,
+                        "image_path_rel": rel_p if rel_p and not rel_p.startswith("..") else None,
+                        "state": "queued_for_submission",
+                    }
+
+                if sub_batch:
+                    _flush_sub_batch(sub_batch)
+
+                if submit_pbar is not None:
+                    submit_pbar.update(len(chunk))
+        except KeyboardInterrupt:
+            _save_xai_state(state_file, state)
+            logger.warning(
+                "xai batch submit interrupted by user (Ctrl+C). "
+                f"state saved to {state_file}; you can resume with submit/status/collect."
+            )
+            raise
+        finally:
+            if submit_pbar is not None:
+                submit_pbar.close()
 
         logger.info(
             f"xai batch submit finished: batch_id={batch_id} submitted_now={submitted_now} "
+            f"skipped_payload_too_large={skipped_payload_too_large} "
             f"total_tracked={len(request_map)} state_file={state_file}"
         )
         return {"mode": "xai-batch-submit", "completed_paths": []}
@@ -2358,5 +2517,8 @@ def setup_parser() -> argparse.ArgumentParser:
 if __name__ == "__main__":
     parser = setup_parser()
     args = parser.parse_args()
-
-    main(args)
+    try:
+        main(args)
+    except KeyboardInterrupt:
+        logger.warning("interrupted by user (Ctrl+C). exiting.")
+        raise SystemExit(130)
