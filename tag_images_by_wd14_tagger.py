@@ -1206,9 +1206,11 @@ def _xai_extract_caption_from_result(result_obj: Dict) -> Optional[str]:
         value = result_obj.get(key)
         if isinstance(value, dict):
             response_candidates.append(value)
-            nested = value.get("response")
-            if isinstance(nested, dict):
-                response_candidates.append(nested)
+            # xAI batch API returns results under batch_result.chat_get_completion
+            for nested_key in ("response", "chat_get_completion"):
+                nested = value.get(nested_key)
+                if isinstance(nested, dict):
+                    response_candidates.append(nested)
 
     for response in response_candidates:
         message = None
@@ -1965,7 +1967,10 @@ def run_grok_xai_batch(
                     pbar.update(1)
                     pbar.set_postfix(ok=success_count, err=error_count)
 
-                response_obj = item.get("response") or {}
+                # xAI batch result: batch_result.chat_get_completion.usage
+                _br = item.get("batch_result") or {}
+                _cgc = _br.get("chat_get_completion") if isinstance(_br, dict) else None
+                response_obj = _cgc or item.get("response") or {}
                 usage = response_obj.get("usage") if isinstance(response_obj, dict) else {}
                 if isinstance(usage, dict):
                     usage_totals["prompt_tokens"] += int(usage.get("prompt_tokens", 0) or 0)
