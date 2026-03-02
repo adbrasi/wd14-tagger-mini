@@ -1201,46 +1201,68 @@ def _xai_extract_content_text(content) -> str:
 
 
 def _xai_extract_caption_from_result(result_obj: Dict) -> Optional[str]:
-    response_candidates: List[Dict] = []
-    for key in ("response", "result", "batch_result"):
-        value = result_obj.get(key)
-        if isinstance(value, dict):
-            response_candidates.append(value)
-            # xAI batch API returns results under batch_result.chat_get_completion
-            for nested_key in ("response", "chat_get_completion"):
-                nested = value.get(nested_key)
-                if isinstance(nested, dict):
-                    response_candidates.append(nested)
+    """Extract caption from an xAI batch result item.
 
-    for response in response_candidates:
-        message = None
-        choices = response.get("choices") if isinstance(response, dict) else None
-        if isinstance(choices, list) and choices and isinstance(choices[0], dict):
-            message = choices[0].get("message")
-        if message is None and isinstance(response.get("message"), dict):
-            message = response.get("message")
+    Searches recursively for a dict with 'choices' (OpenAI-compatible response)
+    since the xAI batch API may nest the response under varying keys.
+    """
 
-        content_text = ""
+    def _find_choices_dicts(obj: Any, depth: int = 0) -> List[Dict]:
+        """Recursively find all dicts that contain a 'choices' key."""
+        found: List[Dict] = []
+        if depth > 5 or not isinstance(obj, dict):
+            return found
+        if "choices" in obj:
+            found.append(obj)
+        for v in obj.values():
+            if isinstance(v, dict):
+                found.extend(_find_choices_dicts(v, depth + 1))
+        return found
+
+    # Strategy 1: find any dict with 'choices' anywhere in the result
+    for candidate in _find_choices_dicts(result_obj):
+        choices = candidate.get("choices")
+        if not isinstance(choices, list) or not choices:
+            continue
+        first = choices[0]
+        if not isinstance(first, dict):
+            continue
+        message = first.get("message")
         if isinstance(message, dict):
             content_text = _xai_extract_content_text(message.get("content"))
+            if content_text:
+                parsed = parse_grok_json_output(content_text)
+                if parsed and "caption" in parsed:
+                    return parsed["caption"]
+                if parsed:
+                    return json.dumps(parsed, ensure_ascii=False)
+                return content_text
 
-        # Some xAI/OpenAI-compatible responses include output_text directly.
-        if not content_text and isinstance(response.get("output_text"), str):
-            content_text = response["output_text"].strip()
+    # Strategy 2: look for output_text or output blocks at any level
+    def _find_text_in_obj(obj: Any, depth: int = 0) -> Optional[str]:
+        if depth > 5 or not isinstance(obj, dict):
+            return None
+        if isinstance(obj.get("output_text"), str) and obj["output_text"].strip():
+            return obj["output_text"].strip()
+        if isinstance(obj.get("output"), list):
+            text = _xai_extract_content_text(obj["output"])
+            if text:
+                return text
+        for v in obj.values():
+            if isinstance(v, dict):
+                result = _find_text_in_obj(v, depth + 1)
+                if result:
+                    return result
+        return None
 
-        # Some variants return output blocks rather than choices/message.
-        if not content_text and isinstance(response.get("output"), list):
-            content_text = _xai_extract_content_text(response.get("output"))
-
-        if not content_text:
-            continue
-
-        parsed = parse_grok_json_output(content_text)
+    fallback_text = _find_text_in_obj(result_obj)
+    if fallback_text:
+        parsed = parse_grok_json_output(fallback_text)
         if parsed and "caption" in parsed:
             return parsed["caption"]
         if parsed:
             return json.dumps(parsed, ensure_ascii=False)
-        return content_text
+        return fallback_text
 
     return None
 
@@ -1937,7 +1959,18 @@ def run_grok_xai_batch(
             if not results:
                 break
 
-            for item in results:
+            for item_idx, item in enumerate(results):
+                # DEBUG: dump structure of first result to diagnose collect failures
+                if success_count == 0 and error_count == 0 and item_idx == 0:
+                    _debug_keys = {k: type(v).__name__ for k, v in item.items()}
+                    logger.info("DEBUG first batch result keys: %s", _debug_keys)
+                    _br = item.get("batch_result")
+                    if isinstance(_br, dict):
+                        logger.info("DEBUG batch_result keys: %s", {k: type(v).__name__ for k, v in _br.items()})
+                        for _bk, _bv in _br.items():
+                            if isinstance(_bv, dict):
+                                logger.info("DEBUG batch_result.%s keys: %s", _bk, {k: type(v).__name__ for k, v in _bv.items()})
+
                 req_id = item.get("batch_request_id")
                 if not req_id:
                     continue
