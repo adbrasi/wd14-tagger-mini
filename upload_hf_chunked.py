@@ -8,12 +8,16 @@ import importlib.util
 import logging
 import os
 import re
+import time
 from pathlib import Path
 from typing import Any, Iterable, List, Optional, Tuple
 
 DEFAULT_CHUNK_GB = 5.0
 DEFAULT_MAX_FILES_PER_CHUNK = 5000
 DEFAULT_EXCLUDED_DIRS = {".cache", ".git", ".hg", ".svn", "__pycache__"}
+DEFAULT_HF_TIMEOUT_SECONDS = 600
+DEFAULT_COMMIT_RETRIES = 8
+DEFAULT_RETRY_BASE_SECONDS = 4.0
 
 
 def setup_logging(verbose: bool) -> None:
@@ -147,8 +151,24 @@ def upload_folder(
     no_xet_high_performance: bool,
     excluded_dirs: set[str],
     include_hidden: bool,
+    hf_timeout_seconds: int,
+    commit_retries: int,
+    retry_base_seconds: float,
 ) -> str:
+    if hf_timeout_seconds > 0:
+        timeout_s = str(int(hf_timeout_seconds))
+        if not os.getenv("HF_HUB_DOWNLOAD_TIMEOUT"):
+            os.environ["HF_HUB_DOWNLOAD_TIMEOUT"] = timeout_s
+        if not os.getenv("HF_HUB_ETAG_TIMEOUT"):
+            os.environ["HF_HUB_ETAG_TIMEOUT"] = timeout_s
+        logging.info(
+            "HF_HUB_*_TIMEOUT set to %ss (download/etag)",
+            timeout_s,
+        )
+
+    import httpx
     from huggingface_hub import CommitOperationAdd, HfApi, create_repo
+    from huggingface_hub.errors import HfHubHTTPError
 
     if not no_xet_high_performance and not os.getenv("HF_XET_HIGH_PERFORMANCE"):
         os.environ["HF_XET_HIGH_PERFORMANCE"] = "1"
@@ -237,14 +257,72 @@ def upload_folder(
             f"chunk {idx}/{len(chunks)} - files={len(chunk)} "
             f"size={chunk_bytes / (1024**3):.2f}GB"
         )
-        api.create_commit(
-            repo_id=resolved_repo_id,
-            repo_type=repo_type,
-            operations=operations,
-            commit_message=commit_message,
-            token=token,
-            num_threads=thread_count,
-        )
+        for attempt in range(1, max(1, commit_retries) + 1):
+            try:
+                api.create_commit(
+                    repo_id=resolved_repo_id,
+                    repo_type=repo_type,
+                    operations=operations,
+                    commit_message=commit_message,
+                    token=token,
+                    num_threads=thread_count,
+                )
+                break
+            except Exception as exc:
+                status_code = None
+                retryable = isinstance(
+                    exc,
+                    (
+                        httpx.ReadTimeout,
+                        httpx.ConnectTimeout,
+                        httpx.ConnectError,
+                        httpx.RemoteProtocolError,
+                    ),
+                )
+                if isinstance(exc, HfHubHTTPError):
+                    status_code = getattr(exc.response, "status_code", None)
+                    retryable = retryable or status_code in {
+                        408,
+                        409,
+                        423,
+                        425,
+                        429,
+                        500,
+                        502,
+                        503,
+                        504,
+                        520,
+                        522,
+                        524,
+                    }
+                    low_msg = str(exc).lower()
+                    if status_code == 400 and (
+                        "no files have been modified" in low_msg
+                        or "no changes" in low_msg
+                        or "nothing to commit" in low_msg
+                    ):
+                        logging.warning(
+                            "chunk %d/%d appears already committed (no changes). continuing.",
+                            idx,
+                            len(chunks),
+                        )
+                        break
+
+                if not retryable or attempt >= max(1, commit_retries):
+                    raise
+
+                sleep_s = min(90.0, retry_base_seconds * (2 ** (attempt - 1)))
+                logging.warning(
+                    "chunk %d/%d commit failed (attempt %d/%d status=%s err=%s). retrying in %.1fs",
+                    idx,
+                    len(chunks),
+                    attempt,
+                    max(1, commit_retries),
+                    status_code,
+                    type(exc).__name__,
+                    sleep_s,
+                )
+                time.sleep(sleep_s)
         logging.info(
             "uploaded chunk %d/%d files=%d size=%.2fGB",
             idx,
@@ -274,6 +352,24 @@ def main() -> None:
     parser.add_argument("--max_files_per_chunk", type=int, default=DEFAULT_MAX_FILES_PER_CHUNK)
     parser.add_argument("--workers", type=int, default=default_workers(), help="threads for hashing/upload")
     parser.add_argument("--include_json", default=None, help="optional JSON/state file to include in upload")
+    parser.add_argument(
+        "--hf_timeout_seconds",
+        type=int,
+        default=DEFAULT_HF_TIMEOUT_SECONDS,
+        help="read timeout for HF HTTP operations (default: 600)",
+    )
+    parser.add_argument(
+        "--commit_retries",
+        type=int,
+        default=DEFAULT_COMMIT_RETRIES,
+        help="retry attempts per chunk commit on transient errors",
+    )
+    parser.add_argument(
+        "--retry_base_seconds",
+        type=float,
+        default=DEFAULT_RETRY_BASE_SECONDS,
+        help="base backoff (seconds), exponential",
+    )
     parser.add_argument(
         "--exclude_dirs",
         default=",".join(sorted(DEFAULT_EXCLUDED_DIRS)),
@@ -332,6 +428,9 @@ def main() -> None:
         no_xet_high_performance=args.no_xet_high_performance,
         excluded_dirs=excluded_dirs,
         include_hidden=args.include_hidden,
+        hf_timeout_seconds=max(0, args.hf_timeout_seconds),
+        commit_retries=max(1, args.commit_retries),
+        retry_base_seconds=max(0.1, args.retry_base_seconds),
     )
     logging.info("upload completed: %s", repo_id)
 
