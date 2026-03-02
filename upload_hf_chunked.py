@@ -13,6 +13,7 @@ from typing import Any, Iterable, List, Optional, Tuple
 
 DEFAULT_CHUNK_GB = 5.0
 DEFAULT_MAX_FILES_PER_CHUNK = 5000
+DEFAULT_EXCLUDED_DIRS = {".cache", ".git", ".hg", ".svn", "__pycache__"}
 
 
 def setup_logging(verbose: bool) -> None:
@@ -43,20 +44,41 @@ def auto_repo_id(api: Any, token: str, root: Path, seed_path: Optional[Path]) ->
     return f"{namespace}/{repo_name}"
 
 
-def iter_all_files(root: Path) -> Iterable[Path]:
-    for dirpath, _, filenames in os.walk(root):
+def iter_all_files(
+    root: Path,
+    excluded_dirs: set[str],
+    include_hidden: bool,
+) -> Iterable[Path]:
+    for dirpath, dirnames, filenames in os.walk(root):
+        # Prune ignored directories early for speed and to avoid invalid repo paths.
+        dirnames[:] = [
+            d
+            for d in dirnames
+            if d not in excluded_dirs and (include_hidden or not d.startswith("."))
+        ]
         base = Path(dirpath)
         for name in filenames:
+            if not include_hidden and name.startswith("."):
+                continue
             p = base / name
             if p.is_file():
                 yield p
 
 
-def collect_entries(root: Path, include_file: Optional[Path]) -> List[Tuple[Path, str, int]]:
+def collect_entries(
+    root: Path,
+    include_file: Optional[Path],
+    excluded_dirs: set[str],
+    include_hidden: bool,
+) -> List[Tuple[Path, str, int]]:
     entries: List[Tuple[Path, str, int]] = []
     root_resolved = root.resolve()
 
-    for p in iter_all_files(root):
+    for p in iter_all_files(
+        root=root,
+        excluded_dirs=excluded_dirs,
+        include_hidden=include_hidden,
+    ):
         entries.append((p, p.relative_to(root).as_posix(), p.stat().st_size))
 
     if include_file and include_file.exists():
@@ -123,6 +145,8 @@ def upload_folder(
     workers: int,
     include_file: Optional[Path],
     no_xet_high_performance: bool,
+    excluded_dirs: set[str],
+    include_hidden: bool,
 ) -> str:
     from huggingface_hub import CommitOperationAdd, HfApi, create_repo
 
@@ -178,7 +202,12 @@ def upload_folder(
         raise ValueError("--max_files_per_chunk must be > 0")
 
     max_chunk_bytes = int(chunk_gb * (1024**3))
-    entries = collect_entries(root=root, include_file=include_file)
+    entries = collect_entries(
+        root=root,
+        include_file=include_file,
+        excluded_dirs=excluded_dirs,
+        include_hidden=include_hidden,
+    )
     if not entries:
         raise RuntimeError(f"no files found under {root}")
 
@@ -246,6 +275,16 @@ def main() -> None:
     parser.add_argument("--workers", type=int, default=default_workers(), help="threads for hashing/upload")
     parser.add_argument("--include_json", default=None, help="optional JSON/state file to include in upload")
     parser.add_argument(
+        "--exclude_dirs",
+        default=",".join(sorted(DEFAULT_EXCLUDED_DIRS)),
+        help="comma-separated directory names to skip recursively (default excludes .cache/.git/etc)",
+    )
+    parser.add_argument(
+        "--include_hidden",
+        action="store_true",
+        help="include hidden files/dirs (disabled by default)",
+    )
+    parser.add_argument(
         "--no_xet_high_performance",
         action="store_true",
         help="do not set HF_XET_HIGH_PERFORMANCE=1 automatically",
@@ -262,6 +301,16 @@ def main() -> None:
     include_json = Path(args.include_json).resolve() if args.include_json else None
     if include_json and not include_json.exists():
         raise SystemExit(f"--include_json not found: {include_json}")
+    excluded_dirs = {
+        d.strip()
+        for d in str(args.exclude_dirs).split(",")
+        if d.strip()
+    }
+    logging.info(
+        "scan filters: include_hidden=%s excluded_dirs=%s",
+        args.include_hidden,
+        ",".join(sorted(excluded_dirs)) or "(none)",
+    )
 
     token = (args.hf_token or os.getenv(args.hf_token_env, "")).strip()
     if not token:
@@ -281,6 +330,8 @@ def main() -> None:
         workers=max(1, args.workers),
         include_file=include_json,
         no_xet_high_performance=args.no_xet_high_performance,
+        excluded_dirs=excluded_dirs,
+        include_hidden=args.include_hidden,
     )
     logging.info("upload completed: %s", repo_id)
 
