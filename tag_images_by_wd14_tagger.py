@@ -815,7 +815,7 @@ XAI_BATCH_PAYLOAD_SAFETY_MARGIN_BYTES = 2 * 1024 * 1024
 XAI_BATCH_MAX_ADD_CALLS_PER_30S = 100
 XAI_BATCH_ADD_WINDOW_SECONDS = 30.0
 # Conservative runtime cap for image-inclusive batch submits to avoid repeated 413 responses.
-XAI_BATCH_IMAGE_SAFE_PAYLOAD_BYTES = 12 * 1024 * 1024
+XAI_BATCH_IMAGE_SAFE_PAYLOAD_BYTES = 4 * 1024 * 1024
 XAI_BATCH_IMAGE_MAX_SIDE = 768
 XAI_BATCH_IMAGE_JPEG_QUALITY = 85
 XAI_BATCH_ADAPTIVE_PAYLOAD_FLOOR_BYTES = 2 * 1024 * 1024
@@ -1831,11 +1831,12 @@ def run_grok_xai_batch(
 
                     sub_batch.append(item_wrapper)
                     sub_batch_bytes += item_bytes
-                    request_map[req_id] = {
-                        "image_path": img_abs,
-                        "image_path_rel": rel_p if rel_p and not rel_p.startswith("..") else None,
-                        "state": "queued_for_submission",
-                    }
+                    with state_lock:
+                        request_map[req_id] = {
+                            "image_path": img_abs,
+                            "image_path_rel": rel_p if rel_p and not rel_p.startswith("..") else None,
+                            "state": "queued_for_submission",
+                        }
 
                 if sub_batch:
                     post_futures.append(post_pool.submit(_flush_sub_batch, list(sub_batch)))
