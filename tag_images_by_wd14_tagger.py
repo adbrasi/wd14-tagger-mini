@@ -813,6 +813,10 @@ XAI_BATCH_MAX_ADD_PAYLOAD_BYTES = 25 * 1024 * 1024
 XAI_BATCH_PAYLOAD_SAFETY_MARGIN_BYTES = 2 * 1024 * 1024
 XAI_BATCH_MAX_ADD_CALLS_PER_30S = 100
 XAI_BATCH_ADD_WINDOW_SECONDS = 30.0
+# Conservative runtime cap for image-inclusive batch submits to avoid repeated 413 responses.
+XAI_BATCH_IMAGE_SAFE_PAYLOAD_BYTES = 5 * 1024 * 1024
+XAI_BATCH_IMAGE_MAX_SIDE = 768
+XAI_BATCH_IMAGE_JPEG_QUALITY = 85
 
 PROMPTS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "prompts")
 GROK_TAG_CATEGORIES = {"character", "artist", "copyright"}
@@ -930,7 +934,7 @@ def _format_grok_tags_with_categories(tags_list: List[str], tag_category_lookup:
     return out
 
 
-def image_to_base64(image: Image.Image, max_size: int = 1024) -> str:
+def image_to_base64(image: Image.Image, max_size: int = 1024, quality: int = 90) -> str:
     """Convert PIL image to base64 data URI, resizing if needed for API efficiency."""
     w, h = image.size
     if max(w, h) > max_size:
@@ -938,8 +942,9 @@ def image_to_base64(image: Image.Image, max_size: int = 1024) -> str:
         image = image.resize((int(w * ratio), int(h * ratio)), Image.Resampling.LANCZOS)
     if image.mode != "RGB":
         image = image.convert("RGB")
+    quality = max(30, min(int(quality), 95))
     buf = io.BytesIO()
-    image.save(buf, format="JPEG", quality=90)
+    image.save(buf, format="JPEG", quality=quality)
     b64 = base64.b64encode(buf.getvalue()).decode("utf-8")
     return f"data:image/jpeg;base64,{b64}"
 
@@ -1223,22 +1228,6 @@ def _xai_extract_caption_from_result(result_obj: Dict) -> Optional[str]:
     return content_text
 
 
-def _estimate_request_bytes(request_body: Dict) -> int:
-    """Estimate serialized byte size of one batch request body (fast, no json.dumps)."""
-    total = 256  # fixed overhead for model/response_format/reasoning_effort keys
-    for msg in request_body.get("chat_get_completion", {}).get("messages", []):
-        content = msg.get("content", "")
-        if isinstance(content, str):
-            total += len(content.encode("utf-8", errors="replace"))
-        elif isinstance(content, list):
-            for part in content:
-                if part.get("type") == "image_url":
-                    total += len(part.get("image_url", {}).get("url", ""))
-                elif part.get("type") == "text":
-                    total += len(part.get("text", "").encode("utf-8", errors="replace"))
-    return total
-
-
 def _json_byte_size(payload: Dict) -> int:
     """Return serialized JSON size in bytes (compact separators)."""
     return len(json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
@@ -1258,7 +1247,18 @@ def _xai_build_user_content(user_prompt: str, image_path: str, extra_image_paths
         try:
             with Image.open(ipath) as img:
                 img = img.convert("RGB")
-                content_parts.append({"type": "image_url", "image_url": {"url": image_to_base64(img)}})
+                content_parts.append(
+                    {
+                        "type": "image_url",
+                        "image_url": {
+                            "url": image_to_base64(
+                                img,
+                                max_size=XAI_BATCH_IMAGE_MAX_SIDE,
+                                quality=XAI_BATCH_IMAGE_JPEG_QUALITY,
+                            )
+                        },
+                    }
+                )
         except Exception as e:
             logger.warning(f"failed to load image for xai batch request {ipath}: {e}")
     return content_parts
@@ -1472,7 +1472,11 @@ def run_grok_xai_batch(
 
         # Pass 2: encode in parallel per chunk, then POST with size-aware flushing.
         # API limit is 25 MB per add-requests call; keep a safety margin to avoid hard-limit failures.
-        MAX_PAYLOAD_BYTES = XAI_BATCH_MAX_ADD_PAYLOAD_BYTES - XAI_BATCH_PAYLOAD_SAFETY_MARGIN_BYTES
+        max_payload_bytes = XAI_BATCH_MAX_ADD_PAYLOAD_BYTES - XAI_BATCH_PAYLOAD_SAFETY_MARGIN_BYTES
+        if include_images:
+            max_payload_bytes = min(max_payload_bytes, XAI_BATCH_IMAGE_SAFE_PAYLOAD_BYTES)
+        submit_limits = {"target_payload_bytes": max_payload_bytes}
+        payload_overhead_bytes = _json_byte_size({"batch_requests": []})
         rate_limit_window = XAI_BATCH_ADD_WINDOW_SECONDS
         max_add_calls_per_window = max(1, int(XAI_BATCH_MAX_ADD_CALLS_PER_30S * 0.9))  # 10% safety headroom
         add_call_timestamps = collections.deque()
@@ -1501,6 +1505,7 @@ def run_grok_xai_batch(
             state["submitted_at"] = time.time()
             _save_xai_state(state_file, state)
             if submit_pbar is not None:
+                submit_pbar.update(len(sub_batch))
                 submit_pbar.set_postfix(
                     submitted=submitted_now,
                     skipped=skipped_payload_too_large,
@@ -1517,6 +1522,7 @@ def run_grok_xai_batch(
             skipped_payload_too_large += 1
             _save_xai_state(state_file, state)
             if submit_pbar is not None:
+                submit_pbar.update(1)
                 submit_pbar.set_postfix(
                     submitted=submitted_now,
                     skipped=skipped_payload_too_large,
@@ -1534,6 +1540,7 @@ def run_grok_xai_batch(
             failed_submit_requests += 1
             _save_xai_state(state_file, state)
             if submit_pbar is not None:
+                submit_pbar.update(1)
                 submit_pbar.set_postfix(
                     submitted=submitted_now,
                     skipped=skipped_payload_too_large,
@@ -1559,12 +1566,12 @@ def run_grok_xai_batch(
 
             payload = {"batch_requests": sub_batch}
             payload_bytes = _json_byte_size(payload)
-            if payload_bytes > XAI_BATCH_MAX_ADD_PAYLOAD_BYTES:
+            if payload_bytes > submit_limits["target_payload_bytes"]:
                 fake_resp = requests.Response()
                 fake_resp.status_code = 413
                 raise requests.exceptions.HTTPError(
                     f"local payload too large before POST: {payload_bytes} bytes > "
-                    f"{XAI_BATCH_MAX_ADD_PAYLOAD_BYTES} bytes",
+                    f"{submit_limits['target_payload_bytes']} bytes",
                     response=fake_resp,
                 )
             _xai_request(
@@ -1613,6 +1620,15 @@ def run_grok_xai_batch(
 
             # For payload/content/validation failures on mixed sub-batches, split and isolate.
             if status in (400, 403, 404, 413, 422) and len(sub_batch) > 1:
+                if status == 413:
+                    current_bytes = _json_byte_size({"batch_requests": sub_batch})
+                    lowered = max(int(current_bytes * 0.75), 512 * 1024)
+                    if lowered < submit_limits["target_payload_bytes"]:
+                        submit_limits["target_payload_bytes"] = lowered
+                        logger.warning(
+                            "adapting submit payload target after 413: new_target=%d bytes",
+                            submit_limits["target_payload_bytes"],
+                        )
                 mid = len(sub_batch) // 2
                 logger.warning(
                     "xAI HTTP %s on sub-batch of %d requests; splitting into %d + %d and retrying.",
@@ -1706,21 +1722,24 @@ def run_grok_xai_batch(
                                 {"role": "user", "content": user_content},
                             ],
                             "response_format": {"type": "json_object"},
-                            "reasoning_effort": "none",
                         }
                     }
-                    item_bytes = _estimate_request_bytes(request_body)
+                    item_wrapper = {
+                        "batch_request_id": req_id,
+                        "batch_request": request_body,
+                    }
+                    item_bytes = _json_byte_size(item_wrapper)
+                    next_payload_bytes = payload_overhead_bytes + sub_batch_bytes + item_bytes
+                    if sub_batch:
+                        next_payload_bytes += 1  # comma separator between JSON array items
 
                     # Flush before adding if this item would push us over the limit
-                    if sub_batch and sub_batch_bytes + item_bytes > MAX_PAYLOAD_BYTES:
+                    if sub_batch and next_payload_bytes > submit_limits["target_payload_bytes"]:
                         _flush_sub_batch(sub_batch)
                         sub_batch = []
                         sub_batch_bytes = 0
 
-                    sub_batch.append({
-                        "batch_request_id": req_id,
-                        "batch_request": request_body,
-                    })
+                    sub_batch.append(item_wrapper)
                     sub_batch_bytes += item_bytes
                     request_map[req_id] = {
                         "image_path": img_abs,
@@ -1730,9 +1749,6 @@ def run_grok_xai_batch(
 
                 if sub_batch:
                     _flush_sub_batch(sub_batch)
-
-                if submit_pbar is not None:
-                    submit_pbar.update(len(chunk))
         except KeyboardInterrupt:
             _save_xai_state(state_file, state)
             logger.warning(
