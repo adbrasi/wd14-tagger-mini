@@ -11,6 +11,7 @@ import sys
 import time
 import json
 import hashlib
+import zipfile
 
 import requests
 
@@ -273,13 +274,72 @@ def count_images_quick(path: str, recursive: bool = True) -> int:
     return count
 
 
+def list_zip_archives(path: str, recursive: bool = True) -> list[str]:
+    """List .zip files under a directory."""
+    zips: list[str] = []
+    try:
+        if recursive:
+            for root, _, files in os.walk(path):
+                for f in files:
+                    if f.lower().endswith(".zip"):
+                        zips.append(os.path.join(root, f))
+        else:
+            for f in os.listdir(path):
+                full = os.path.join(path, f)
+                if os.path.isfile(full) and f.lower().endswith(".zip"):
+                    zips.append(full)
+    except OSError:
+        pass
+    return sorted(zips)
+
+
+def extract_zip_archives(path: str, recursive: bool = True):
+    """Extract zip archives in place, with marker files for idempotency."""
+    zip_files = list_zip_archives(path, recursive=recursive)
+    if not zip_files:
+        return {"total": 0, "extracted": 0, "skipped": 0, "failed": 0}
+
+    extracted = 0
+    skipped = 0
+    failed = 0
+
+    print(f"[*] Found {len(zip_files):,} zip archives. Extracting in place...")
+    for idx, zpath in enumerate(zip_files, 1):
+        marker = zpath + ".extracted.ok"
+        try:
+            z_mtime = os.path.getmtime(zpath)
+            if os.path.exists(marker) and os.path.getmtime(marker) >= z_mtime:
+                skipped += 1
+                continue
+
+            with zipfile.ZipFile(zpath, "r") as zf:
+                zf.extractall(os.path.dirname(zpath))
+
+            with open(marker, "w", encoding="utf-8") as f:
+                f.write(json.dumps({"zip": zpath, "extracted_at": time.time()}, ensure_ascii=False))
+
+            extracted += 1
+            if idx % 50 == 0 or idx == len(zip_files):
+                print(f"    progress: {idx}/{len(zip_files)} zips")
+        except Exception as e:
+            failed += 1
+            print(f"[!] Failed to extract {zpath}: {e}")
+
+    return {
+        "total": len(zip_files),
+        "extracted": extracted,
+        "skipped": skipped,
+        "failed": failed,
+    }
+
+
 def _collect_precheck(xai_batch_state_file: str, xai_api_key: str) -> bool:
     """Show batch status before collect and ask user if partial is ok.
     Returns False if user aborts.
     """
-    print("\n[!] IMPORTANT: collect writes .txt files using the SAME absolute paths recorded")
-    print("    during submit. Run this on the SAME machine/volume where images were located")
-    print("    when you submitted the batch.\n")
+    print("\n[!] IMPORTANT: collect writes .txt next to images.")
+    print("    Prefer same machine/path as submit. If using another machine, keep the")
+    print("    same dataset folder structure under the chosen input directory.\n")
 
     if not os.path.exists(xai_batch_state_file):
         print(f"[!] State file not found: {xai_batch_state_file}")
@@ -364,6 +424,18 @@ def main():
     if not input_dir or not os.path.isdir(input_dir):
         print(f"[!] Directory not found: {input_dir}")
         sys.exit(1)
+
+    zip_count = len(list_zip_archives(input_dir, recursive=True))
+    if zip_count > 0:
+        print(f"[+] Found {zip_count:,} zip files in {input_dir}")
+        if ask_yes_no("Extract all zip files now?", default=True):
+            report = extract_zip_archives(input_dir, recursive=True)
+            print(
+                f"[+] Zip extraction finished: extracted={report['extracted']}, "
+                f"skipped={report['skipped']}, failed={report['failed']}"
+            )
+            if report["failed"] > 0:
+                print("[!] Some zips failed to extract. Fix them before processing.")
 
     img_count = count_images_quick(input_dir, recursive=True)
     if img_count > 0:

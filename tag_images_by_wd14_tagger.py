@@ -1211,6 +1211,21 @@ def _xai_build_user_content(user_prompt: str, image_path: str, extra_image_paths
     return content_parts
 
 
+def _resolve_collect_image_path(meta: Dict, train_data_dir: str) -> Optional[str]:
+    """Resolve image path from batch metadata, supporting cross-machine collect."""
+    abs_path = meta.get("image_path")
+    if abs_path and os.path.exists(abs_path):
+        return abs_path
+
+    rel_path = meta.get("image_path_rel")
+    if rel_path:
+        candidate = os.path.join(os.path.abspath(train_data_dir), rel_path)
+        if os.path.exists(candidate):
+            return candidate
+
+    return None
+
+
 def run_grok_xai_batch(
     paths: List[str],
     args,
@@ -1231,6 +1246,7 @@ def run_grok_xai_batch(
     system_prompt = get_system_prompt(args)
     user_prompt_template = get_user_prompt_template(args)
     tag_category_lookup = _load_grok_tag_category_lookup(args)
+    train_data_dir_abs = os.path.abspath(args.train_data_dir)
 
     state_file = _resolve_xai_state_file(args)
     state = _load_xai_state(state_file)
@@ -1316,7 +1332,15 @@ def run_grok_xai_batch(
         pbar = tqdm(total=len(paths), desc="xai-batch submit", smoothing=0.0, unit="img") if use_pbar else None
 
         for image_path in paths:
-            req_id = "req_" + hashlib.sha1(os.path.abspath(image_path).encode("utf-8")).hexdigest()
+            image_abs = os.path.abspath(image_path)
+            rel_path = None
+            try:
+                rel_path = os.path.relpath(image_abs, train_data_dir_abs)
+            except Exception:
+                rel_path = None
+
+            req_id_seed = rel_path if rel_path and not rel_path.startswith("..") else image_abs
+            req_id = "req_" + hashlib.sha1(req_id_seed.encode("utf-8")).hexdigest()
             existing_req = request_map.get(req_id, {})
             existing_state = existing_req.get("state")
             if pbar is not None:
@@ -1354,7 +1378,8 @@ def run_grok_xai_batch(
                 }
             )
             request_map[req_id] = {
-                "image_path": image_path,
+                "image_path": image_abs,
+                "image_path_rel": rel_path if rel_path and not rel_path.startswith("..") else None,
                 "state": "queued_for_submission",
             }
 
@@ -1453,8 +1478,12 @@ def run_grok_xai_batch(
                 if not req_id:
                     continue
                 meta = request_map.get(req_id, {})
-                image_path = meta.get("image_path")
+                image_path = _resolve_collect_image_path(meta, args.train_data_dir)
                 if not image_path:
+                    logger.warning(
+                        f"could not resolve local image path for batch_request_id={req_id}. "
+                        "Ensure dataset is extracted with same folder structure before collect."
+                    )
                     continue
 
                 caption = _xai_extract_caption_from_result(item)
