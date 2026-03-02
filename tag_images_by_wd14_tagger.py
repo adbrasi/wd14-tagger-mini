@@ -1959,18 +1959,7 @@ def run_grok_xai_batch(
             if not results:
                 break
 
-            for item_idx, item in enumerate(results):
-                # DEBUG: dump structure of first result to diagnose collect failures
-                if success_count == 0 and error_count == 0 and item_idx == 0:
-                    _debug_keys = {k: type(v).__name__ for k, v in item.items()}
-                    logger.info("DEBUG first batch result keys: %s", _debug_keys)
-                    _br = item.get("batch_result")
-                    if isinstance(_br, dict):
-                        logger.info("DEBUG batch_result keys: %s", {k: type(v).__name__ for k, v in _br.items()})
-                        for _bk, _bv in _br.items():
-                            if isinstance(_bv, dict):
-                                logger.info("DEBUG batch_result.%s keys: %s", _bk, {k: type(v).__name__ for k, v in _bv.items()})
-
+            for item in results:
                 req_id = item.get("batch_request_id")
                 if not req_id:
                     continue
