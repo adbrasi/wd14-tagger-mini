@@ -9,6 +9,7 @@ import logging
 import os
 import re
 import time
+import zipfile
 from pathlib import Path
 from typing import Any, Iterable, List, Optional, Tuple
 
@@ -18,6 +19,7 @@ DEFAULT_EXCLUDED_DIRS = {".cache", ".git", ".hg", ".svn", "__pycache__"}
 DEFAULT_HF_TIMEOUT_SECONDS = 600
 DEFAULT_COMMIT_RETRIES = 8
 DEFAULT_RETRY_BASE_SECONDS = 4.0
+DEFAULT_ZIP_PATH_PREFIX = "chunks"
 
 
 def setup_logging(verbose: bool) -> None:
@@ -137,6 +139,23 @@ def chunk_entries(
     return chunks
 
 
+def build_chunk_zip(
+    chunk: List[Tuple[Path, str, int]],
+    zip_path: Path,
+    compression: int,
+) -> int:
+    zip_path.parent.mkdir(parents=True, exist_ok=True)
+    with zipfile.ZipFile(
+        zip_path,
+        mode="w",
+        compression=compression,
+        allowZip64=True,
+    ) as zf:
+        for local_path, rel_path, _ in chunk:
+            zf.write(local_path, arcname=rel_path)
+    return zip_path.stat().st_size
+
+
 def upload_folder(
     root: Path,
     token: str,
@@ -154,6 +173,10 @@ def upload_folder(
     hf_timeout_seconds: int,
     commit_retries: int,
     retry_base_seconds: float,
+    chunk_payload: str,
+    zip_compression: str,
+    zip_temp_dir: Path,
+    zip_path_prefix: str,
 ) -> str:
     if hf_timeout_seconds > 0:
         timeout_s = str(int(hf_timeout_seconds))
@@ -220,6 +243,8 @@ def upload_folder(
         raise ValueError("--chunk_gb must be > 0")
     if max_files_per_chunk <= 0:
         raise ValueError("--max_files_per_chunk must be > 0")
+    if chunk_payload not in {"zip", "files"}:
+        raise ValueError("--chunk_payload must be 'zip' or 'files'")
 
     max_chunk_bytes = int(chunk_gb * (1024**3))
     entries = collect_entries(
@@ -238,7 +263,8 @@ def upload_folder(
         max_files_per_chunk=max_files_per_chunk,
     )
     logging.info(
-        "upload strategy=chunked files=%d total=%.2fGB chunks=%d chunk_target=%.2fGB max_files_chunk=%d",
+        "upload strategy=chunked payload=%s files=%d total=%.2fGB chunks=%d chunk_target=%.2fGB max_files_chunk=%d",
+        chunk_payload,
         len(entries),
         total_bytes / (1024**3),
         len(chunks),
@@ -246,17 +272,59 @@ def upload_folder(
         max_files_per_chunk,
     )
 
+    zip_compression_mode = (
+        zipfile.ZIP_DEFLATED if zip_compression == "deflate" else zipfile.ZIP_STORED
+    )
+    clean_prefix = zip_path_prefix.strip().strip("/")
+    if not clean_prefix:
+        clean_prefix = DEFAULT_ZIP_PATH_PREFIX
+
     thread_count = max(4, min(64, workers))
     for idx, chunk in enumerate(chunks, start=1):
         chunk_bytes = sum(size for _, _, size in chunk)
-        operations = [
-            CommitOperationAdd(path_in_repo=rel_path, path_or_fileobj=str(local_path))
-            for local_path, rel_path, _ in chunk
-        ]
-        commit_message = (
-            f"chunk {idx}/{len(chunks)} - files={len(chunk)} "
-            f"size={chunk_bytes / (1024**3):.2f}GB"
-        )
+        operations: List[CommitOperationAdd] = []
+        commit_message = ""
+        temp_zip_path: Optional[Path] = None
+
+        if chunk_payload == "zip":
+            zip_name = f"chunk_{idx:05d}.zip"
+            temp_zip_path = zip_temp_dir / zip_name
+            zip_size = build_chunk_zip(
+                chunk=chunk,
+                zip_path=temp_zip_path,
+                compression=zip_compression_mode,
+            )
+            zip_repo_path = f"{clean_prefix}/{zip_name}"
+            operations = [
+                CommitOperationAdd(
+                    path_in_repo=zip_repo_path,
+                    path_or_fileobj=str(temp_zip_path),
+                )
+            ]
+            commit_message = (
+                f"zip chunk {idx}/{len(chunks)} - src_files={len(chunk)} "
+                f"src_size={chunk_bytes / (1024**3):.2f}GB "
+                f"zip_size={zip_size / (1024**3):.2f}GB"
+            )
+            logging.info(
+                "built zip for chunk %d/%d: %s size=%.2fGB (src=%.2fGB files=%d)",
+                idx,
+                len(chunks),
+                temp_zip_path,
+                zip_size / (1024**3),
+                chunk_bytes / (1024**3),
+                len(chunk),
+            )
+        else:
+            operations = [
+                CommitOperationAdd(path_in_repo=rel_path, path_or_fileobj=str(local_path))
+                for local_path, rel_path, _ in chunk
+            ]
+            commit_message = (
+                f"chunk {idx}/{len(chunks)} - files={len(chunk)} "
+                f"size={chunk_bytes / (1024**3):.2f}GB"
+            )
+
         for attempt in range(1, max(1, commit_retries) + 1):
             try:
                 api.create_commit(
@@ -330,6 +398,11 @@ def upload_folder(
             len(chunk),
             chunk_bytes / (1024**3),
         )
+        if temp_zip_path and temp_zip_path.exists():
+            try:
+                temp_zip_path.unlink()
+            except OSError:
+                logging.warning("failed to remove temp zip: %s", temp_zip_path)
 
     return resolved_repo_id
 
@@ -346,12 +419,34 @@ def main() -> None:
         "--strategy",
         choices=["chunked", "large-folder"],
         default="chunked",
-        help="chunked=5GB commits (default), large-folder=upload_large_folder",
+        help="chunked=chunk commits (default), large-folder=upload_large_folder",
     )
     parser.add_argument("--chunk_gb", type=float, default=DEFAULT_CHUNK_GB, help="chunk size for strategy=chunked")
     parser.add_argument("--max_files_per_chunk", type=int, default=DEFAULT_MAX_FILES_PER_CHUNK)
     parser.add_argument("--workers", type=int, default=default_workers(), help="threads for hashing/upload")
     parser.add_argument("--include_json", default=None, help="optional JSON/state file to include in upload")
+    parser.add_argument(
+        "--chunk_payload",
+        choices=["zip", "files"],
+        default="zip",
+        help="for strategy=chunked: upload one zip per chunk (default) or individual files",
+    )
+    parser.add_argument(
+        "--zip_compression",
+        choices=["store", "deflate"],
+        default="store",
+        help="zip compression mode when --chunk_payload=zip (store is faster)",
+    )
+    parser.add_argument(
+        "--zip_temp_dir",
+        default=None,
+        help="temporary directory for local zip creation (default: <root>/.hf_upload_tmp)",
+    )
+    parser.add_argument(
+        "--zip_path_prefix",
+        default=DEFAULT_ZIP_PATH_PREFIX,
+        help="path prefix in repo for zip chunks (default: chunks)",
+    )
     parser.add_argument(
         "--hf_timeout_seconds",
         type=int,
@@ -397,15 +492,23 @@ def main() -> None:
     include_json = Path(args.include_json).resolve() if args.include_json else None
     if include_json and not include_json.exists():
         raise SystemExit(f"--include_json not found: {include_json}")
+    zip_temp_dir = (
+        Path(args.zip_temp_dir).resolve()
+        if args.zip_temp_dir
+        else (root / ".hf_upload_tmp").resolve()
+    )
+    zip_temp_dir.mkdir(parents=True, exist_ok=True)
     excluded_dirs = {
         d.strip()
         for d in str(args.exclude_dirs).split(",")
         if d.strip()
     }
+    excluded_dirs.add(zip_temp_dir.name)
     logging.info(
-        "scan filters: include_hidden=%s excluded_dirs=%s",
+        "scan filters: include_hidden=%s excluded_dirs=%s chunk_payload=%s",
         args.include_hidden,
         ",".join(sorted(excluded_dirs)) or "(none)",
+        args.chunk_payload,
     )
 
     token = (args.hf_token or os.getenv(args.hf_token_env, "")).strip()
@@ -431,6 +534,10 @@ def main() -> None:
         hf_timeout_seconds=max(0, args.hf_timeout_seconds),
         commit_retries=max(1, args.commit_retries),
         retry_base_seconds=max(0.1, args.retry_base_seconds),
+        chunk_payload=args.chunk_payload,
+        zip_compression=args.zip_compression,
+        zip_temp_dir=zip_temp_dir,
+        zip_path_prefix=args.zip_path_prefix,
     )
     logging.info("upload completed: %s", repo_id)
 
