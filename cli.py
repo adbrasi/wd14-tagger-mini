@@ -123,14 +123,43 @@ def resolve_default_xai_state_file(input_dir: str) -> str:
     return os.path.join(parent_dir, f".xai_batch_state_{dataset_name}_{key}.json")
 
 
-def fetch_xai_batch_status(batch_id: str, api_key: str, base_url: str = XAI_API_BASE_URL) -> dict:
+def fetch_xai_batch_status(
+    batch_id: str,
+    api_key: str,
+    base_url: str = XAI_API_BASE_URL,
+    max_retries: int = 5,
+) -> dict:
     headers = {
         "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json",
     }
-    resp = requests.get(f"{base_url}/v1/batches/{batch_id}", headers=headers, timeout=120)
-    resp.raise_for_status()
-    return resp.json()
+    url = f"{base_url}/v1/batches/{batch_id}"
+
+    for attempt in range(max_retries + 1):
+        try:
+            resp = requests.get(url, headers=headers, timeout=120)
+
+            # Retry transient throttling/server errors.
+            if resp.status_code == 429 or resp.status_code >= 500:
+                if attempt >= max_retries:
+                    resp.raise_for_status()
+                wait = min(2 ** attempt, 30)
+                time.sleep(wait)
+                continue
+
+            resp.raise_for_status()
+            return resp.json()
+        except requests.exceptions.RequestException as e:
+            status = e.response.status_code if getattr(e, "response", None) is not None else None
+            # Non-retriable client errors (except 429).
+            if status is not None and 400 <= status < 500 and status != 429:
+                raise
+            if attempt >= max_retries:
+                raise
+            wait = min(2 ** attempt, 30)
+            time.sleep(wait)
+
+    return {}
 
 
 def monitor_xai_batch(state_file: str, api_key: str, base_url: str, poll_seconds: int = 20):
@@ -152,9 +181,23 @@ def monitor_xai_batch(state_file: str, api_key: str, base_url: str, poll_seconds
 
     first_ts = None
     first_done = None
+    consecutive_errors = 0
 
     while True:
-        data = fetch_xai_batch_status(batch_id, api_key, base_url)
+        try:
+            data = fetch_xai_batch_status(batch_id, api_key, base_url)
+            consecutive_errors = 0
+        except requests.exceptions.RequestException as e:
+            status = e.response.status_code if getattr(e, "response", None) is not None else None
+            timestamp = time.strftime("%H:%M:%S")
+            if status in (401, 403, 404):
+                print(f"[{timestamp}] [!] Monitor stopped: HTTP {status} (non-retriable).")
+                raise
+            consecutive_errors += 1
+            print(f"[{timestamp}] [!] transient monitor error ({consecutive_errors}): {e}")
+            time.sleep(poll_seconds)
+            continue
+
         counters = data.get("state", {})
         total = int(counters.get("num_requests", 0) or 0)
         pending = int(counters.get("num_pending", 0) or 0)
@@ -651,6 +694,7 @@ def main():
             if xai_batch_action in ("status", "collect"):
                 taggers = "grok"
                 cmd = [python, TAGGER_SCRIPT, input_dir, "--taggers", taggers, "--batch_size", batch_size]
+                cmd.extend(["--grok_provider", grok_provider])
                 if is_video:
                     cmd.append("--video")
                 if pro_mode:
