@@ -1191,7 +1191,8 @@ def _xai_extract_content_text(content) -> str:
         chunks = []
         for part in content:
             if isinstance(part, dict):
-                if part.get("type") == "text" and isinstance(part.get("text"), str):
+                part_type = part.get("type")
+                if part_type in {"text", "output_text"} and isinstance(part.get("text"), str):
                     chunks.append(part["text"])
                 elif isinstance(part.get("content"), str):
                     chunks.append(part["content"])
@@ -1200,35 +1201,46 @@ def _xai_extract_content_text(content) -> str:
 
 
 def _xai_extract_caption_from_result(result_obj: Dict) -> Optional[str]:
-    response = result_obj.get("response")
-    if response is None and isinstance(result_obj.get("result"), dict):
-        response = result_obj["result"].get("response")
-    if response is None and isinstance(result_obj.get("batch_result"), dict):
-        response = result_obj["batch_result"].get("response")
-    if response is None:
-        return None
+    response_candidates: List[Dict] = []
+    for key in ("response", "result", "batch_result"):
+        value = result_obj.get(key)
+        if isinstance(value, dict):
+            response_candidates.append(value)
+            nested = value.get("response")
+            if isinstance(nested, dict):
+                response_candidates.append(nested)
 
-    message = None
-    if isinstance(response, dict):
-        choices = response.get("choices")
-        if isinstance(choices, list) and choices:
+    for response in response_candidates:
+        message = None
+        choices = response.get("choices") if isinstance(response, dict) else None
+        if isinstance(choices, list) and choices and isinstance(choices[0], dict):
             message = choices[0].get("message")
         if message is None and isinstance(response.get("message"), dict):
             message = response.get("message")
 
-    if not isinstance(message, dict):
-        return None
+        content_text = ""
+        if isinstance(message, dict):
+            content_text = _xai_extract_content_text(message.get("content"))
 
-    content_text = _xai_extract_content_text(message.get("content"))
-    if not content_text:
-        return None
+        # Some xAI/OpenAI-compatible responses include output_text directly.
+        if not content_text and isinstance(response.get("output_text"), str):
+            content_text = response["output_text"].strip()
 
-    parsed = parse_grok_json_output(content_text)
-    if parsed and "caption" in parsed:
-        return parsed["caption"]
-    if parsed:
-        return json.dumps(parsed, ensure_ascii=False)
-    return content_text
+        # Some variants return output blocks rather than choices/message.
+        if not content_text and isinstance(response.get("output"), list):
+            content_text = _xai_extract_content_text(response.get("output"))
+
+        if not content_text:
+            continue
+
+        parsed = parse_grok_json_output(content_text)
+        if parsed and "caption" in parsed:
+            return parsed["caption"]
+        if parsed:
+            return json.dumps(parsed, ensure_ascii=False)
+        return content_text
+
+    return None
 
 
 def _json_byte_size(payload: Dict) -> int:
