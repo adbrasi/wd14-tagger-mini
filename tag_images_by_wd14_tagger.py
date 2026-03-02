@@ -13,7 +13,6 @@ import os
 import re
 import tempfile
 import time
-import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
@@ -1121,16 +1120,17 @@ def _xai_request(
                 params=params,
                 timeout=timeout,
             )
-            # 413 = payload too large: retrying with the same body won't help, fail fast
-            if resp.status_code == 413:
-                resp.raise_for_status()
-
             if resp.status_code == 429 or resp.status_code >= 500:
                 wait = min(2 ** attempt, 30)
                 logger.warning(f"xAI API {resp.status_code} on {url} (attempt {attempt + 1}), retrying in {wait}s...")
                 time.sleep(wait)
                 continue
 
+            if resp.status_code >= 400:
+                body_preview = (resp.text or "").strip().replace("\n", " ")
+                if len(body_preview) > 800:
+                    body_preview = body_preview[:800] + "..."
+                logger.error("xAI API %s on %s: %s", resp.status_code, url, body_preview or "<empty body>")
             resp.raise_for_status()
             if not resp.text:
                 return {}
@@ -1338,21 +1338,14 @@ def run_grok_xai_batch(
             "batch_id": None,
             "batch_name": None,
             "model": model,
-            "conv_id": str(uuid.uuid4()),
             "system_prompt_sha256": system_prompt_hash,
             "state_file": state_file,
             "request_map": {},
             "created_at": time.time(),
         }
 
-    # Ensure conv_id exists in state (migrate old state files)
-    if not state.get("conv_id"):
-        state["conv_id"] = str(uuid.uuid4())
-    conv_id: str = state["conv_id"]
-
-    # Rebuild headers with conv_id so every HTTP request to xAI carries it,
-    # maximising the chance that the system prompt is served from cache.
-    headers = _xai_headers(api_key, conv_id=conv_id)
+    # Batch API docs do not require x-grok-conv-id; keep headers minimal for compatibility.
+    headers = _xai_headers(api_key)
 
     # Warn if the system prompt changed since the batch was created (would bust cache)
     saved_hash = state.get("system_prompt_sha256")
@@ -1368,7 +1361,7 @@ def run_grok_xai_batch(
 
     action = args.xai_batch_action
 
-    if not state.get("batch_id") and action in ("submit",):
+    def _create_xai_batch(reason: Optional[str] = None) -> str:
         batch_name = args.xai_batch_name or f"tagger_{int(time.time())}"
         created = _xai_request(
             "POST",
@@ -1376,18 +1369,44 @@ def run_grok_xai_batch(
             headers,
             payload={"name": batch_name},
         )
-        batch_id = created.get("batch_id")
-        if not batch_id:
+        new_batch_id = created.get("batch_id")
+        if not new_batch_id:
             raise RuntimeError(f"failed to create xai batch. response: {created}")
-        state["batch_id"] = batch_id
+        state["batch_id"] = new_batch_id
         state["batch_name"] = created.get("name", batch_name)
         state["batch_created_at"] = created.get("created_at")
+        if reason:
+            state["batch_reset_reason"] = reason
+            state["batch_reset_at"] = time.time()
         _save_xai_state(state_file, state)
-        logger.info(f"created xai batch: {batch_id}")
+        logger.info(f"created xai batch: {new_batch_id}")
+        return new_batch_id
+
+    if not state.get("batch_id") and action in ("submit",):
+        _create_xai_batch(reason="initial_create")
 
     batch_id = state.get("batch_id")
     if not batch_id:
         raise ValueError(f"xai batch state has no batch_id: {state_file}. run with --xai_batch_action submit first.")
+
+    if action == "submit":
+        try:
+            batch_meta = _xai_request("GET", f"{args.xai_api_base_url}/v1/batches/{batch_id}", headers)
+            state["last_status"] = batch_meta
+            _save_xai_state(state_file, state)
+        except requests.exceptions.HTTPError as e:
+            status = e.response.status_code if e.response is not None else None
+            if status in (403, 404):
+                logger.warning(
+                    "existing batch_id=%s in state file is not writable/visible with this key (HTTP %s). "
+                    "creating a fresh batch and resetting request_map for submit.",
+                    batch_id,
+                    status,
+                )
+                state["request_map"] = {}
+                batch_id = _create_xai_batch(reason=f"preflight_http_{status}")
+            else:
+                raise
 
     if action == "status":
         batch_meta = _xai_request("GET", f"{args.xai_api_base_url}/v1/batches/{batch_id}", headers)
@@ -1404,7 +1423,14 @@ def run_grok_xai_batch(
     if action == "submit":
         submitted_now = 0
         skipped_payload_too_large = 0
+        failed_submit_requests = 0
         request_map = state.setdefault("request_map", {})
+        if args.force and request_map:
+            logger.info("force mode enabled: clearing prior xai request_map states before submit.")
+            request_map.clear()
+            state["request_map_force_reset_at"] = time.time()
+            _save_xai_state(state_file, state)
+        rotated_batch_after_forbidden = False
         chunk_size = args.xai_batch_submit_chunk
         if chunk_size <= 0:
             raise ValueError("--xai_batch_submit_chunk must be >= 1")
@@ -1475,7 +1501,11 @@ def run_grok_xai_batch(
             state["submitted_at"] = time.time()
             _save_xai_state(state_file, state)
             if submit_pbar is not None:
-                submit_pbar.set_postfix(submitted=submitted_now, skipped=skipped_payload_too_large)
+                submit_pbar.set_postfix(
+                    submitted=submitted_now,
+                    skipped=skipped_payload_too_large,
+                    failed=failed_submit_requests,
+                )
 
         def _mark_payload_too_large(item: Dict) -> None:
             nonlocal skipped_payload_too_large
@@ -1487,7 +1517,28 @@ def run_grok_xai_batch(
             skipped_payload_too_large += 1
             _save_xai_state(state_file, state)
             if submit_pbar is not None:
-                submit_pbar.set_postfix(submitted=submitted_now, skipped=skipped_payload_too_large)
+                submit_pbar.set_postfix(
+                    submitted=submitted_now,
+                    skipped=skipped_payload_too_large,
+                    failed=failed_submit_requests,
+                )
+
+        def _mark_failed_request(item: Dict, status: Optional[int], message: str) -> None:
+            nonlocal failed_submit_requests
+            req_id = item["batch_request_id"]
+            req_state = request_map.setdefault(req_id, {})
+            req_state["state"] = "failed_submit"
+            req_state["error"] = f"xai_http_{status or 'unknown'}"
+            req_state["error_message"] = message[:1000]
+            req_state["updated_at"] = time.time()
+            failed_submit_requests += 1
+            _save_xai_state(state_file, state)
+            if submit_pbar is not None:
+                submit_pbar.set_postfix(
+                    submitted=submitted_now,
+                    skipped=skipped_payload_too_large,
+                    failed=failed_submit_requests,
+                )
 
         def _post_sub_batch(sub_batch: List[Dict]) -> None:
             # Respect xAI team-level add-requests rolling limit (100 calls / 30s).
@@ -1526,22 +1577,46 @@ def run_grok_xai_batch(
             add_call_timestamps.append(time.monotonic())
 
         def _flush_sub_batch(sub_batch: List[Dict]) -> None:
-            """Submit sub-batch. On 413, split recursively; for 1 item, drop images and retry once."""
+            """Submit sub-batch with adaptive fallback for payload and client errors."""
+            nonlocal batch_id, rotated_batch_after_forbidden
+
             if not sub_batch:
                 return
+
+            status: Optional[int] = None
+            err_text = ""
             try:
                 _post_sub_batch(sub_batch)
                 _mark_submitted(sub_batch)
                 return
             except requests.exceptions.HTTPError as e:
                 status = e.response.status_code if e.response is not None else None
-                if status != 413:
-                    raise
+                err_text = ((e.response.text or "") if e.response is not None else str(e)).strip()
 
-            if len(sub_batch) > 1:
+            # If this state file points to an inaccessible batch from another key/team, rotate once.
+            if status in (403, 404) and submitted_now == 0 and not rotated_batch_after_forbidden:
+                logger.warning(
+                    "received HTTP %s while adding to batch_id=%s before any successful submit. "
+                    "creating a fresh batch and retrying current sub-batch once.",
+                    status,
+                    batch_id,
+                )
+                batch_id = _create_xai_batch(reason=f"auto_rotate_http_{status}")
+                rotated_batch_after_forbidden = True
+                try:
+                    _post_sub_batch(sub_batch)
+                    _mark_submitted(sub_batch)
+                    return
+                except requests.exceptions.HTTPError as e:
+                    status = e.response.status_code if e.response is not None else None
+                    err_text = ((e.response.text or "") if e.response is not None else str(e)).strip()
+
+            # For payload/content/validation failures on mixed sub-batches, split and isolate.
+            if status in (400, 403, 404, 413, 422) and len(sub_batch) > 1:
                 mid = len(sub_batch) // 2
                 logger.warning(
-                    "xAI 413 on sub-batch of %d requests; splitting into %d + %d and retrying.",
+                    "xAI HTTP %s on sub-batch of %d requests; splitting into %d + %d and retrying.",
+                    status,
                     len(sub_batch),
                     mid,
                     len(sub_batch) - mid,
@@ -1552,9 +1627,12 @@ def run_grok_xai_batch(
 
             single = sub_batch[0]
             req_id = single["batch_request_id"]
-            if include_images and _xai_strip_images_from_batch_request(single):
+
+            # For single-request failures, one fallback is to remove images and retry once.
+            if include_images and status in (400, 403, 413, 422) and _xai_strip_images_from_batch_request(single):
                 logger.warning(
-                    "xAI 413 on single request %s; retrying once with images removed for this request.",
+                    "xAI HTTP %s on single request %s; retrying once with images removed for this request.",
+                    status,
                     req_id,
                 )
                 try:
@@ -1563,14 +1641,37 @@ def run_grok_xai_batch(
                     return
                 except requests.exceptions.HTTPError as e:
                     status = e.response.status_code if e.response is not None else None
-                    if status != 413:
-                        raise
+                    err_text = ((e.response.text or "") if e.response is not None else str(e)).strip()
 
+            if status == 401:
+                raise RuntimeError(
+                    "xAI API returned 401 Unauthorized while submitting batch requests. "
+                    "Verify XAI_API_KEY and retry."
+                )
+
+            if status in (403, 404) and submitted_now == 0:
+                body_preview = err_text[:600] if err_text else "<empty body>"
+                raise RuntimeError(
+                    "xAI API refused batch submission before any request was accepted "
+                    f"(HTTP {status}). Response: {body_preview}"
+                )
+
+            if status == 413:
+                logger.error(
+                    "xAI 413 persists for request %s even after payload reduction; marking as failed.",
+                    req_id,
+                )
+                _mark_payload_too_large(single)
+                return
+
+            body_preview = err_text[:600] if err_text else "<empty body>"
             logger.error(
-                "xAI 413 persists for request %s even after payload reduction; marking as failed and continuing.",
+                "xAI HTTP %s on request %s; marking request as failed and continuing. response=%s",
+                status,
                 req_id,
+                body_preview,
             )
-            _mark_payload_too_large(single)
+            _mark_failed_request(single, status, body_preview)
 
         try:
             for chunk_start in range(0, len(to_process), chunk_size):
@@ -1646,6 +1747,7 @@ def run_grok_xai_batch(
         logger.info(
             f"xai batch submit finished: batch_id={batch_id} submitted_now={submitted_now} "
             f"skipped_payload_too_large={skipped_payload_too_large} "
+            f"failed_submit_requests={failed_submit_requests} "
             f"total_tracked={len(request_map)} state_file={state_file}"
         )
         return {"mode": "xai-batch-submit", "completed_paths": []}
