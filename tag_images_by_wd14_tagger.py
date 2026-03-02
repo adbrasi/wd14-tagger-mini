@@ -10,6 +10,7 @@ import os
 import re
 import tempfile
 import time
+import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Tuple
@@ -180,7 +181,10 @@ def apply_tag_replacement(tags: List[str], tag_replacements_arg: str) -> List[st
     pairs = escaped.split(";")
 
     for pair in pairs:
-        source, target = pair.split(",")
+        parts = pair.split(",", 1)
+        if len(parts) != 2:
+            continue
+        source, target = parts
         source = source.replace("@@@@", ",").replace("####", ";")
         target = target.replace("@@@@", ",").replace("####", ";")
         tags = [target if t == source else t for t in tags]
@@ -784,9 +788,12 @@ def run_pixai(
 # -------------------------
 
 DEFAULT_GROK_MODEL = "x-ai/grok-4.1-fast"
+DEFAULT_XAI_BATCH_MODEL = "grok-4-1-fast-non-reasoning"
 OPENROUTER_API_URL = "https://openrouter.ai/api/v1/chat/completions"
+XAI_API_BASE_URL = "https://api.x.ai"
 
 PROMPTS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "prompts")
+GROK_TAG_CATEGORIES = {"character", "artist", "copyright"}
 
 
 def load_prompt_file(path: str) -> str:
@@ -799,9 +806,16 @@ def get_system_prompt(args) -> str:
     """Load system prompt from file or use CLI override."""
     if args.grok_system_prompt_file:
         return load_prompt_file(args.grok_system_prompt_file)
-    default_path = os.path.join(PROMPTS_DIR, "system_prompt.md")
-    if os.path.exists(default_path):
-        return load_prompt_file(default_path)
+
+    mode_dir = "video" if getattr(args, "video", False) else "image"
+    candidates = [
+        os.path.join(PROMPTS_DIR, mode_dir, "system_prompt.md"),
+        os.path.join(PROMPTS_DIR, "system_prompt.md"),  # backward-compatible fallback
+    ]
+    for path in candidates:
+        if os.path.exists(path):
+            return load_prompt_file(path)
+
     return "You are an expert image captioner for AI training datasets."
 
 
@@ -809,10 +823,89 @@ def get_user_prompt_template(args) -> str:
     """Load user prompt template from file or use CLI override."""
     if args.grok_prompt_file:
         return load_prompt_file(args.grok_prompt_file)
-    default_path = os.path.join(PROMPTS_DIR, "user_prompt.md")
-    if os.path.exists(default_path):
-        return load_prompt_file(default_path)
+
+    mode_dir = "video" if getattr(args, "video", False) else "image"
+    candidates = [
+        os.path.join(PROMPTS_DIR, mode_dir, "user_prompt.md"),
+        os.path.join(PROMPTS_DIR, "user_prompt.md"),  # backward-compatible fallback
+    ]
+    for path in candidates:
+        if os.path.exists(path):
+            return load_prompt_file(path)
+
     return "Analyze this image and the following tags:\n\n{tags}"
+
+
+def _normalize_tag_key(tag: str) -> str:
+    return tag.strip().lower()
+
+
+def _build_grok_tag_category_lookup(tag_to_category: Dict[str, str]) -> Dict[str, str]:
+    """Build a normalized lookup map for selected categories used in grok prompts."""
+    lookup: Dict[str, str] = {}
+    for tag, category in tag_to_category.items():
+        cat = str(category).strip().lower()
+        if cat not in GROK_TAG_CATEGORIES:
+            continue
+
+        raw = str(tag).strip()
+        if not raw:
+            continue
+
+        # Match both raw booru form and underscore-removed form.
+        lookup[_normalize_tag_key(raw)] = cat
+        lookup[_normalize_tag_key(raw.replace("_", " "))] = cat
+    return lookup
+
+
+def _load_grok_tag_category_lookup(args) -> Dict[str, str]:
+    """Load local Camie metadata and build tag->category lookup for grok prompt enrichment."""
+    explicit_path = args.grok_tag_category_metadata_file
+    # Prefer metadata committed in this repo root.
+    repo_root = os.path.dirname(os.path.abspath(__file__))
+    default_path = os.path.join(repo_root, CAMIE_META_FILE)
+
+    meta_path = explicit_path or default_path
+
+    if not os.path.exists(meta_path):
+        logger.warning(
+            "local tag-category metadata not found for grok prompt enrichment: "
+            f"{meta_path}. continuing without category suffixes."
+        )
+        return {}
+
+    try:
+        _, tag_to_category, _ = load_camie_metadata(meta_path)
+    except Exception as e:
+        logger.warning(f"failed to parse tag-category metadata from {meta_path}: {e}")
+        return {}
+
+    lookup = _build_grok_tag_category_lookup(tag_to_category)
+    if lookup:
+        logger.info(f"loaded {len(lookup)} categorized tags for grok prompt enrichment")
+    return lookup
+
+
+def _format_grok_tags_with_categories(tags_list: List[str], tag_category_lookup: Dict[str, str]) -> List[str]:
+    """Append category suffix to selected tags before sending context to grok."""
+    out: List[str] = []
+    for tag in tags_list:
+        clean = tag.strip()
+        if not clean:
+            continue
+
+        # Skip if already annotated by caller.
+        lower_clean = clean.lower()
+        if lower_clean.endswith("(character)") or lower_clean.endswith("(artist)") or lower_clean.endswith("(copyright)"):
+            out.append(clean)
+            continue
+
+        cat = tag_category_lookup.get(_normalize_tag_key(clean))
+        if cat in GROK_TAG_CATEGORIES:
+            out.append(f"{clean} ({cat})")
+        else:
+            out.append(clean)
+    return out
 
 
 def image_to_base64(image: Image.Image, max_size: int = 1024) -> str:
@@ -860,7 +953,7 @@ def call_openrouter(
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": content_parts},
         ],
-        "reasoning": {"effort": "low"},
+        "reasoning": {"effort": "none"},
     }
 
     if json_mode:
@@ -976,6 +1069,450 @@ def _grok_single_task(
     return image_path, raw
 
 
+def _xai_headers(api_key: str, conv_id: Optional[str] = None) -> Dict[str, str]:
+    h = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+    }
+    if conv_id:
+        h["x-grok-conv-id"] = conv_id
+    return h
+
+
+def _xai_request(
+    method: str,
+    url: str,
+    headers: Dict[str, str],
+    payload: Optional[Dict] = None,
+    params: Optional[Dict] = None,
+    max_retries: int = 5,
+    timeout: int = 120,
+) -> Dict:
+    for attempt in range(max_retries + 1):
+        try:
+            resp = requests.request(
+                method=method,
+                url=url,
+                headers=headers,
+                json=payload,
+                params=params,
+                timeout=timeout,
+            )
+            if resp.status_code == 429 or resp.status_code >= 500:
+                wait = min(2 ** attempt, 30)
+                logger.warning(f"xAI API {resp.status_code} on {url} (attempt {attempt + 1}), retrying in {wait}s...")
+                time.sleep(wait)
+                continue
+
+            resp.raise_for_status()
+            if not resp.text:
+                return {}
+            return resp.json()
+        except requests.exceptions.RequestException as e:
+            if attempt >= max_retries:
+                raise
+            wait = min(2 ** attempt, 30)
+            logger.warning(f"xAI API request error on {url} (attempt {attempt + 1}): {e}; retrying in {wait}s...")
+            time.sleep(wait)
+    return {}
+
+
+def _resolve_xai_state_file(args) -> str:
+    if args.xai_batch_state_file:
+        return args.xai_batch_state_file
+    base_dir = os.path.abspath(args.train_data_dir)
+    parent_dir = os.path.dirname(base_dir)
+    dataset_name = os.path.basename(base_dir)
+    key = hashlib.md5(base_dir.encode("utf-8")).hexdigest()[:10]
+    return os.path.join(parent_dir, f".xai_batch_state_{dataset_name}_{key}.json")
+
+
+def _load_xai_state(path: str) -> Dict:
+    if not os.path.exists(path):
+        return {}
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception as e:
+        logger.warning(f"could not read xai batch state from {path}: {e}")
+        return {}
+
+
+def _save_xai_state(path: str, state: Dict) -> None:
+    os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(state, f, ensure_ascii=False, indent=2)
+
+
+def _xai_extract_content_text(content) -> str:
+    if isinstance(content, str):
+        return content.strip()
+    if isinstance(content, list):
+        chunks = []
+        for part in content:
+            if isinstance(part, dict):
+                if part.get("type") == "text" and isinstance(part.get("text"), str):
+                    chunks.append(part["text"])
+                elif isinstance(part.get("content"), str):
+                    chunks.append(part["content"])
+        return "\n".join(chunks).strip()
+    return ""
+
+
+def _xai_extract_caption_from_result(result_obj: Dict) -> Optional[str]:
+    response = result_obj.get("response")
+    if response is None and isinstance(result_obj.get("result"), dict):
+        response = result_obj["result"].get("response")
+    if response is None and isinstance(result_obj.get("batch_result"), dict):
+        response = result_obj["batch_result"].get("response")
+    if response is None:
+        return None
+
+    message = None
+    if isinstance(response, dict):
+        choices = response.get("choices")
+        if isinstance(choices, list) and choices:
+            message = choices[0].get("message")
+        if message is None and isinstance(response.get("message"), dict):
+            message = response.get("message")
+
+    if not isinstance(message, dict):
+        return None
+
+    content_text = _xai_extract_content_text(message.get("content"))
+    if not content_text:
+        return None
+
+    parsed = parse_grok_json_output(content_text)
+    if parsed and "caption" in parsed:
+        return parsed["caption"]
+    if parsed:
+        return json.dumps(parsed, ensure_ascii=False)
+    return content_text
+
+
+def _xai_build_user_content(user_prompt: str, image_path: str, extra_image_paths: Optional[List[str]], include_images: bool):
+    if not include_images:
+        return user_prompt
+
+    content_parts = [{"type": "text", "text": user_prompt}]
+
+    image_paths = [image_path]
+    if extra_image_paths:
+        image_paths.extend(extra_image_paths)
+
+    for ipath in image_paths:
+        try:
+            with Image.open(ipath) as img:
+                img = img.convert("RGB")
+                content_parts.append({"type": "image_url", "image_url": {"url": image_to_base64(img)}})
+        except Exception as e:
+            logger.warning(f"failed to load image for xai batch request {ipath}: {e}")
+    return content_parts
+
+
+def run_grok_xai_batch(
+    paths: List[str],
+    args,
+    dedupe: bool,
+    result_map: Dict[str, List[str]],
+    existing_tags: Dict[str, List[str]],
+    extra_frames: Dict[str, List[str]],
+) -> Dict:
+    if args.video:
+        raise ValueError("xai batch mode is currently supported only for image mode (no --video).")
+
+    api_key = args.xai_api_key
+    if not api_key:
+        raise ValueError("XAI_API_KEY is required for xai batch mode (or pass --xai_api_key).")
+
+    headers = _xai_headers(api_key)
+    model = getattr(args, "xai_batch_model", None) or DEFAULT_XAI_BATCH_MODEL
+    system_prompt = get_system_prompt(args)
+    user_prompt_template = get_user_prompt_template(args)
+    tag_category_lookup = _load_grok_tag_category_lookup(args)
+
+    state_file = _resolve_xai_state_file(args)
+    state = _load_xai_state(state_file)
+
+    system_prompt_hash = hashlib.sha256(system_prompt.encode("utf-8")).hexdigest()
+
+    if not state:
+        state = {
+            "version": 1,
+            "provider": "xai-batch",
+            "batch_id": None,
+            "batch_name": None,
+            "model": model,
+            "conv_id": str(uuid.uuid4()),
+            "system_prompt_sha256": system_prompt_hash,
+            "state_file": state_file,
+            "request_map": {},
+            "created_at": time.time(),
+        }
+
+    # Ensure conv_id exists in state (migrate old state files)
+    if not state.get("conv_id"):
+        state["conv_id"] = str(uuid.uuid4())
+    conv_id: str = state["conv_id"]
+
+    # Rebuild headers with conv_id so every HTTP request to xAI carries it,
+    # maximising the chance that the system prompt is served from cache.
+    headers = _xai_headers(api_key, conv_id=conv_id)
+
+    # Warn if the system prompt changed since the batch was created (would bust cache)
+    saved_hash = state.get("system_prompt_sha256")
+    if saved_hash and saved_hash != system_prompt_hash:
+        logger.warning(
+            "System prompt has changed since this batch was created! "
+            "Cache hits will be lost. saved_sha256=%s current_sha256=%s",
+            saved_hash[:12],
+            system_prompt_hash[:12],
+        )
+    elif not saved_hash:
+        state["system_prompt_sha256"] = system_prompt_hash
+
+    action = args.xai_batch_action
+
+    if not state.get("batch_id") and action in ("submit",):
+        batch_name = args.xai_batch_name or f"tagger_{int(time.time())}"
+        created = _xai_request(
+            "POST",
+            f"{args.xai_api_base_url}/v1/batches",
+            headers,
+            payload={"name": batch_name},
+        )
+        batch_id = created.get("batch_id")
+        if not batch_id:
+            raise RuntimeError(f"failed to create xai batch. response: {created}")
+        state["batch_id"] = batch_id
+        state["batch_name"] = created.get("name", batch_name)
+        state["batch_created_at"] = created.get("created_at")
+        _save_xai_state(state_file, state)
+        logger.info(f"created xai batch: {batch_id}")
+
+    batch_id = state.get("batch_id")
+    if not batch_id:
+        raise ValueError(f"xai batch state has no batch_id: {state_file}. run with --xai_batch_action submit first.")
+
+    if action == "status":
+        batch_meta = _xai_request("GET", f"{args.xai_api_base_url}/v1/batches/{batch_id}", headers)
+        state["last_status"] = batch_meta
+        _save_xai_state(state_file, state)
+        counters = batch_meta.get("state", {})
+        logger.info(
+            f"xai batch {batch_id} status: "
+            f"total={counters.get('num_requests', 0)} pending={counters.get('num_pending', 0)} "
+            f"success={counters.get('num_success', 0)} error={counters.get('num_error', 0)}"
+        )
+        return {"mode": "xai-batch-status", "completed_paths": []}
+
+    if action == "submit":
+        pending_payload_items = []
+        submitted_now = 0
+        request_map = state.setdefault("request_map", {})
+
+        use_pbar = not getattr(args, "no_progress", False)
+        pbar = tqdm(total=len(paths), desc="xai-batch submit", smoothing=0.0, unit="img") if use_pbar else None
+
+        for image_path in paths:
+            req_id = "req_" + hashlib.sha1(os.path.abspath(image_path).encode("utf-8")).hexdigest()
+            existing_req = request_map.get(req_id, {})
+            existing_state = existing_req.get("state")
+            if pbar is not None:
+                pbar.update(1)
+            if existing_state in ("submitted", "succeeded"):
+                continue
+
+            tags_list = existing_tags.get(image_path, [])
+            prompt_tags = _format_grok_tags_with_categories(tags_list, tag_category_lookup)
+            tags_str = args.caption_separator.join(prompt_tags) if prompt_tags else "(no prior tags)"
+            user_prompt = user_prompt_template.replace("{tags}", tags_str)
+            extras = extra_frames.get(image_path)
+            user_content = _xai_build_user_content(
+                user_prompt=user_prompt,
+                image_path=image_path,
+                extra_image_paths=extras,
+                include_images=not args.xai_batch_no_image,
+            )
+
+            request_body = {
+                "chat_get_completion": {
+                    "model": model,
+                    "messages": [
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": user_content},
+                    ],
+                    "response_format": {"type": "json_object"},
+                    "reasoning_effort": "none",
+                }
+            }
+            pending_payload_items.append(
+                {
+                    "batch_request_id": req_id,
+                    "batch_request": request_body,
+                }
+            )
+            request_map[req_id] = {
+                "image_path": image_path,
+                "state": "queued_for_submission",
+            }
+
+            if len(pending_payload_items) >= args.xai_batch_submit_chunk:
+                _xai_request(
+                    "POST",
+                    f"{args.xai_api_base_url}/v1/batches/{batch_id}/requests",
+                    headers,
+                    payload={"batch_requests": pending_payload_items},
+                    timeout=300,
+                )
+                for item in pending_payload_items:
+                    request_map[item["batch_request_id"]]["state"] = "submitted"
+                submitted_now += len(pending_payload_items)
+                pending_payload_items = []
+                state["submitted_at"] = time.time()
+                _save_xai_state(state_file, state)
+                if pbar is not None:
+                    pbar.set_postfix(submitted=submitted_now)
+
+        if pbar is not None:
+            pbar.close()
+
+        if pending_payload_items:
+            _xai_request(
+                "POST",
+                f"{args.xai_api_base_url}/v1/batches/{batch_id}/requests",
+                headers,
+                payload={"batch_requests": pending_payload_items},
+                timeout=300,
+            )
+            for item in pending_payload_items:
+                request_map[item["batch_request_id"]]["state"] = "submitted"
+            submitted_now += len(pending_payload_items)
+            state["submitted_at"] = time.time()
+            _save_xai_state(state_file, state)
+
+        logger.info(
+            f"xai batch submit finished: batch_id={batch_id} submitted_now={submitted_now} "
+            f"total_tracked={len(request_map)} state_file={state_file}"
+        )
+        return {"mode": "xai-batch-submit", "completed_paths": []}
+
+    if action == "collect":
+        # Check batch status first so we know totals and can show real progress
+        batch_meta = _xai_request("GET", f"{args.xai_api_base_url}/v1/batches/{batch_id}", headers)
+        counters = batch_meta.get("state", {})
+        total_requests = int(counters.get("num_requests", 0) or 0)
+        pending_remote = int(counters.get("num_pending", 0) or 0)
+        success_remote = int(counters.get("num_success", 0) or 0)
+        error_remote = int(counters.get("num_error", 0) or 0)
+        done_remote = success_remote + error_remote
+        pct_done = (done_remote / total_requests * 100.0) if total_requests else 0.0
+
+        logger.info(
+            f"batch status before collect: total={total_requests} done={done_remote} ({pct_done:.1f}%) "
+            f"pending={pending_remote} success={success_remote} error={error_remote}"
+        )
+        if pending_remote > 0:
+            logger.warning(
+                f"{pending_remote} requests still pending — collecting {done_remote} completed results. "
+                "Run collect again later to retrieve remaining."
+            )
+
+        request_map = state.get("request_map", {})
+        completed_paths: List[str] = []
+        success_count = 0
+        error_count = 0
+        pagination_token = None
+        usage_totals = {
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            "total_tokens": 0,
+        }
+
+        use_pbar = not getattr(args, "no_progress", False)
+        pbar = tqdm(total=done_remote or None, desc="xai-batch collect", smoothing=0.0, unit="result") if use_pbar else None
+
+        while True:
+            params = {"page_size": args.xai_batch_page_size}
+            if pagination_token:
+                params["pagination_token"] = pagination_token
+            page = _xai_request(
+                "GET",
+                f"{args.xai_api_base_url}/v1/batches/{batch_id}/results",
+                headers,
+                params=params,
+                timeout=180,
+            )
+            results = page.get("results", [])
+            if not results:
+                break
+
+            for item in results:
+                req_id = item.get("batch_request_id")
+                if not req_id:
+                    continue
+                meta = request_map.get(req_id, {})
+                image_path = meta.get("image_path")
+                if not image_path:
+                    continue
+
+                caption = _xai_extract_caption_from_result(item)
+                if caption:
+                    if image_path not in result_map:
+                        result_map[image_path] = []
+                    add_tags_to_map(result_map, image_path, [caption], dedupe)
+                    request_map[req_id]["state"] = "succeeded"
+                    completed_paths.append(image_path)
+                    success_count += 1
+                else:
+                    request_map[req_id]["state"] = "failed"
+                    request_map[req_id]["error_message"] = item.get("error_message") or item.get("error") or "unknown"
+                    error_count += 1
+
+                if pbar is not None:
+                    pbar.update(1)
+                    pbar.set_postfix(ok=success_count, err=error_count)
+
+                response_obj = item.get("response") or {}
+                usage = response_obj.get("usage") if isinstance(response_obj, dict) else {}
+                if isinstance(usage, dict):
+                    usage_totals["prompt_tokens"] += int(usage.get("prompt_tokens", 0) or 0)
+                    usage_totals["completion_tokens"] += int(usage.get("completion_tokens", 0) or 0)
+                    usage_totals["total_tokens"] += int(usage.get("total_tokens", 0) or 0)
+
+            pagination_token = page.get("pagination_token")
+            state["last_collect_at"] = time.time()
+            state["usage_totals_from_collected_results"] = usage_totals
+            _save_xai_state(state_file, state)
+
+            if not pagination_token:
+                break
+
+        if pbar is not None:
+            pbar.close()
+
+        logger.info(
+            f"xai batch collect finished: "
+            f"collected={success_count} errors={error_count} pending_on_server={pending_remote} "
+            f"batch_id={batch_id} state_file={state_file}"
+        )
+        if pending_remote > 0:
+            logger.warning(
+                f"{pending_remote} requests still pending on xAI. "
+                "Run collect again when they complete to get remaining .txt files."
+            )
+        if usage_totals["total_tokens"]:
+            logger.info(
+                f"token usage: prompt={usage_totals['prompt_tokens']} "
+                f"completion={usage_totals['completion_tokens']} "
+                f"total={usage_totals['total_tokens']}"
+            )
+        return {"mode": "xai-batch-collect", "completed_paths": sorted(set(completed_paths))}
+
+    raise ValueError(f"unknown xai batch action: {action}")
+
+
 def run_grok(
     paths: List[str],
     args,
@@ -996,6 +1533,16 @@ def run_grok(
         extra_frames: additional frame paths per image (for pro mode)
         progress: tqdm progress bar
     """
+    if args.grok_provider == "xai-batch":
+        return run_grok_xai_batch(
+            paths=paths,
+            args=args,
+            dedupe=dedupe,
+            result_map=result_map,
+            existing_tags=existing_tags or {},
+            extra_frames=extra_frames or {},
+        )
+
     api_key = args.grok_api_key
     if not api_key:
         raise ValueError(
@@ -1007,6 +1554,7 @@ def run_grok(
     system_prompt = get_system_prompt(args)
     user_prompt_template = get_user_prompt_template(args)
     max_workers = args.grok_concurrency
+    tag_category_lookup = _load_grok_tag_category_lookup(args)
 
     existing_tags = existing_tags or {}
     extra_frames = extra_frames or {}
@@ -1016,10 +1564,12 @@ def run_grok(
         pbar = tqdm(total=len(paths), smoothing=0.0, desc="grok")
 
     futures = {}
+    completed_paths: List[str] = []
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         for image_path in paths:
             tags_list = existing_tags.get(image_path, [])
-            tags_str = args.caption_separator.join(tags_list) if tags_list else "(no prior tags)"
+            prompt_tags = _format_grok_tags_with_categories(tags_list, tag_category_lookup)
+            tags_str = args.caption_separator.join(prompt_tags) if prompt_tags else "(no prior tags)"
             extras = extra_frames.get(image_path)
 
             future = executor.submit(
@@ -1043,6 +1593,7 @@ def run_grok(
                 caption = None
             if caption:
                 add_tags_to_map(result_map, image_path, [caption], dedupe)
+                completed_paths.append(image_path)
             else:
                 logger.warning(f"No caption returned for {image_path}")
 
@@ -1053,6 +1604,7 @@ def run_grok(
 
     if pbar is not None:
         pbar.close()
+    return {"mode": "realtime", "completed_paths": completed_paths}
 
 
 # -------------------------
@@ -1244,6 +1796,8 @@ def update_processing_log(
 
 def write_caption_files(combined: Dict[str, List[str]], args) -> None:
     for image_path, tags in combined.items():
+        if not tags:
+            continue
         caption_file = os.path.splitext(image_path)[0] + args.caption_extension
         tag_text = args.caption_separator.join(tags)
 
@@ -1321,6 +1875,8 @@ def main(args):
 
     if not args.grok_api_key:
         args.grok_api_key = os.environ.get("OPENROUTER_API_KEY", "")
+    if not args.xai_api_key:
+        args.xai_api_key = os.environ.get("XAI_API_KEY", "")
 
     args.general_threshold = args.general_threshold if args.general_threshold is not None else args.thresh
     args.character_threshold = args.character_threshold if args.character_threshold is not None else args.thresh
@@ -1329,6 +1885,22 @@ def main(args):
         taggers = [args.one_tagger]
     else:
         taggers = [t.strip() for t in args.taggers.split(",") if t.strip()]
+
+    # Lightweight status check: no dataset scan needed.
+    if (
+        args.grok_provider == "xai-batch"
+        and "grok" in taggers
+        and args.xai_batch_action == "status"
+    ):
+        run_grok_xai_batch(
+            paths=[],
+            args=args,
+            dedupe=not args.no_dedupe,
+            result_map={},
+            existing_tags={},
+            extra_frames={},
+        )
+        return
 
     # Video mode setup
     video_mode = args.video
@@ -1436,7 +2008,8 @@ def main(args):
                 existing_count += 1
         if existing_count:
             logger.info(f"loaded existing tags from {existing_count} .txt files")
-    elif args.append_tags:
+    elif args.append_tags or args.grok_context_from_existing:
+        existing_count = 0
         for image_path in paths:
             caption_file = os.path.splitext(image_path)[0] + args.caption_extension
             if not os.path.exists(caption_file):
@@ -1447,7 +2020,11 @@ def main(args):
                     for t in f.read().strip("\n").split(args.caption_separator.strip())
                     if t.strip()
                 ]
-            add_tags_to_map(combined, image_path, existing, not args.no_dedupe)
+            if existing:
+                add_tags_to_map(combined, image_path, existing, not args.no_dedupe)
+                existing_count += 1
+        if existing_count:
+            logger.info(f"loaded existing tags from {existing_count} .txt files as grok context")
 
     # Separate taggers: booru taggers run first, grok runs last (needs booru output)
     booru_taggers = [t for t in taggers if t != "grok"]
@@ -1525,13 +2102,14 @@ def main(args):
                 combined.pop(ep, None)
 
     # Run grok AFTER booru taggers so it has access to their tags
+    grok_completed_paths: Optional[List[str]] = None
     if has_grok:
         logger.info("running grok captioner with booru tags as context...")
         # Build existing_tags map for grok (only primary paths)
         existing_tags_for_grok = {p: combined.get(p, []) for p in paths}
         # Grok result goes into a separate map (it's a full caption, not tags)
         grok_combined: Dict[str, List[str]] = {p: [] for p in paths}
-        run_grok(
+        grok_result = run_grok(
             paths,
             args,
             not args.no_dedupe,
@@ -1539,6 +2117,13 @@ def main(args):
             existing_tags=existing_tags_for_grok,
             extra_frames=extra_frames_map if pro_mode else None,
         )
+        grok_completed_paths = (grok_result or {}).get("completed_paths", [])
+        if args.grok_provider == "xai-batch" and args.xai_batch_action in ("submit", "status"):
+            logger.info(
+                "xai batch action completed without local caption writes "
+                f"(action={args.xai_batch_action}). state saved for later collect."
+            )
+            return
         # Replace combined with grok output (grok caption is the final output)
         combined = grok_combined
 
@@ -1549,6 +2134,8 @@ def main(args):
             video_path = frame_to_video.get(frame_path, frame_path)
             video_combined[video_path] = tags
         combined = video_combined
+        if grok_completed_paths:
+            grok_completed_paths = [frame_to_video.get(p, p) for p in grok_completed_paths]
 
     if args.output_path:
         if args.output_path.endswith(".jsonl"):
@@ -1559,7 +2146,9 @@ def main(args):
         write_caption_files(combined, args)
 
     # Update processing log with successfully processed files
-    if video_mode:
+    if has_grok and grok_completed_paths is not None:
+        processed_files = sorted(set(grok_completed_paths))
+    elif video_mode:
         processed_files = list(combined.keys())
     else:
         processed_files = paths
@@ -1643,10 +2232,28 @@ def setup_parser() -> argparse.ArgumentParser:
 
     # Grok (OpenRouter) options
     parser.add_argument("--grok_api_key", type=str, default=None, help="OpenRouter API key (or set OPENROUTER_API_KEY env)")
+    parser.add_argument("--grok_provider", type=str, choices=["openrouter", "xai-batch"], default="openrouter")
     parser.add_argument("--grok_model", type=str, default=DEFAULT_GROK_MODEL, help="OpenRouter model ID")
     parser.add_argument("--grok_system_prompt_file", type=str, default=None, help="path to system prompt .md file")
     parser.add_argument("--grok_prompt_file", type=str, default=None, help="path to user prompt template .md file")
+    parser.add_argument(
+        "--grok_tag_category_metadata_file",
+        type=str,
+        default=None,
+        help="optional path to camie metadata JSON used to annotate tags for grok prompt context",
+    )
     parser.add_argument("--grok_concurrency", type=int, default=8, help="max concurrent API calls for grok (default: 8)")
+    parser.add_argument("--xai_api_key", type=str, default=None, help="xAI API key (or set XAI_API_KEY env)")
+    parser.add_argument("--xai_api_base_url", type=str, default=XAI_API_BASE_URL, help="xAI API base URL")
+    parser.add_argument("--xai_batch_action", type=str, choices=["submit", "status", "collect"], default="submit")
+    parser.add_argument("--xai_batch_name", type=str, default=None, help="name for xAI batch when creating")
+    parser.add_argument("--xai_batch_state_file", type=str, default=None, help="path to persisted xAI batch state JSON")
+    parser.add_argument("--xai_batch_submit_chunk", type=int, default=1000, help="how many requests per add-to-batch API call")
+    parser.add_argument("--xai_batch_page_size", type=int, default=100, help="page size when collecting xAI batch results")
+    parser.add_argument("--xai_batch_no_image", action="store_true", help="send tags-only requests in xAI batch mode (faster/smaller)")
+    parser.add_argument("--xai_batch_model", type=str, default=DEFAULT_XAI_BATCH_MODEL, help="model ID for xAI native batch API")
+    parser.add_argument("--grok_context_from_existing", action="store_true",
+                        help="load existing .txt files as context for grok prompt without affecting output writing")
 
     return parser
 
