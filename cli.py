@@ -97,12 +97,16 @@ def ask_choice(prompt: str, options: list, default: int = 1) -> int:
 
 
 def ask_yes_no(prompt: str, default: bool = True) -> bool:
-    """Ask a yes/no question."""
+    """Ask a yes/no question. Accepts y/yes or n/no (case-insensitive)."""
     hint = "Y/n" if default else "y/N"
     raw = input(f"{prompt} [{hint}]: ").strip().lower()
     if not raw:
         return default
-    return raw in ("y", "yes", "sim", "s")
+    if raw in ("y", "yes"):
+        return True
+    if raw in ("n", "no"):
+        return False
+    return default
 
 
 def check_env_key(name: str) -> str:
@@ -523,10 +527,11 @@ def main():
 
             if xai_batch_action == "submit":
                 xai_batch_submit_chunk = ask_input("Requests per submit call", "1000")
-                xai_batch_no_image = ask_yes_no(
-                    "Send tags only (no image) for faster/lower input tokens?",
-                    default=False,
+                send_images = ask_yes_no(
+                    "Include images in each request? (better captions, larger payload)",
+                    default=True,
                 )
+                xai_batch_no_image = not send_images
                 monitor_xai = ask_yes_no("Monitor batch progress after submit?", default=True)
             elif xai_batch_action == "status":
                 monitor_xai = ask_yes_no("Keep monitoring status continuously?", default=True)
@@ -683,7 +688,7 @@ def main():
             print(f"  State file:   {xai_batch_state_file}")
             if xai_batch_action == "submit":
                 print(f"  Submit chunk: {xai_batch_submit_chunk}")
-                print(f"  Tags only:    {xai_batch_no_image}")
+                print(f"  Send images:  {not xai_batch_no_image}")
             if xai_batch_action == "collect":
                 print(f"  Page size:    {xai_batch_page_size}")
             if monitor_xai:

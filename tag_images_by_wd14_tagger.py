@@ -22,6 +22,9 @@ import requests
 from PIL import Image
 from tqdm import tqdm
 
+# Allow opening very large images (resize will bring them down to 1024px anyway)
+Image.MAX_IMAGE_PIXELS = 500_000_000
+
 from wd14_utils import (
     extract_frame,
     extract_frames,
@@ -1110,6 +1113,10 @@ def _xai_request(
                 params=params,
                 timeout=timeout,
             )
+            # 413 = payload too large: retrying with the same body won't help, fail fast
+            if resp.status_code == 413:
+                resp.raise_for_status()
+
             if resp.status_code == 429 or resp.status_code >= 500:
                 wait = min(2 ** attempt, 30)
                 logger.warning(f"xAI API {resp.status_code} on {url} (attempt {attempt + 1}), retrying in {wait}s...")
@@ -1201,6 +1208,22 @@ def _xai_extract_caption_from_result(result_obj: Dict) -> Optional[str]:
     if parsed:
         return json.dumps(parsed, ensure_ascii=False)
     return content_text
+
+
+def _estimate_request_bytes(request_body: Dict) -> int:
+    """Estimate serialized byte size of one batch request body (fast, no json.dumps)."""
+    total = 256  # fixed overhead for model/response_format/reasoning_effort keys
+    for msg in request_body.get("chat_get_completion", {}).get("messages", []):
+        content = msg.get("content", "")
+        if isinstance(content, str):
+            total += len(content.encode("utf-8", errors="replace"))
+        elif isinstance(content, list):
+            for part in content:
+                if part.get("type") == "image_url":
+                    total += len(part.get("image_url", {}).get("url", ""))
+                elif part.get("type") == "text":
+                    total += len(part.get("text", "").encode("utf-8", errors="replace"))
+    return total
 
 
 def _xai_build_user_content(user_prompt: str, image_path: str, extra_image_paths: Optional[List[str]], include_images: bool):
@@ -1374,7 +1397,9 @@ def run_grok_xai_batch(
             f"{len(paths) - len(to_process)} already submitted"
         )
 
-        # Pass 2: encode in parallel per chunk, then POST each chunk to xAI
+        # Pass 2: encode in parallel per chunk, then POST with size-aware flushing.
+        # Limit each POST to MAX_PAYLOAD_BYTES to avoid 413 errors.
+        MAX_PAYLOAD_BYTES = 12 * 1024 * 1024  # 12 MB conservative per POST
         submit_pbar = tqdm(total=len(to_process), desc="xai-batch submit", smoothing=0.0, unit="img") if use_pbar else None
 
         def _encode_item(item: Tuple) -> Tuple[str, str, Optional[str], Any]:
@@ -1388,6 +1413,24 @@ def run_grok_xai_batch(
             )
             return req_id, img_abs, rel_p, content
 
+        def _flush_sub_batch(sub_batch: List[Dict]) -> None:
+            """Submit a sub-batch and mark requests as submitted."""
+            nonlocal submitted_now
+            _xai_request(
+                "POST",
+                f"{args.xai_api_base_url}/v1/batches/{batch_id}/requests",
+                headers,
+                payload={"batch_requests": sub_batch},
+                timeout=300,
+            )
+            for item in sub_batch:
+                request_map[item["batch_request_id"]]["state"] = "submitted"
+            submitted_now += len(sub_batch)
+            state["submitted_at"] = time.time()
+            _save_xai_state(state_file, state)
+            if submit_pbar is not None:
+                submit_pbar.set_postfix(submitted=submitted_now)
+
         for chunk_start in range(0, len(to_process), chunk_size):
             chunk = to_process[chunk_start : chunk_start + chunk_size]
 
@@ -1397,7 +1440,10 @@ def run_grok_xai_batch(
             else:
                 encoded = [_encode_item(item) for item in chunk]
 
-            payload_items = []
+            # Size-aware flushing: accumulate items until payload limit, then POST
+            sub_batch: List[Dict] = []
+            sub_batch_bytes = 0
+
             for req_id, img_abs, rel_p, user_content in encoded:
                 request_body = {
                     "chat_get_completion": {
@@ -1410,32 +1456,30 @@ def run_grok_xai_batch(
                         "reasoning_effort": "none",
                     }
                 }
-                payload_items.append({
+                item_bytes = _estimate_request_bytes(request_body)
+
+                # Flush before adding if this item would push us over the limit
+                if sub_batch and sub_batch_bytes + item_bytes > MAX_PAYLOAD_BYTES:
+                    _flush_sub_batch(sub_batch)
+                    sub_batch = []
+                    sub_batch_bytes = 0
+
+                sub_batch.append({
                     "batch_request_id": req_id,
                     "batch_request": request_body,
                 })
+                sub_batch_bytes += item_bytes
                 request_map[req_id] = {
                     "image_path": img_abs,
                     "image_path_rel": rel_p if rel_p and not rel_p.startswith("..") else None,
                     "state": "queued_for_submission",
                 }
 
-            _xai_request(
-                "POST",
-                f"{args.xai_api_base_url}/v1/batches/{batch_id}/requests",
-                headers,
-                payload={"batch_requests": payload_items},
-                timeout=300,
-            )
-            for item in payload_items:
-                request_map[item["batch_request_id"]]["state"] = "submitted"
-            submitted_now += len(payload_items)
-            state["submitted_at"] = time.time()
-            _save_xai_state(state_file, state)
+            if sub_batch:
+                _flush_sub_batch(sub_batch)
 
             if submit_pbar is not None:
                 submit_pbar.update(len(chunk))
-                submit_pbar.set_postfix(submitted=submitted_now)
 
         if submit_pbar is not None:
             submit_pbar.close()
