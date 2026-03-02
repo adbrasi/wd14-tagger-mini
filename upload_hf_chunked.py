@@ -20,6 +20,8 @@ DEFAULT_HF_TIMEOUT_SECONDS = 600
 DEFAULT_COMMIT_RETRIES = 8
 DEFAULT_RETRY_BASE_SECONDS = 4.0
 DEFAULT_ZIP_PATH_PREFIX = "chunks"
+DEFAULT_START_CHUNK = 1
+DEFAULT_END_CHUNK = 0
 
 
 def setup_logging(verbose: bool) -> None:
@@ -177,6 +179,9 @@ def upload_folder(
     zip_compression: str,
     zip_temp_dir: Path,
     zip_path_prefix: str,
+    start_chunk: int,
+    end_chunk: int,
+    sleep_between_chunks: float,
 ) -> str:
     if hf_timeout_seconds > 0:
         timeout_s = str(int(hf_timeout_seconds))
@@ -271,6 +276,22 @@ def upload_folder(
         chunk_gb,
         max_files_per_chunk,
     )
+    if start_chunk < 1:
+        raise ValueError("--start_chunk must be >= 1")
+    if end_chunk and end_chunk < start_chunk:
+        raise ValueError("--end_chunk must be 0 (disabled) or >= --start_chunk")
+    if start_chunk > len(chunks):
+        raise ValueError(f"--start_chunk={start_chunk} is greater than total chunks={len(chunks)}")
+    if end_chunk and end_chunk > len(chunks):
+        logging.warning("--end_chunk=%d exceeds total chunks=%d; using %d", end_chunk, len(chunks), len(chunks))
+        end_chunk = len(chunks)
+    if start_chunk > 1 or end_chunk:
+        logging.info(
+            "resuming chunk window: start=%d end=%s total=%d",
+            start_chunk,
+            str(end_chunk) if end_chunk else "last",
+            len(chunks),
+        )
 
     zip_compression_mode = (
         zipfile.ZIP_DEFLATED if zip_compression == "deflate" else zipfile.ZIP_STORED
@@ -281,6 +302,11 @@ def upload_folder(
 
     thread_count = max(4, min(64, workers))
     for idx, chunk in enumerate(chunks, start=1):
+        if idx < start_chunk:
+            continue
+        if end_chunk and idx > end_chunk:
+            break
+
         chunk_bytes = sum(size for _, _, size in chunk)
         operations: List[CommitOperationAdd] = []
         commit_message = ""
@@ -379,7 +405,15 @@ def upload_folder(
                 if not retryable or attempt >= max(1, commit_retries):
                     raise
 
-                sleep_s = min(90.0, retry_base_seconds * (2 ** (attempt - 1)))
+                retry_after_s = None
+                if isinstance(exc, HfHubHTTPError) and getattr(exc, "response", None) is not None:
+                    retry_after = exc.response.headers.get("Retry-After")
+                    if retry_after:
+                        try:
+                            retry_after_s = float(retry_after)
+                        except ValueError:
+                            retry_after_s = None
+                sleep_s = retry_after_s if retry_after_s is not None else min(90.0, retry_base_seconds * (2 ** (attempt - 1)))
                 logging.warning(
                     "chunk %d/%d commit failed (attempt %d/%d status=%s err=%s). retrying in %.1fs",
                     idx,
@@ -403,6 +437,8 @@ def upload_folder(
                 temp_zip_path.unlink()
             except OSError:
                 logging.warning("failed to remove temp zip: %s", temp_zip_path)
+        if sleep_between_chunks > 0:
+            time.sleep(sleep_between_chunks)
 
     return resolved_repo_id
 
@@ -446,6 +482,24 @@ def main() -> None:
         "--zip_path_prefix",
         default=DEFAULT_ZIP_PATH_PREFIX,
         help="path prefix in repo for zip chunks (default: chunks)",
+    )
+    parser.add_argument(
+        "--start_chunk",
+        type=int,
+        default=DEFAULT_START_CHUNK,
+        help="start uploading from this chunk number (1-based)",
+    )
+    parser.add_argument(
+        "--end_chunk",
+        type=int,
+        default=DEFAULT_END_CHUNK,
+        help="optional last chunk number (0 = upload until end)",
+    )
+    parser.add_argument(
+        "--sleep_between_chunks",
+        type=float,
+        default=0.0,
+        help="optional delay in seconds after each successful chunk commit",
     )
     parser.add_argument(
         "--hf_timeout_seconds",
@@ -538,6 +592,9 @@ def main() -> None:
         zip_compression=args.zip_compression,
         zip_temp_dir=zip_temp_dir,
         zip_path_prefix=args.zip_path_prefix,
+        start_chunk=max(1, args.start_chunk),
+        end_chunk=max(0, args.end_chunk),
+        sleep_between_chunks=max(0.0, args.sleep_between_chunks),
     )
     logging.info("upload completed: %s", repo_id)
 
