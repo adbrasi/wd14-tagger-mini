@@ -12,6 +12,7 @@ import logging
 import os
 import re
 import tempfile
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
@@ -814,9 +815,11 @@ XAI_BATCH_PAYLOAD_SAFETY_MARGIN_BYTES = 2 * 1024 * 1024
 XAI_BATCH_MAX_ADD_CALLS_PER_30S = 100
 XAI_BATCH_ADD_WINDOW_SECONDS = 30.0
 # Conservative runtime cap for image-inclusive batch submits to avoid repeated 413 responses.
-XAI_BATCH_IMAGE_SAFE_PAYLOAD_BYTES = 5 * 1024 * 1024
+XAI_BATCH_IMAGE_SAFE_PAYLOAD_BYTES = 12 * 1024 * 1024
 XAI_BATCH_IMAGE_MAX_SIDE = 768
 XAI_BATCH_IMAGE_JPEG_QUALITY = 85
+XAI_BATCH_ADAPTIVE_PAYLOAD_FLOOR_BYTES = 2 * 1024 * 1024
+XAI_BATCH_POST_WORKERS = 8
 
 PROMPTS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "prompts")
 GROK_TAG_CATEGORIES = {"character", "artist", "copyright"}
@@ -1482,6 +1485,23 @@ def run_grok_xai_batch(
         add_call_timestamps = collections.deque()
         submit_pbar = tqdm(total=len(to_process), desc="xai-batch submit", smoothing=0.0, unit="img") if use_pbar else None
 
+        # Thread safety for concurrent POST workers
+        state_lock = threading.Lock()
+        rate_lock = threading.Lock()
+        # Reusable HTTP session with connection pooling (keep-alive) for faster sequential POSTs
+        http_session = requests.Session()
+        http_session.headers.update(headers)
+        adapter = requests.adapters.HTTPAdapter(
+            pool_connections=XAI_BATCH_POST_WORKERS + 2,
+            pool_maxsize=XAI_BATCH_POST_WORKERS + 2,
+            max_retries=0,  # we handle retries ourselves
+        )
+        http_session.mount("https://", adapter)
+        http_session.mount("http://", adapter)
+        # Fatal errors raised by post workers that should stop everything
+        fatal_error: Optional[BaseException] = None
+        fatal_lock = threading.Lock()
+
         def _encode_item(item: Tuple) -> Tuple[str, str, Optional[str], Any]:
             img_path, img_abs, rel_p, req_id, tags_str, extras = item
             user_prompt = user_prompt_template.replace("{tags}", tags_str)
@@ -1495,15 +1515,16 @@ def run_grok_xai_batch(
 
         def _mark_submitted(sub_batch: List[Dict]) -> None:
             nonlocal submitted_now
-            for item in sub_batch:
-                req_id = item["batch_request_id"]
-                req_state = request_map.setdefault(req_id, {})
-                req_state["state"] = "submitted"
-                if item.get("_images_stripped"):
-                    req_state["image_payload"] = "stripped_due_to_413"
-            submitted_now += len(sub_batch)
-            state["submitted_at"] = time.time()
-            _save_xai_state(state_file, state)
+            with state_lock:
+                for item in sub_batch:
+                    req_id = item["batch_request_id"]
+                    req_state = request_map.setdefault(req_id, {})
+                    req_state["state"] = "submitted"
+                    if item.get("_images_stripped"):
+                        req_state["image_payload"] = "stripped_due_to_413"
+                submitted_now += len(sub_batch)
+                state["submitted_at"] = time.time()
+                _save_xai_state(state_file, state)
             if submit_pbar is not None:
                 submit_pbar.update(len(sub_batch))
                 submit_pbar.set_postfix(
@@ -1514,13 +1535,14 @@ def run_grok_xai_batch(
 
         def _mark_payload_too_large(item: Dict) -> None:
             nonlocal skipped_payload_too_large
-            req_id = item["batch_request_id"]
-            req_state = request_map.setdefault(req_id, {})
-            req_state["state"] = "failed_payload_too_large"
-            req_state["error"] = "xai_413_payload_too_large"
-            req_state["updated_at"] = time.time()
-            skipped_payload_too_large += 1
-            _save_xai_state(state_file, state)
+            with state_lock:
+                req_id = item["batch_request_id"]
+                req_state = request_map.setdefault(req_id, {})
+                req_state["state"] = "failed_payload_too_large"
+                req_state["error"] = "xai_413_payload_too_large"
+                req_state["updated_at"] = time.time()
+                skipped_payload_too_large += 1
+                _save_xai_state(state_file, state)
             if submit_pbar is not None:
                 submit_pbar.update(1)
                 submit_pbar.set_postfix(
@@ -1531,14 +1553,15 @@ def run_grok_xai_batch(
 
         def _mark_failed_request(item: Dict, status: Optional[int], message: str) -> None:
             nonlocal failed_submit_requests
-            req_id = item["batch_request_id"]
-            req_state = request_map.setdefault(req_id, {})
-            req_state["state"] = "failed_submit"
-            req_state["error"] = f"xai_http_{status or 'unknown'}"
-            req_state["error_message"] = message[:1000]
-            req_state["updated_at"] = time.time()
-            failed_submit_requests += 1
-            _save_xai_state(state_file, state)
+            with state_lock:
+                req_id = item["batch_request_id"]
+                req_state = request_map.setdefault(req_id, {})
+                req_state["state"] = "failed_submit"
+                req_state["error"] = f"xai_http_{status or 'unknown'}"
+                req_state["error_message"] = message[:1000]
+                req_state["updated_at"] = time.time()
+                failed_submit_requests += 1
+                _save_xai_state(state_file, state)
             if submit_pbar is not None:
                 submit_pbar.update(1)
                 submit_pbar.set_postfix(
@@ -1547,22 +1570,57 @@ def run_grok_xai_batch(
                     failed=failed_submit_requests,
                 )
 
-        def _post_sub_batch(sub_batch: List[Dict]) -> None:
-            # Respect xAI team-level add-requests rolling limit (100 calls / 30s).
-            now = time.monotonic()
-            while add_call_timestamps and now - add_call_timestamps[0] >= rate_limit_window:
-                add_call_timestamps.popleft()
-            if len(add_call_timestamps) >= max_add_calls_per_window:
-                wait = rate_limit_window - (now - add_call_timestamps[0]) + 0.05
-                if wait > 0:
-                    logger.info(
-                        "throttling xAI add-requests calls to respect rolling limit: sleeping %.2fs",
-                        wait,
-                    )
+        def _xai_post_with_session(url: str, payload: Dict, timeout: int = 300) -> Dict:
+            """POST using the shared session (connection pooling) with retry logic."""
+            max_retries = 5
+            for attempt in range(max_retries + 1):
+                try:
+                    resp = http_session.post(url, json=payload, timeout=timeout)
+                    if resp.status_code == 429 or resp.status_code >= 500:
+                        wait = min(2 ** attempt, 30)
+                        logger.warning(f"xAI API {resp.status_code} on {url} (attempt {attempt + 1}), retrying in {wait}s...")
+                        time.sleep(wait)
+                        continue
+                    if resp.status_code >= 400:
+                        body_preview = (resp.text or "").strip().replace("\n", " ")
+                        if len(body_preview) > 800:
+                            body_preview = body_preview[:800] + "..."
+                        logger.error("xAI API %s on %s: %s", resp.status_code, url, body_preview or "<empty body>")
+                    resp.raise_for_status()
+                    if not resp.text:
+                        return {}
+                    return resp.json()
+                except requests.exceptions.RequestException as e:
+                    if isinstance(e, requests.exceptions.HTTPError):
+                        s = e.response.status_code if e.response is not None else None
+                        if s is not None and 400 <= s < 500 and s != 429:
+                            raise
+                    if attempt >= max_retries:
+                        raise
+                    wait = min(2 ** attempt, 30)
+                    logger.warning(f"xAI API request error on {url} (attempt {attempt + 1}): {e}; retrying in {wait}s...")
                     time.sleep(wait)
-                    now = time.monotonic()
-                    while add_call_timestamps and now - add_call_timestamps[0] >= rate_limit_window:
-                        add_call_timestamps.popleft()
+            return {}
+
+        def _post_sub_batch(sub_batch: List[Dict]) -> None:
+            """POST a sub-batch with thread-safe rate limiting."""
+            with rate_lock:
+                now = time.monotonic()
+                while add_call_timestamps and now - add_call_timestamps[0] >= rate_limit_window:
+                    add_call_timestamps.popleft()
+                if len(add_call_timestamps) >= max_add_calls_per_window:
+                    wait = rate_limit_window - (now - add_call_timestamps[0]) + 0.05
+                    if wait > 0:
+                        logger.info(
+                            "throttling xAI add-requests calls to respect rolling limit: sleeping %.2fs",
+                            wait,
+                        )
+                        time.sleep(wait)
+                        now = time.monotonic()
+                        while add_call_timestamps and now - add_call_timestamps[0] >= rate_limit_window:
+                            add_call_timestamps.popleft()
+                # Reserve the slot before releasing the lock
+                add_call_timestamps.append(now)
 
             payload = {"batch_requests": sub_batch}
             payload_bytes = _json_byte_size(payload)
@@ -1574,20 +1632,21 @@ def run_grok_xai_batch(
                     f"{submit_limits['target_payload_bytes']} bytes",
                     response=fake_resp,
                 )
-            _xai_request(
-                "POST",
+            _xai_post_with_session(
                 f"{args.xai_api_base_url}/v1/batches/{batch_id}/requests",
-                headers,
                 payload=payload,
                 timeout=300,
             )
-            add_call_timestamps.append(time.monotonic())
 
         def _flush_sub_batch(sub_batch: List[Dict]) -> None:
             """Submit sub-batch with adaptive fallback for payload and client errors."""
-            nonlocal batch_id, rotated_batch_after_forbidden
+            nonlocal batch_id, rotated_batch_after_forbidden, fatal_error
 
             if not sub_batch:
+                return
+
+            # Check if another thread hit a fatal error
+            if fatal_error is not None:
                 return
 
             status: Optional[int] = None
@@ -1602,14 +1661,16 @@ def run_grok_xai_batch(
 
             # If this state file points to an inaccessible batch from another key/team, rotate once.
             if status in (403, 404) and submitted_now == 0 and not rotated_batch_after_forbidden:
-                logger.warning(
-                    "received HTTP %s while adding to batch_id=%s before any successful submit. "
-                    "creating a fresh batch and retrying current sub-batch once.",
-                    status,
-                    batch_id,
-                )
-                batch_id = _create_xai_batch(reason=f"auto_rotate_http_{status}")
-                rotated_batch_after_forbidden = True
+                with state_lock:
+                    if not rotated_batch_after_forbidden:
+                        logger.warning(
+                            "received HTTP %s while adding to batch_id=%s before any successful submit. "
+                            "creating a fresh batch and retrying current sub-batch once.",
+                            status,
+                            batch_id,
+                        )
+                        batch_id = _create_xai_batch(reason=f"auto_rotate_http_{status}")
+                        rotated_batch_after_forbidden = True
                 try:
                     _post_sub_batch(sub_batch)
                     _mark_submitted(sub_batch)
@@ -1622,13 +1683,15 @@ def run_grok_xai_batch(
             if status in (400, 403, 404, 413, 422) and len(sub_batch) > 1:
                 if status == 413:
                     current_bytes = _json_byte_size({"batch_requests": sub_batch})
-                    lowered = max(int(current_bytes * 0.75), 512 * 1024)
-                    if lowered < submit_limits["target_payload_bytes"]:
-                        submit_limits["target_payload_bytes"] = lowered
-                        logger.warning(
-                            "adapting submit payload target after 413: new_target=%d bytes",
-                            submit_limits["target_payload_bytes"],
-                        )
+                    lowered = max(int(current_bytes * 0.75), XAI_BATCH_ADAPTIVE_PAYLOAD_FLOOR_BYTES)
+                    with state_lock:
+                        if lowered < submit_limits["target_payload_bytes"]:
+                            submit_limits["target_payload_bytes"] = lowered
+                            logger.warning(
+                                "adapting submit payload target after 413: new_target=%d bytes (floor=%d)",
+                                submit_limits["target_payload_bytes"],
+                                XAI_BATCH_ADAPTIVE_PAYLOAD_FLOOR_BYTES,
+                            )
                 mid = len(sub_batch) // 2
                 logger.warning(
                     "xAI HTTP %s on sub-batch of %d requests; splitting into %d + %d and retrying.",
@@ -1660,17 +1723,21 @@ def run_grok_xai_batch(
                     err_text = ((e.response.text or "") if e.response is not None else str(e)).strip()
 
             if status == 401:
-                raise RuntimeError(
-                    "xAI API returned 401 Unauthorized while submitting batch requests. "
-                    "Verify XAI_API_KEY and retry."
-                )
+                with fatal_lock:
+                    fatal_error = RuntimeError(
+                        "xAI API returned 401 Unauthorized while submitting batch requests. "
+                        "Verify XAI_API_KEY and retry."
+                    )
+                return
 
             if status in (403, 404) and submitted_now == 0:
                 body_preview = err_text[:600] if err_text else "<empty body>"
-                raise RuntimeError(
-                    "xAI API refused batch submission before any request was accepted "
-                    f"(HTTP {status}). Response: {body_preview}"
-                )
+                with fatal_lock:
+                    fatal_error = RuntimeError(
+                        "xAI API refused batch submission before any request was accepted "
+                        f"(HTTP {status}). Response: {body_preview}"
+                    )
+                return
 
             if status == 413:
                 logger.error(
@@ -1689,8 +1756,26 @@ def run_grok_xai_batch(
             )
             _mark_failed_request(single, status, body_preview)
 
+        def _drain_completed_futures(futures_list: List) -> None:
+            """Check completed futures for exceptions, remove them from the list."""
+            still_pending = []
+            for fut in futures_list:
+                if fut.done():
+                    exc = fut.exception()
+                    if exc is not None:
+                        logger.error("post worker raised: %s", exc)
+                else:
+                    still_pending.append(fut)
+            futures_list.clear()
+            futures_list.extend(still_pending)
+
+        post_pool = ThreadPoolExecutor(max_workers=XAI_BATCH_POST_WORKERS)
+        post_futures: List = []
+
         try:
             for chunk_start in range(0, len(to_process), chunk_size):
+                if fatal_error is not None:
+                    break
                 chunk = to_process[chunk_start : chunk_start + chunk_size]
 
                 if include_images and len(chunk) > 1:
@@ -1709,11 +1794,13 @@ def run_grok_xai_batch(
                 else:
                     encoded = [_encode_item(item) for item in chunk]
 
-                # Size-aware flushing: accumulate items until payload limit, then POST
+                # Size-aware flushing: accumulate items until payload limit, then POST concurrently
                 sub_batch: List[Dict] = []
                 sub_batch_bytes = 0
 
                 for req_id, img_abs, rel_p, user_content in encoded:
+                    if fatal_error is not None:
+                        break
                     request_body = {
                         "chat_get_completion": {
                             "model": model,
@@ -1735,7 +1822,10 @@ def run_grok_xai_batch(
 
                     # Flush before adding if this item would push us over the limit
                     if sub_batch and next_payload_bytes > submit_limits["target_payload_bytes"]:
-                        _flush_sub_batch(sub_batch)
+                        # Submit to post pool instead of blocking
+                        batch_snapshot = list(sub_batch)
+                        post_futures.append(post_pool.submit(_flush_sub_batch, batch_snapshot))
+                        _drain_completed_futures(post_futures)
                         sub_batch = []
                         sub_batch_bytes = 0
 
@@ -1748,7 +1838,19 @@ def run_grok_xai_batch(
                     }
 
                 if sub_batch:
-                    _flush_sub_batch(sub_batch)
+                    post_futures.append(post_pool.submit(_flush_sub_batch, list(sub_batch)))
+
+                # Drain completed futures between chunks
+                _drain_completed_futures(post_futures)
+
+            # Wait for all remaining post futures
+            for fut in post_futures:
+                fut.result()
+            post_futures.clear()
+
+            if fatal_error is not None:
+                raise fatal_error
+
         except KeyboardInterrupt:
             _save_xai_state(state_file, state)
             logger.warning(
@@ -1757,6 +1859,8 @@ def run_grok_xai_batch(
             )
             raise
         finally:
+            post_pool.shutdown(wait=True)
+            http_session.close()
             if submit_pbar is not None:
                 submit_pbar.close()
 
