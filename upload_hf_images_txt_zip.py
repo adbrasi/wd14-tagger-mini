@@ -26,6 +26,7 @@ DEFAULT_COMMIT_RETRIES = 12
 DEFAULT_RETRY_BASE_SECONDS = 5.0
 DEFAULT_ZIP_PREFIX = "chunks"
 DEFAULT_TEMP_SUBDIR = ".hf_upload_tmp_images_txt"
+DEFAULT_BOOTSTRAP_FILES = {"README.md", ".gitattributes", ".huggingface.yaml"}
 
 
 def setup_logging(verbose: bool) -> None:
@@ -179,6 +180,15 @@ def detect_uploaded_chunks(
     return out
 
 
+def _is_safe_existing_repo_file(path: str, zip_prefix: str) -> bool:
+    if path in DEFAULT_BOOTSTRAP_FILES:
+        return True
+    clean_prefix = zip_prefix.strip().strip("/")
+    if not clean_prefix:
+        clean_prefix = DEFAULT_ZIP_PREFIX
+    return bool(re.match(rf"^{re.escape(clean_prefix)}/chunk_\d+\.zip$", path))
+
+
 def upload_images_txt_as_zips(
     root: Path,
     token: str,
@@ -232,6 +242,9 @@ def upload_images_txt_as_zips(
 
     api = HfApi(token=token)
     resolved_repo_id = repo_id or auto_repo_id(api=api, token=token, root=root)
+    clean_prefix = zip_path_prefix.strip().strip("/")
+    if not clean_prefix:
+        clean_prefix = DEFAULT_ZIP_PREFIX
 
     create_repo(
         repo_id=resolved_repo_id,
@@ -243,10 +256,17 @@ def upload_images_txt_as_zips(
     logging.info("repo ready: %s (type=%s)", resolved_repo_id, repo_type)
 
     existing_files = api.list_repo_files(repo_id=resolved_repo_id, repo_type=repo_type, token=token)
-    if existing_files and not allow_existing_repo:
+    unsafe_existing = [p for p in existing_files if not _is_safe_existing_repo_file(p, clean_prefix)]
+    if unsafe_existing and not allow_existing_repo:
         raise RuntimeError(
-            f"repo '{resolved_repo_id}' is not empty ({len(existing_files)} files). "
+            f"repo '{resolved_repo_id}' has existing content that is not safe to overwrite "
+            f"({len(unsafe_existing)} files, e.g. {unsafe_existing[:3]}). "
             "Use a new repo_id or pass --allow_existing_repo."
+        )
+    if existing_files and not unsafe_existing:
+        logging.info(
+            "repo has only bootstrap/zip files (%d entries); continuing safely.",
+            len(existing_files),
         )
 
     entries, stats = collect_allowed_entries(
@@ -282,10 +302,6 @@ def upload_images_txt_as_zips(
         raise ValueError(f"--start_chunk={start_chunk} > total chunks={len(chunks)}")
     if end_chunk and end_chunk > len(chunks):
         end_chunk = len(chunks)
-
-    clean_prefix = zip_path_prefix.strip().strip("/")
-    if not clean_prefix:
-        clean_prefix = DEFAULT_ZIP_PREFIX
 
     if resume_auto:
         uploaded = detect_uploaded_chunks(
