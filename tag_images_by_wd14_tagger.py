@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import argparse
 import base64
 import csv
@@ -13,16 +15,10 @@ import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 import numpy as np
-import onnx
-import onnxruntime as ort
 import requests
-import timm
-import torch
-import torchvision.transforms as transforms
-from huggingface_hub import hf_hub_download
 from PIL import Image
 from tqdm import tqdm
 
@@ -61,7 +57,10 @@ PIXAI_CATEGORY_THRESHOLDS_FILE = "category_thresholds.csv"
 # Common helpers
 # -------------------------
 
-def build_session(onnx_path: str) -> Tuple[ort.InferenceSession, str, Optional[int]]:
+def build_session(onnx_path: str) -> Tuple[Any, str, Optional[int]]:
+    import onnx
+    import onnxruntime as ort
+
     model = onnx.load(onnx_path)
     input_name = model.graph.input[0].name
     try:
@@ -291,6 +290,7 @@ def run_wd14(
 ) -> None:
     model_location = os.path.join(model_dir, repo_id.replace("/", "_"))
     if not os.path.exists(model_location) or args.force_download:
+        from huggingface_hub import hf_hub_download
         os.makedirs(model_dir, exist_ok=True)
         logger.info(f"downloading WD14 model from HF: {repo_id}")
         hf_hub_download(repo_id=repo_id, filename=WD14_CSV_FILE, local_dir=model_location, force_download=True)
@@ -409,6 +409,7 @@ def run_camie(
 ) -> None:
     model_location = os.path.join(model_dir, repo_id.replace("/", "_"))
     if not os.path.exists(model_location) or args.force_download:
+        from huggingface_hub import hf_hub_download
         os.makedirs(model_dir, exist_ok=True)
         logger.info(f"downloading Camie model from HF: {repo_id}")
         hf_hub_download(repo_id=repo_id, filename=CAMIE_ONNX_FILE, local_dir=model_location, force_download=True)
@@ -488,16 +489,6 @@ def run_camie(
 # -------------------------
 
 
-class PixAITaggingHead(torch.nn.Module):
-    def __init__(self, input_dim: int, num_classes: int) -> None:
-        super().__init__()
-        self.head = torch.nn.Sequential(torch.nn.Linear(input_dim, num_classes))
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        logits = self.head(x)
-        return torch.sigmoid(logits)
-
-
 def pixai_pil_to_rgb(image: Image.Image) -> Image.Image:
     if image.mode == "RGBA":
         image.load()
@@ -509,7 +500,8 @@ def pixai_pil_to_rgb(image: Image.Image) -> Image.Image:
     return image.convert("RGB")
 
 
-def build_pixai_transform() -> transforms.Compose:
+def build_pixai_transform() -> Any:
+    from torchvision import transforms
     return transforms.Compose(
         [
             transforms.Resize((448, 448)),
@@ -527,6 +519,7 @@ def load_pixai_assets(
 ) -> Tuple[str, str, str, Dict[str, str]]:
     download_errors: Dict[str, str] = {}
     if not os.path.exists(model_location) or force:
+        from huggingface_hub import hf_hub_download
         os.makedirs(model_location, exist_ok=True)
         logger.info(f"downloading PixAI model from HF: {repo_id}")
         for file in [
@@ -610,7 +603,18 @@ def load_pixai_category_thresholds(model_location: str, override_path: Optional[
     return thresholds
 
 
-def build_pixai_model(weights_path: str, device: str, num_classes: int) -> torch.nn.Module:
+def build_pixai_model(weights_path: str, device: str, num_classes: int) -> Any:
+    import timm
+    import torch
+
+    class PixAITaggingHead(torch.nn.Module):
+        def __init__(self, input_dim: int, num_classes: int) -> None:
+            super().__init__()
+            self.head = torch.nn.Sequential(torch.nn.Linear(input_dim, num_classes))
+
+        def forward(self, x):
+            return torch.sigmoid(self.head(x))
+
     base_model_repo = "hf_hub:SmilingWolf/wd-eva02-large-tagger-v3"
     encoder = timm.create_model(base_model_repo, pretrained=False)
     encoder.reset_classifier(0)
@@ -631,10 +635,11 @@ def batch_loader_torch(
     batch_size: int,
     max_workers: int,
     transform,
-) -> Iterable[Tuple[List[str], torch.Tensor]]:
+) -> Iterable[Tuple[List[str], Any]]:
+    import torch
     batches = [paths[i : i + batch_size] for i in range(0, len(paths), batch_size)]
 
-    def _load(path: str) -> Tuple[str, torch.Tensor]:
+    def _load(path: str):
         with Image.open(path) as img:
             img = pixai_pil_to_rgb(img)
             tensor = transform(img)
@@ -702,6 +707,8 @@ def run_pixai(
         else:
             character_threshold = 0.85
 
+    import torch
+
     device = args.pixai_device
     if device == "auto":
         if torch.cuda.is_available():
@@ -712,6 +719,9 @@ def run_pixai(
                 device = "cpu"
         else:
             device = "cpu"
+
+    if device == "cuda":
+        torch.backends.cudnn.benchmark = True
 
     model = build_pixai_model(weights_path, device, total_tags)
     transform = build_pixai_transform()
@@ -776,6 +786,8 @@ def run_pixai(
             tags_out = postprocess_tags(tags_out, args)
             add_tags_to_map(result_map, image_path, tags_out, dedupe)
 
+        # Release GPU memory for this batch immediately
+        del batch_tensor, probs
         if progress is not None:
             progress.update(1)
 
@@ -1324,13 +1336,18 @@ def run_grok_xai_batch(
         return {"mode": "xai-batch-status", "completed_paths": []}
 
     if action == "submit":
-        pending_payload_items = []
         submitted_now = 0
         request_map = state.setdefault("request_map", {})
+        chunk_size = args.xai_batch_submit_chunk
+        include_images = not args.xai_batch_no_image
+        # ThreadPoolExecutor workers for parallel image encoding (I/O + PIL, thread-friendly)
+        encode_workers = min(16, (os.cpu_count() or 4) * 2) if include_images else 1
 
         use_pbar = not getattr(args, "no_progress", False)
-        pbar = tqdm(total=len(paths), desc="xai-batch submit", smoothing=0.0, unit="img") if use_pbar else None
 
+        # Pass 1: scan all paths, filter already-submitted ones (no I/O)
+        scan_pbar = tqdm(total=len(paths), desc="xai-batch scan", smoothing=0.0, unit="img") if use_pbar else None
+        to_process: List[Tuple[str, str, Optional[str], str, str, Optional[List[str]]]] = []
         for image_path in paths:
             image_abs = os.path.abspath(image_path)
             rel_path = None
@@ -1338,84 +1355,90 @@ def run_grok_xai_batch(
                 rel_path = os.path.relpath(image_abs, train_data_dir_abs)
             except Exception:
                 rel_path = None
-
             req_id_seed = rel_path if rel_path and not rel_path.startswith("..") else image_abs
             req_id = "req_" + hashlib.sha1(req_id_seed.encode("utf-8")).hexdigest()
-            existing_req = request_map.get(req_id, {})
-            existing_state = existing_req.get("state")
-            if pbar is not None:
-                pbar.update(1)
-            if existing_state in ("submitted", "succeeded"):
+            if scan_pbar is not None:
+                scan_pbar.update(1)
+            if request_map.get(req_id, {}).get("state") in ("submitted", "succeeded"):
                 continue
-
             tags_list = existing_tags.get(image_path, [])
             prompt_tags = _format_grok_tags_with_categories(tags_list, tag_category_lookup)
             tags_str = args.caption_separator.join(prompt_tags) if prompt_tags else "(no prior tags)"
-            user_prompt = user_prompt_template.replace("{tags}", tags_str)
             extras = extra_frames.get(image_path)
-            user_content = _xai_build_user_content(
-                user_prompt=user_prompt,
-                image_path=image_path,
-                extra_image_paths=extras,
-                include_images=not args.xai_batch_no_image,
-            )
+            to_process.append((image_path, image_abs, rel_path, req_id, tags_str, extras))
+        if scan_pbar is not None:
+            scan_pbar.close()
 
-            request_body = {
-                "chat_get_completion": {
-                    "model": model,
-                    "messages": [
-                        {"role": "system", "content": system_prompt},
-                        {"role": "user", "content": user_content},
-                    ],
-                    "response_format": {"type": "json_object"},
-                    "reasoning_effort": "none",
+        logger.info(
+            f"xai-batch submit: {len(to_process)} to submit, "
+            f"{len(paths) - len(to_process)} already submitted"
+        )
+
+        # Pass 2: encode in parallel per chunk, then POST each chunk to xAI
+        submit_pbar = tqdm(total=len(to_process), desc="xai-batch submit", smoothing=0.0, unit="img") if use_pbar else None
+
+        def _encode_item(item: Tuple) -> Tuple[str, str, Optional[str], Any]:
+            img_path, img_abs, rel_p, req_id, tags_str, extras = item
+            user_prompt = user_prompt_template.replace("{tags}", tags_str)
+            content = _xai_build_user_content(
+                user_prompt=user_prompt,
+                image_path=img_path,
+                extra_image_paths=extras,
+                include_images=include_images,
+            )
+            return req_id, img_abs, rel_p, content
+
+        for chunk_start in range(0, len(to_process), chunk_size):
+            chunk = to_process[chunk_start : chunk_start + chunk_size]
+
+            if include_images and len(chunk) > 1:
+                with ThreadPoolExecutor(max_workers=encode_workers) as ex:
+                    encoded = list(ex.map(_encode_item, chunk))
+            else:
+                encoded = [_encode_item(item) for item in chunk]
+
+            payload_items = []
+            for req_id, img_abs, rel_p, user_content in encoded:
+                request_body = {
+                    "chat_get_completion": {
+                        "model": model,
+                        "messages": [
+                            {"role": "system", "content": system_prompt},
+                            {"role": "user", "content": user_content},
+                        ],
+                        "response_format": {"type": "json_object"},
+                        "reasoning_effort": "none",
+                    }
                 }
-            }
-            pending_payload_items.append(
-                {
+                payload_items.append({
                     "batch_request_id": req_id,
                     "batch_request": request_body,
+                })
+                request_map[req_id] = {
+                    "image_path": img_abs,
+                    "image_path_rel": rel_p if rel_p and not rel_p.startswith("..") else None,
+                    "state": "queued_for_submission",
                 }
-            )
-            request_map[req_id] = {
-                "image_path": image_abs,
-                "image_path_rel": rel_path if rel_path and not rel_path.startswith("..") else None,
-                "state": "queued_for_submission",
-            }
 
-            if len(pending_payload_items) >= args.xai_batch_submit_chunk:
-                _xai_request(
-                    "POST",
-                    f"{args.xai_api_base_url}/v1/batches/{batch_id}/requests",
-                    headers,
-                    payload={"batch_requests": pending_payload_items},
-                    timeout=300,
-                )
-                for item in pending_payload_items:
-                    request_map[item["batch_request_id"]]["state"] = "submitted"
-                submitted_now += len(pending_payload_items)
-                pending_payload_items = []
-                state["submitted_at"] = time.time()
-                _save_xai_state(state_file, state)
-                if pbar is not None:
-                    pbar.set_postfix(submitted=submitted_now)
-
-        if pbar is not None:
-            pbar.close()
-
-        if pending_payload_items:
             _xai_request(
                 "POST",
                 f"{args.xai_api_base_url}/v1/batches/{batch_id}/requests",
                 headers,
-                payload={"batch_requests": pending_payload_items},
+                payload={"batch_requests": payload_items},
                 timeout=300,
             )
-            for item in pending_payload_items:
+            for item in payload_items:
                 request_map[item["batch_request_id"]]["state"] = "submitted"
-            submitted_now += len(pending_payload_items)
+            submitted_now += len(payload_items)
             state["submitted_at"] = time.time()
             _save_xai_state(state_file, state)
+
+            if submit_pbar is not None:
+                submit_pbar.update(len(chunk))
+                submit_pbar.set_postfix(submitted=submitted_now)
+
+        if submit_pbar is not None:
+            submit_pbar.close()
 
         logger.info(
             f"xai batch submit finished: batch_id={batch_id} submitted_now={submitted_now} "
