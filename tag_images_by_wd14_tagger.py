@@ -1635,7 +1635,7 @@ def run_grok_xai_batch(
             _xai_post_with_session(
                 f"{args.xai_api_base_url}/v1/batches/{batch_id}/requests",
                 payload=payload,
-                timeout=300,
+                timeout=60,
             )
 
         def _flush_sub_batch(sub_batch: List[Dict]) -> None:
