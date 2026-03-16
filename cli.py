@@ -736,7 +736,7 @@ def run_tagging(input_dir: str, python: str, media_counts: dict):
                 xai_batch_page_size = ask_input("Results page size for collect", "100")
 
             if monitor_xai:
-                monitor_poll_seconds = ask_input("Monitor poll interval (seconds)", "20")
+                monitor_poll_seconds = str(ask_int("Monitor poll interval (seconds)", default=20, minimum=3))
 
     # Load existing .txt as grok context
     is_collect_or_status = grok_provider == "xai-batch" and xai_batch_action in ("status", "collect")
@@ -995,8 +995,7 @@ def main():
 
     # HuggingFace upload (always offer at end)
     if workflow == 3 or ask_yes_no("Upload dataset to HuggingFace?", default=False):
-        if workflow != 3 or ask_yes_no("Upload dataset to HuggingFace?", default=False):
-            run_hf_upload(input_dir, python)
+        run_hf_upload(input_dir, python)
 
     print_section("ALL DONE")
     print_success(f"Dataset ready at: {input_dir}")

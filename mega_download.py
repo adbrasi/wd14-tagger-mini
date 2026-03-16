@@ -38,6 +38,11 @@ def install_megacmd():
         if result.returncode != 0:
             print_error(f"Failed: {cmd}")
             print_error(result.stderr[:500])
+            # Cleanup partial apt source on failure
+            subprocess.run(
+                "sudo rm -f /etc/apt/sources.list.d/mega.nz.list /etc/apt/keyrings/mega.nz.gpg",
+                shell=True, capture_output=True,
+            )
             return False
     # Remove speed limits
     subprocess.run(["mega-speedlimit", "-d", "0"], capture_output=True)
@@ -80,6 +85,17 @@ def mega_download(link: str, local_dir: str) -> bool:
     if result.returncode != 0:
         print_error("MEGA download failed")
         return False
+
+    # Verify that at least one file was actually downloaded
+    has_files = False
+    for _, _, files in os.walk(local_dir):
+        if files:
+            has_files = True
+            break
+    if not has_files:
+        print_error("MEGA download completed but no files were found in target directory")
+        return False
+
     print_success("Download complete")
     return True
 
@@ -102,7 +118,7 @@ def flatten_directory(source_dir: str, target_dir: str) -> dict:
     Returns stats: {moved: int, conflicts: int, pairs: int}
     """
     os.makedirs(target_dir, exist_ok=True)
-    stats = {"moved": 0, "conflicts": 0, "pairs": 0}
+    stats = {"moved": 0, "conflicts": 0, "pairs": 0, "failed": 0}
 
     # Collect all media files first
     media_files = []
@@ -119,23 +135,27 @@ def flatten_directory(source_dir: str, target_dir: str) -> dict:
         task = progress.add_task("Flattening files", total=len(media_files))
 
         for src_path in media_files:
-            filename = os.path.basename(src_path)
-            dst_path = _unique_path(target_dir, filename)
-            actual_name = os.path.basename(dst_path)
+            try:
+                filename = os.path.basename(src_path)
+                dst_path = _unique_path(target_dir, filename)
+                actual_name = os.path.basename(dst_path)
 
-            if actual_name != filename:
-                stats["conflicts"] += 1
+                if actual_name != filename:
+                    stats["conflicts"] += 1
 
-            # Move media file
-            shutil.move(src_path, dst_path)
-            stats["moved"] += 1
+                # Move media file
+                shutil.move(src_path, dst_path)
+                stats["moved"] += 1
 
-            # Move paired .txt if exists
-            txt_src = os.path.splitext(src_path)[0] + PAIR_EXT
-            if os.path.exists(txt_src):
-                txt_dst = os.path.splitext(dst_path)[0] + PAIR_EXT
-                shutil.move(txt_src, txt_dst)
-                stats["pairs"] += 1
+                # Move paired .txt if exists
+                txt_src = os.path.splitext(src_path)[0] + PAIR_EXT
+                if os.path.exists(txt_src):
+                    txt_dst = os.path.splitext(dst_path)[0] + PAIR_EXT
+                    shutil.move(txt_src, txt_dst)
+                    stats["pairs"] += 1
+            except Exception as e:
+                stats["failed"] += 1
+                print_warning(f"Failed to move {os.path.basename(src_path)}: {e}")
 
             progress.advance(task)
 

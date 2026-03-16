@@ -4,11 +4,11 @@ Scans a directory for video+txt and image+txt pairs. Reports:
 - Media files without .txt (uncaptioned)
 - .txt files without media (orphans)
 
-Offers interactive options to fix issues.
+Handles multiple media extensions sharing the same stem (e.g., video.mp4 + video.jpg).
 """
 import os
 from pathlib import Path
-from typing import Dict, List, Set, Tuple
+from typing import Dict, List, Set
 
 VIDEO_EXTS = {".mp4", ".avi", ".mov", ".mkv", ".webm", ".flv", ".wmv"}
 IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".avif", ".jxl"}
@@ -17,6 +17,8 @@ MEDIA_EXTS = VIDEO_EXTS | IMAGE_EXTS
 
 def scan_pairs(directory: str, recursive: bool = True) -> dict:
     """Scan directory for media/txt pairs.
+
+    Handles multiple media files sharing the same stem by tracking all of them.
 
     Returns:
         {
@@ -27,10 +29,19 @@ def scan_pairs(directory: str, recursive: bool = True) -> dict:
             "total_txt": int,
         }
     """
-    media_files: Set[str] = set()  # stem -> full path
-    txt_files: Set[str] = set()
-    media_map: Dict[str, str] = {}  # stem -> media path
-    txt_map: Dict[str, str] = {}    # stem -> txt path
+    if not os.path.isdir(directory):
+        return {
+            "media_with_txt": [],
+            "media_without_txt": [],
+            "txt_without_media": [],
+            "total_media": 0,
+            "total_txt": 0,
+        }
+
+    # Track ALL media files per stem (handles video.mp4 + video.jpg)
+    media_by_stem: Dict[str, List[str]] = {}  # stem -> [full_path, ...]
+    txt_map: Dict[str, str] = {}  # stem -> txt path
+    total_media = 0
 
     walker = os.walk(directory) if recursive else [(directory, [], os.listdir(directory))]
 
@@ -41,32 +52,45 @@ def scan_pairs(directory: str, recursive: bool = True) -> dict:
             stem = os.path.splitext(full)[0]
 
             if ext in MEDIA_EXTS:
-                media_files.add(stem)
-                media_map[stem] = full
+                media_by_stem.setdefault(stem, []).append(full)
+                total_media += 1
             elif ext == ".txt":
-                txt_files.add(stem)
                 txt_map[stem] = full
 
-    paired_stems = media_files & txt_files
-    media_only = media_files - txt_files
-    txt_only = txt_files - media_files
+    media_stems = set(media_by_stem.keys())
+    txt_stems = set(txt_map.keys())
+
+    paired_stems = media_stems & txt_stems
+    media_only_stems = media_stems - txt_stems
+    txt_only_stems = txt_stems - media_stems
+
+    # Build result lists — include ALL media files per stem
+    media_with_txt = []
+    for s in sorted(paired_stems):
+        for mp in media_by_stem[s]:
+            media_with_txt.append((mp, txt_map[s]))
+
+    media_without_txt = []
+    for s in sorted(media_only_stems):
+        media_without_txt.extend(media_by_stem[s])
 
     return {
-        "media_with_txt": [(media_map[s], txt_map[s]) for s in sorted(paired_stems)],
-        "media_without_txt": [media_map[s] for s in sorted(media_only)],
-        "txt_without_media": [txt_map[s] for s in sorted(txt_only)],
-        "total_media": len(media_files),
-        "total_txt": len(txt_files),
+        "media_with_txt": media_with_txt,
+        "media_without_txt": sorted(media_without_txt),
+        "txt_without_media": [txt_map[s] for s in sorted(txt_only_stems)],
+        "total_media": total_media,
+        "total_txt": len(txt_map),
     }
 
 
 def delete_files(file_list: List[str]) -> int:
     """Delete files and return count of successfully deleted."""
     deleted = 0
+    failed = 0
     for f in file_list:
         try:
             os.remove(f)
             deleted += 1
-        except OSError:
-            pass
+        except OSError as e:
+            failed += 1
     return deleted

@@ -5,8 +5,8 @@
 - Uses ffmpeg for all operations
 - Parallel processing with ProcessPoolExecutor
 """
-import math
 import os
+import signal
 import subprocess
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from typing import Optional
@@ -90,7 +90,6 @@ def process_single_video(
     tmp_path = video_path + ".tmp" + os.path.splitext(video_path)[1]
 
     filters = []
-    output_args = []
 
     # Build ffmpeg filter chain
     if target_w and target_h:
@@ -115,9 +114,21 @@ def process_single_video(
     ])
 
     try:
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+        proc = subprocess.Popen(
+            cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        )
+        try:
+            _, stderr = proc.communicate(timeout=600)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait()
+            result["detail"] = "timeout (600s)"
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+            return result
+
         if proc.returncode != 0:
-            result["detail"] = proc.stderr[:200]
+            result["detail"] = (stderr or "")[:200]
             if os.path.exists(tmp_path):
                 os.remove(tmp_path)
             return result
@@ -147,28 +158,53 @@ def preprocess_videos(
 
     Returns: {total, success, failed, skipped, details: [{path, ok, detail}]}
     """
+    if not video_paths:
+        return {"total": 0, "success": 0, "failed": 0, "skipped": 0, "details": []}
+
     if max_workers is None:
-        max_workers = min(os.cpu_count() or 4, len(video_paths), 16)
+        max_workers = max(1, min(os.cpu_count() or 4, len(video_paths), 16))
 
     snapped_frames = snap_frames(max_frames) if max_frames else None
 
-    # Pre-scan videos for dimensions if resize is needed
-    targets = {}  # path -> (target_w, target_h, needs_cut)
+    # Pre-scan videos for dimensions and frame counts
+    targets = {}  # path -> (target_w, target_h, needs_work)
+    probe_failures = 0
     for vp in video_paths:
         tw, th = None, None
+        needs_cut = snapped_frames is not None
+        probe_ok = True
+
+        info = get_video_info(vp) if (resize or snapped_frames) else None
+
         if resize:
-            info = get_video_info(vp)
             if info and info["width"] and info["height"]:
                 tw = snap_dimension(info["width"])
                 th = snap_dimension(info["height"])
                 # Skip resize if already aligned
                 if tw == info["width"] and th == info["height"]:
                     tw, th = None, None
+            elif info is None:
+                probe_ok = False
+                probe_failures += 1
 
-        needs_work = snapped_frames is not None or (tw is not None)
-        targets[vp] = (tw, th, needs_work)
+        # Skip frame cut if video already has <= snapped_frames
+        if snapped_frames and info and info.get("frames", 0) > 0:
+            if info["frames"] <= snapped_frames:
+                needs_cut = False
 
-    to_process = [(vp, tw, th) for vp, (tw, th, needs) in targets.items() if needs]
+        needs_work = needs_cut or (tw is not None)
+
+        # If probe failed but we need to cut, still submit (ffmpeg handles it)
+        if not probe_ok and snapped_frames:
+            needs_work = True
+
+        targets[vp] = (tw, th, needs_work, needs_cut)
+
+    to_process = [
+        (vp, snapped_frames if needs_cut else None, tw, th)
+        for vp, (tw, th, needs, needs_cut) in targets.items()
+        if needs
+    ]
     skipped = len(video_paths) - len(to_process)
 
     stats = {"total": len(video_paths), "success": 0, "failed": 0, "skipped": skipped, "details": []}
@@ -178,8 +214,8 @@ def preprocess_videos(
 
     with ProcessPoolExecutor(max_workers=max_workers) as executor:
         futures = {
-            executor.submit(process_single_video, vp, snapped_frames, tw, th): vp
-            for vp, tw, th in to_process
+            executor.submit(process_single_video, vp, mf, tw, th): vp
+            for vp, mf, tw, th in to_process
         }
         for future in as_completed(futures):
             res = future.result()

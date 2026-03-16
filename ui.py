@@ -3,8 +3,6 @@
 Centralizes all user interaction: prompts, progress bars, panels, tables.
 All other modules import from here instead of using print() directly.
 """
-import os
-import sys
 from typing import List, Optional
 
 from rich.console import Console
@@ -57,10 +55,12 @@ def print_info(msg: str):
 
 
 def ask_input(prompt: str, default: str = "") -> str:
-    return Prompt.ask(f"[bold]{prompt}[/]", default=default or None) or default
+    return Prompt.ask(f"[bold]{prompt}[/]", default=default)
 
 
 def ask_choice(prompt: str, options: List[str], default: int = 1) -> int:
+    if not options:
+        raise ValueError("ask_choice requires at least one option")
     console.print(f"\n[bold]{prompt}[/]")
     for i, opt in enumerate(options, 1):
         marker = " [cyan]*[/]" if i == default else ""
