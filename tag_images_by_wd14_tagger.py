@@ -806,6 +806,40 @@ def run_pixai(
 DEFAULT_GROK_MODEL = "x-ai/grok-4.20-beta-0309-reasoning"
 DEFAULT_XAI_BATCH_MODEL = "grok-4.20-beta-0309-reasoning"
 OPENROUTER_API_URL = "https://openrouter.ai/api/v1/chat/completions"
+
+# JSON Schema for structured caption output — guarantees parseable responses
+CAPTION_JSON_SCHEMA = {
+    "type": "json_schema",
+    "json_schema": {
+        "name": "caption_output",
+        "strict": True,
+        "schema": {
+            "type": "object",
+            "properties": {
+                "caption": {
+                    "type": "string",
+                    "description": "Detailed natural language caption of the image/video frame",
+                },
+                "tags_used": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Tags from input that were incorporated into the caption",
+                },
+                "tags_ignored": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Tags from input that were deemed irrelevant or incorrect",
+                },
+                "style": {
+                    "type": "string",
+                    "description": "Visual style: anime, realistic, 3d, etc.",
+                },
+            },
+            "required": ["caption", "tags_used", "tags_ignored", "style"],
+            "additionalProperties": False,
+        },
+    },
+}
 XAI_API_BASE_URL = "https://api.x.ai"
 # xAI Batch API documented limits (docs.x.ai/guides/batch-api):
 # - max payload per add-requests call: 25 MB
@@ -987,7 +1021,7 @@ def call_openrouter(
     }
 
     if json_mode:
-        payload["response_format"] = {"type": "json_object"}
+        payload["response_format"] = CAPTION_JSON_SCHEMA
         # response-healing auto-fixes malformed JSON from the model
         payload["plugins"] = [{"id": "response-healing"}]
 
@@ -1844,7 +1878,7 @@ def run_grok_xai_batch(
                                 {"role": "system", "content": system_prompt},
                                 {"role": "user", "content": user_content},
                             ],
-                            "response_format": {"type": "json_object"},
+                            "response_format": CAPTION_JSON_SCHEMA,
                         }
                     }
                     item_wrapper = {

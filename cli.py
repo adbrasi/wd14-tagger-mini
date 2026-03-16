@@ -541,12 +541,20 @@ def run_preprocessing(input_dir: str):
     """Run video preprocessing: frame cut + resize."""
     import shutil
 
-    if shutil.which("ffmpeg") is None:
-        print_error("ffmpeg not found in PATH. Install it: sudo apt install ffmpeg")
-        return
-    if shutil.which("ffprobe") is None:
-        print_error("ffprobe not found in PATH. Install it: sudo apt install ffmpeg")
-        return
+    if shutil.which("ffmpeg") is None or shutil.which("ffprobe") is None:
+        print_warning("ffmpeg/ffprobe not found in PATH")
+        if ask_yes_no("Install ffmpeg now? (sudo apt install ffmpeg)", default=True):
+            result = subprocess.run(
+                ["sudo", "apt", "install", "-y", "ffmpeg"],
+                capture_output=False,
+            )
+            if result.returncode != 0 or shutil.which("ffmpeg") is None:
+                print_error("ffmpeg installation failed. Install manually: sudo apt install ffmpeg")
+                return
+            print_success("ffmpeg installed")
+        else:
+            print_error("ffmpeg is required for video preprocessing")
+            return
 
     from video_preprocess import preprocess_videos, snap_frames
 
@@ -629,8 +637,8 @@ def run_hf_upload(input_dir: str, python: str):
         return
 
     private = ask_yes_no("Private repository?", default=True)
-    chunk_gb = ask_input("Chunk size in GB (per commit)", "5")
-    resume = ask_yes_no("Auto-resume from last uploaded chunk?", default=True)
+    chunk_gb = "5"
+    resume = True
 
     print_section("UPLOADING TO HUGGINGFACE")
     print_info(f"Uploading {input_dir} → {repo_name} ({'private' if private else 'public'})")
