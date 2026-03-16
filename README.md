@@ -1,4 +1,4 @@
-# Video & Image Tagger for LoRA Training
+# data_araknideo
 
 Multi-tagger pipeline for preparing video/image datasets. Extracts frames from videos, tags them with booru taggers, then sends tags + images to a vision LLM for natural language captioning.
 

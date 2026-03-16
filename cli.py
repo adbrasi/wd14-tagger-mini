@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Interactive CLI for video/image tagging pipeline.
+"""Interactive CLI for data_araknideo.
 
 Handles venv setup, dependency installation, and provides a menu-driven
-interface for processing video datasets for LoRA training.
+interface for dataset preprocessing and tagging.
 """
 import os
 import re
@@ -34,8 +34,8 @@ _HF_ID_RE = re.compile(r"^[a-zA-Z0-9_.-]+/[a-zA-Z0-9_.-]+$")
 
 def print_banner():
     print("\n" + "=" * 60)
-    print("  VIDEO TAGGER FOR LORA TRAINING")
-    print("  wd14 / camie / pixai / grok pipeline")
+    print("  DATA ARAKNIDEO")
+    print("  dataset preprocessing & tagging pipeline")
     print("=" * 60 + "\n")
 
 

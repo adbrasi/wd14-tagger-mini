@@ -1,11 +1,11 @@
-# Repository Guidelines
+# data_araknideo — Repository Guidelines
 
 ## Project Structure & Module Organization
 - Core scripts live at the repository root:
   - `tag_images_by_wd14_tagger.py`: main image/video tagging and caption pipeline.
-  - `cli.py`: interactive launcher for setup and workflow selection.
+  - `cli.py`: interactive launcher for preprocessing and tagging workflows.
   - `xai_batch_manager.py`: lightweight xAI batch status/snapshot utility.
-  - `wd14_utils.py`: shared helpers (logging, file discovery, frame extraction, resizing).
+  - `wd14_utils.py`: shared helpers (logging, file discovery, frame extraction, video preprocessing, resizing).
   - `run_tagger.sh`: shell wrapper for common modes.
 - Prompt templates are separated by modality:
   - `prompts/image/{system_prompt.md,user_prompt.md}`
