@@ -47,19 +47,18 @@ def mega_download(link: str, local_dir: str) -> bool:
     """
     os.makedirs(local_dir, exist_ok=True)
     print_info(f"Downloading to {local_dir} ...")
-    print_info("megadl: 16 parallel transfers, no speed limit")
 
-    # megadl downloads to current directory or --path
-    result = subprocess.run(
-        [
-            "megadl",
-            "--path", local_dir,
-            "--limit-speed", "0",
-            "--parallel-transfers", "16",
-            link,
-        ],
-        timeout=None,  # No timeout for large downloads
-    )
+    # megadl downloads to --path; no speed limit
+    cmd = ["megadl", "--path", local_dir]
+
+    # Check if this version supports --limit-speed (1.11 does not on some builds)
+    help_result = subprocess.run(["megadl", "--help"], capture_output=True, text=True)
+    help_text = help_result.stdout + help_result.stderr
+    if "--limit-speed" in help_text:
+        cmd.extend(["--limit-speed", "0"])
+
+    cmd.append(link)
+    result = subprocess.run(cmd, timeout=None)
     if result.returncode != 0:
         print_error("MEGA download failed")
         return False
