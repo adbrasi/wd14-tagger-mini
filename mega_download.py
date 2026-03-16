@@ -69,11 +69,18 @@ def mega_download(link: str, local_dir: str) -> bool:
     print_info("mega-get downloads multiple files in parallel")
 
     # mega-get handles folders recursively and in parallel
-    result = subprocess.run(
-        ["mega-get", link, local_dir],
-        timeout=None,
-    )
-    if result.returncode != 0:
+    # Use Popen so we can kill the process on Ctrl+C
+    import signal
+    proc = subprocess.Popen(["mega-get", link, local_dir])
+    try:
+        proc.wait()
+    except KeyboardInterrupt:
+        print_warning("\nInterrupted — killing mega-get...")
+        proc.kill()
+        proc.wait()
+        raise
+
+    if proc.returncode != 0:
         print_error("MEGA download failed")
         return False
 
