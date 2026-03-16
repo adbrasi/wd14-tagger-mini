@@ -1106,7 +1106,7 @@ def run_tagging(input_dir: str, python: str, media_counts: dict):
     cmd.extend(["--thresh", "0.30"])
 
     # Summary
-    grok_model_display = XAI_BATCH_DEFAULT_MODEL if grok_provider == "xai-batch" else "x-ai/grok-4.20-beta-0309-reasoning"
+    grok_model_display = XAI_BATCH_DEFAULT_MODEL if grok_provider == "xai-batch" else "google/gemini-3-flash-preview"
     summary_rows = [
         ("Input", input_dir),
         ("Mode", f"{'video' if is_video else 'images'}{' (PRO)' if pro_mode else ''}"),

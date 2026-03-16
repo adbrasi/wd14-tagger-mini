@@ -803,7 +803,7 @@ def run_pixai(
 # Grok tagger (OpenRouter API)
 # -------------------------
 
-DEFAULT_GROK_MODEL = "x-ai/grok-4.20-beta-0309-reasoning"
+DEFAULT_GROK_MODEL = "google/gemini-3-flash-preview"
 DEFAULT_XAI_BATCH_MODEL = "grok-4.20-beta-0309-reasoning"
 OPENROUTER_API_URL = "https://openrouter.ai/api/v1/chat/completions"
 
@@ -1017,8 +1017,11 @@ def call_openrouter(
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": content_parts},
         ],
-        "reasoning": {"effort": "low"},
     }
+
+    # Only add reasoning param for reasoning models (avoid errors on non-reasoning models)
+    if "reasoning" in model.lower():
+        payload["reasoning"] = {"effort": "low"}
 
     if json_mode:
         payload["response_format"] = CAPTION_JSON_SCHEMA
