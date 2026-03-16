@@ -1,28 +1,49 @@
 #!/usr/bin/env python3
 """Interactive CLI for data_araknideo.
 
-Handles venv setup, dependency installation, and provides a menu-driven
-interface for dataset preprocessing and tagging.
+Full pipeline wizard: download → validate → preprocess → tag → upload.
+Uses Rich for styled terminal UI throughout.
 """
+import hashlib
+import json
 import os
 import re
 import subprocess
 import sys
 import time
-import json
-import hashlib
 import zipfile
 
 import requests
+
+from ui import (
+    ask_choice,
+    ask_input,
+    ask_int,
+    ask_yes_no,
+    console,
+    make_progress,
+    print_banner,
+    print_error,
+    print_info,
+    print_section,
+    print_success,
+    print_summary_table,
+    print_warning,
+)
+
+# -------------------------
+# Constants
+# -------------------------
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 VENV_DIR = os.path.join(SCRIPT_DIR, ".venv")
 REQUIREMENTS = os.path.join(SCRIPT_DIR, "requirements.txt")
 TAGGER_SCRIPT = os.path.join(SCRIPT_DIR, "tag_images_by_wd14_tagger.py")
 XAI_API_BASE_URL = "https://api.x.ai"
-XAI_BATCH_DEFAULT_MODEL = "grok-4-1-fast-non-reasoning"
+XAI_BATCH_DEFAULT_MODEL = "grok-4.20-beta-0309-reasoning"
 
 IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".avif", ".jxl"}
+VIDEO_EXTS = {".mp4", ".avi", ".mov", ".mkv", ".webm", ".flv", ".wmv"}
 
 # HuggingFace URL / ID detection
 _HF_URL_RE = re.compile(
@@ -32,87 +53,46 @@ _HF_URL_RE = re.compile(
 _HF_ID_RE = re.compile(r"^[a-zA-Z0-9_.-]+/[a-zA-Z0-9_.-]+$")
 
 
-def print_banner():
-    print("\n" + "=" * 60)
-    print("  DATA ARAKNIDEO")
-    print("  dataset preprocessing & tagging pipeline")
-    print("=" * 60 + "\n")
+# -------------------------
+# Environment & Setup
+# -------------------------
+
+def check_env_key(name: str) -> str:
+    """Check for env var and return its value."""
+    return os.environ.get(name, "")
 
 
-def ensure_venv():
-    """Create and activate venv if needed."""
+def ensure_venv() -> str:
+    """Create and activate venv if needed. Returns python path."""
     python = os.path.join(VENV_DIR, "bin", "python")
     if os.path.exists(python):
         return python
 
-    print("[*] Creating virtual environment...")
+    print_info("Creating virtual environment...")
     subprocess.run([sys.executable, "-m", "venv", VENV_DIR], check=True)
-    print("[+] venv created at", VENV_DIR)
+    print_success(f"venv created at {VENV_DIR}")
     return python
 
 
 def install_deps(python: str):
     """Install/update requirements."""
     pip = os.path.join(VENV_DIR, "bin", "pip")
-    print("[*] Installing dependencies...")
+    print_info("Installing dependencies...")
     result = subprocess.run(
         [pip, "install", "-q", "-r", REQUIREMENTS],
         capture_output=True,
         text=True,
     )
     if result.returncode != 0:
-        print("[!] pip install failed:")
-        print(result.stderr)
+        print_error("pip install failed:")
+        console.print(result.stderr)
         sys.exit(1)
-    print("[+] Dependencies installed.\n")
+    print_success("Dependencies installed")
 
 
-def ask_input(prompt: str, default: str = "") -> str:
-    """Prompt user for input with optional default."""
-    if default:
-        display = f"{prompt} [{default}]: "
-    else:
-        display = f"{prompt}: "
-    value = input(display).strip()
-    return value if value else default
-
-
-def ask_choice(prompt: str, options: list, default: int = 1) -> int:
-    """Display numbered options and get user choice."""
-    print(f"\n{prompt}")
-    for i, opt in enumerate(options, 1):
-        marker = " *" if i == default else ""
-        print(f"  {i}) {opt}{marker}")
-    while True:
-        raw = input(f"\nChoice [{default}]: ").strip()
-        if not raw:
-            return default
-        try:
-            choice = int(raw)
-            if 1 <= choice <= len(options):
-                return choice
-        except ValueError:
-            pass
-        print(f"  Please enter a number between 1 and {len(options)}")
-
-
-def ask_yes_no(prompt: str, default: bool = True) -> bool:
-    """Ask a yes/no question. Accepts y/yes or n/no (case-insensitive)."""
-    hint = "Y/n" if default else "y/N"
-    raw = input(f"{prompt} [{hint}]: ").strip().lower()
-    if not raw:
-        return default
-    if raw in ("y", "yes"):
-        return True
-    if raw in ("n", "no"):
-        return False
-    return default
-
-
-def check_env_key(name: str) -> str:
-    """Check for env var and return its value."""
-    return os.environ.get(name, "")
-
+# -------------------------
+# xAI Batch Monitoring
+# -------------------------
 
 def resolve_default_xai_state_file(input_dir: str) -> str:
     """Match the default state-file naming used by tag_images_by_wd14_tagger.py."""
@@ -138,20 +118,16 @@ def fetch_xai_batch_status(
     for attempt in range(max_retries + 1):
         try:
             resp = requests.get(url, headers=headers, timeout=120)
-
-            # Retry transient throttling/server errors.
             if resp.status_code == 429 or resp.status_code >= 500:
                 if attempt >= max_retries:
                     resp.raise_for_status()
                 wait = min(2 ** attempt, 30)
                 time.sleep(wait)
                 continue
-
             resp.raise_for_status()
             return resp.json()
         except requests.exceptions.RequestException as e:
             status = e.response.status_code if getattr(e, "response", None) is not None else None
-            # Non-retriable client errors (except 429).
             if status is not None and 400 <= status < 500 and status != 429:
                 raise
             if attempt >= max_retries:
@@ -165,36 +141,31 @@ def fetch_xai_batch_status(
 def monitor_xai_batch(state_file: str, api_key: str, base_url: str, poll_seconds: int = 20):
     """Poll xAI batch progress and print periodic progress with ETA."""
     if not os.path.exists(state_file):
-        print(f"[!] State file not found: {state_file}")
+        print_error(f"State file not found: {state_file}")
         return
 
     with open(state_file, "r", encoding="utf-8") as f:
         state = json.load(f)
     batch_id = state.get("batch_id")
     if not batch_id:
-        print(f"[!] batch_id not found in state file: {state_file}")
+        print_error(f"batch_id not found in state file: {state_file}")
         return
 
-    print(f"\n[*] Monitoring xAI batch: {batch_id}")
-    print(f"[*] Poll interval: {poll_seconds}s")
-    print("[*] Press Ctrl+C to stop monitoring (batch keeps running in xAI).\n")
+    print_info(f"Monitoring xAI batch: {batch_id}")
+    print_info(f"Poll interval: {poll_seconds}s — Press Ctrl+C to stop")
 
     first_ts = None
     first_done = None
-    consecutive_errors = 0
 
     while True:
         try:
             data = fetch_xai_batch_status(batch_id, api_key, base_url)
-            consecutive_errors = 0
         except requests.exceptions.RequestException as e:
             status = e.response.status_code if getattr(e, "response", None) is not None else None
-            timestamp = time.strftime("%H:%M:%S")
             if status in (401, 403, 404):
-                print(f"[{timestamp}] [!] Monitor stopped: HTTP {status} (non-retriable).")
+                print_error(f"Monitor stopped: HTTP {status}")
                 raise
-            consecutive_errors += 1
-            print(f"[{timestamp}] [!] transient monitor error ({consecutive_errors}): {e}")
+            print_warning(f"Transient error: {e}")
             time.sleep(poll_seconds)
             continue
 
@@ -221,14 +192,14 @@ def monitor_xai_batch(state_file: str, api_key: str, base_url: str, poll_seconds
                 eta_text = f"{eta_sec // 60}m {eta_sec % 60}s"
 
         timestamp = time.strftime("%H:%M:%S")
-        print(
-            f"[{timestamp}] total={total} done={done} ({pct:.2f}%) "
-            f"pending={pending} success={success} error={errors} "
-            f"cancelled={cancelled} eta={eta_text}"
+        console.print(
+            f"[dim]{timestamp}[/] total={total} done=[bold]{done}[/] ({pct:.1f}%) "
+            f"pending={pending} success=[green]{success}[/] error=[red]{errors}[/] "
+            f"eta={eta_text}"
         )
 
         if pending <= 0 and total > 0:
-            print("\n[+] Batch completed (no pending requests).")
+            print_success("Batch completed (no pending requests)")
             return
 
         time.sleep(poll_seconds)
@@ -251,19 +222,18 @@ def detect_hf_reference(path: str):
 
 
 def download_hf_dataset(repo_id: str, subfolder, local_dir: str, token, python_path: str) -> str:
-    """Download HF dataset using the venv's huggingface_hub. Uses xet when available."""
+    """Download HF dataset using the venv's huggingface_hub."""
     pip = os.path.join(VENV_DIR, "bin", "pip")
 
-    print("[*] Installing hf_xet for maximum download speed...")
+    print_info("Installing hf_xet for maximum download speed...")
     r = subprocess.run([pip, "install", "-q", "hf_xet"], capture_output=True, text=True)
     if r.returncode == 0:
-        print("[+] hf_xet ready — xet protocol enabled")
+        print_success("hf_xet ready — xet protocol enabled")
     else:
-        print("[!] hf_xet unavailable, using standard HTTPS transfer")
+        print_warning("hf_xet unavailable, using standard HTTPS transfer")
 
     os.makedirs(local_dir, exist_ok=True)
 
-    # Run snapshot_download inside the venv python (where huggingface_hub is installed)
     script = (
         "import sys, os\n"
         "from huggingface_hub import snapshot_download\n"
@@ -286,62 +256,57 @@ def download_hf_dataset(repo_id: str, subfolder, local_dir: str, token, python_p
     if token:
         env["HF_TOKEN"] = token
 
-    print(f"[*] Downloading {repo_id}{f'/{subfolder}' if subfolder else ''} → {local_dir}")
+    print_info(f"Downloading {repo_id}{f'/{subfolder}' if subfolder else ''} → {local_dir}")
     result = subprocess.run(cmd_args, env=env)
     if result.returncode != 0:
-        print("[!] Download failed. Check HF token and dataset ID.")
+        print_error("Download failed. Check HF token and dataset ID.")
         sys.exit(1)
 
     result_path = os.path.join(local_dir, subfolder) if subfolder else local_dir
     if not os.path.isdir(result_path):
         result_path = local_dir
-    print(f"[+] Download complete: {result_path}")
+    print_success(f"Download complete: {result_path}")
     return result_path
 
 
 # -------------------------
-# Helpers
+# File helpers
 # -------------------------
 
-def count_images_quick(path: str, recursive: bool = True) -> int:
-    """Quick image count without loading any ML deps."""
-    count = 0
+def count_media_quick(path: str, recursive: bool = True) -> dict:
+    """Quick media count without loading any ML deps."""
+    images = 0
+    videos = 0
     try:
-        if recursive:
-            for root, _, files in os.walk(path):
-                for f in files:
-                    if os.path.splitext(f)[1].lower() in IMAGE_EXTS:
-                        count += 1
-        else:
-            for f in os.listdir(path):
-                if os.path.isfile(os.path.join(path, f)) and os.path.splitext(f)[1].lower() in IMAGE_EXTS:
-                    count += 1
+        walker = os.walk(path) if recursive else [(path, [], os.listdir(path))]
+        for root, _, files in walker:
+            for f in files:
+                ext = os.path.splitext(f)[1].lower()
+                if ext in IMAGE_EXTS:
+                    images += 1
+                elif ext in VIDEO_EXTS:
+                    videos += 1
     except OSError:
         pass
-    return count
+    return {"images": images, "videos": videos}
 
 
-def list_zip_archives(path: str, recursive: bool = True) -> list[str]:
+def list_zip_archives(path: str, recursive: bool = True) -> list:
     """List .zip files under a directory."""
-    zips: list[str] = []
+    zips = []
     try:
-        if recursive:
-            for root, _, files in os.walk(path):
-                for f in files:
-                    if f.lower().endswith(".zip"):
-                        zips.append(os.path.join(root, f))
-        else:
-            for f in os.listdir(path):
-                full = os.path.join(path, f)
-                if os.path.isfile(full) and f.lower().endswith(".zip"):
-                    zips.append(full)
+        walker = os.walk(path) if recursive else [(path, [], os.listdir(path))]
+        for root, _, files in walker:
+            for f in files:
+                if f.lower().endswith(".zip"):
+                    zips.append(os.path.join(root, f))
     except OSError:
         pass
     return sorted(zips)
 
 
 def count_pending_zips(path: str, recursive: bool = True) -> int:
-    """Count zip archives that haven't been extracted yet (no valid marker file)."""
+    """Count zip archives that haven't been extracted yet."""
     pending = 0
     for zpath in list_zip_archives(path, recursive=recursive):
         marker = zpath + ".extracted.ok"
@@ -353,7 +318,7 @@ def count_pending_zips(path: str, recursive: bool = True) -> int:
     return pending
 
 
-def extract_zip_archives(path: str, recursive: bool = True):
+def extract_zip_archives(path: str, recursive: bool = True) -> dict:
     """Extract zip archives in place, with marker files for idempotency."""
     zip_files = list_zip_archives(path, recursive=recursive)
     if not zip_files:
@@ -363,51 +328,44 @@ def extract_zip_archives(path: str, recursive: bool = True):
     skipped = 0
     failed = 0
 
-    print(f"[*] Found {len(zip_files):,} zip archives. Extracting in place...")
-    for idx, zpath in enumerate(zip_files, 1):
-        marker = zpath + ".extracted.ok"
-        try:
-            z_mtime = os.path.getmtime(zpath)
-            if os.path.exists(marker) and os.path.getmtime(marker) >= z_mtime:
-                skipped += 1
-                continue
+    with make_progress() as progress:
+        task = progress.add_task("Extracting zips", total=len(zip_files))
+        for zpath in zip_files:
+            marker = zpath + ".extracted.ok"
+            try:
+                z_mtime = os.path.getmtime(zpath)
+                if os.path.exists(marker) and os.path.getmtime(marker) >= z_mtime:
+                    skipped += 1
+                    progress.advance(task)
+                    continue
 
-            with zipfile.ZipFile(zpath, "r") as zf:
-                zf.extractall(os.path.dirname(zpath))
+                with zipfile.ZipFile(zpath, "r") as zf:
+                    zf.extractall(os.path.dirname(zpath))
 
-            with open(marker, "w", encoding="utf-8") as f:
-                f.write(json.dumps({"zip": zpath, "extracted_at": time.time()}, ensure_ascii=False))
+                with open(marker, "w", encoding="utf-8") as f:
+                    f.write(json.dumps({"zip": zpath, "extracted_at": time.time()}, ensure_ascii=False))
 
-            extracted += 1
-            if idx % 50 == 0 or idx == len(zip_files):
-                print(f"    progress: {idx}/{len(zip_files)} zips")
-        except Exception as e:
-            failed += 1
-            print(f"[!] Failed to extract {zpath}: {e}")
+                extracted += 1
+            except Exception as e:
+                failed += 1
+                print_warning(f"Failed to extract {os.path.basename(zpath)}: {e}")
+            progress.advance(task)
 
-    return {
-        "total": len(zip_files),
-        "extracted": extracted,
-        "skipped": skipped,
-        "failed": failed,
-    }
+    return {"total": len(zip_files), "extracted": extracted, "skipped": skipped, "failed": failed}
 
 
 def _collect_precheck(xai_batch_state_file: str, xai_api_key: str) -> bool:
-    """Show batch status before collect and ask user if partial is ok.
-    Returns False if user aborts.
-    """
-    print("\n[!] IMPORTANT: collect writes .txt next to images.")
-    print("    Prefer same machine/path as submit. If using another machine, keep the")
-    print("    same dataset folder structure under the chosen input directory.\n")
+    """Show batch status before collect and ask user if partial is ok."""
+    print_warning("IMPORTANT: collect writes .txt next to images.")
+    print_info("Prefer same machine/path as submit.")
 
     if not os.path.exists(xai_batch_state_file):
-        print(f"[!] State file not found: {xai_batch_state_file}")
-        return True  # let the subprocess handle the error
+        print_error(f"State file not found: {xai_batch_state_file}")
+        return True
 
     key = xai_api_key or check_env_key("XAI_API_KEY")
     if not key:
-        return True  # no key to check status, proceed anyway
+        return True
 
     try:
         with open(xai_batch_state_file, "r", encoding="utf-8") as f:
@@ -416,7 +374,7 @@ def _collect_precheck(xai_batch_state_file: str, xai_api_key: str) -> bool:
         if not bid:
             return True
 
-        print("[*] Fetching batch status before collecting...")
+        print_info("Fetching batch status before collecting...")
         data = fetch_xai_batch_status(bid, key)
         c = data.get("state", {})
         total = int(c.get("num_requests", 0) or 0)
@@ -426,142 +384,275 @@ def _collect_precheck(xai_batch_state_file: str, xai_api_key: str) -> bool:
         done = success + errors
         pct = (done / total * 100) if total else 0
 
-        print(f"\n  Batch ID:  {bid}")
-        print(f"  Total:     {total:,}")
-        print(f"  Done:      {done:,} ({pct:.1f}%)")
-        print(f"  Success:   {success:,}")
-        print(f"  Errors:    {errors:,}")
-        print(f"  Pending:   {pending:,}")
+        print_summary_table("Batch Status", [
+            ("Batch ID", bid),
+            ("Total", f"{total:,}"),
+            ("Done", f"{done:,} ({pct:.1f}%)"),
+            ("Success", f"{success:,}"),
+            ("Errors", f"{errors:,}"),
+            ("Pending", f"{pending:,}"),
+        ])
 
         if pending > 0:
-            print(f"\n  [!] {pending:,} requests still pending on xAI.")
+            print_warning(f"{pending:,} requests still pending on xAI.")
             if not ask_yes_no(
-                f"  Collect {done:,} completed results now (partial — missing {pending:,})?",
+                f"Collect {done:,} completed results now (partial — missing {pending:,})?",
                 default=True,
             ):
-                print("Aborted. Run collect again when batch is fully complete.")
+                print_info("Aborted. Run collect again when batch is fully complete.")
                 return False
         else:
-            print("\n  [+] Batch complete — all results available.\n")
+            print_success("Batch complete — all results available")
 
     except Exception as e:
-        print(f"[!] Could not fetch batch status: {e}")
+        print_warning(f"Could not fetch batch status: {e}")
 
     return True
 
 
-VIDEO_EXTS = {".mp4", ".avi", ".mov", ".mkv", ".webm", ".flv", ".wmv"}
+# -------------------------
+# Input source resolution
+# -------------------------
 
-
-def run_preprocessing_menu(input_dir: str):
-    """Interactive preprocessing menu."""
-    from wd14_utils import cut_videos_batch
-
-    action = ask_choice("Preprocessing action:", [
-        "Cut videos to first N frames",
+def resolve_input_source(python: str) -> str:
+    """Ask user for data source and resolve to a local directory path."""
+    source = ask_choice("Data source:", [
+        "Local directory",
+        "HuggingFace dataset (URL or ID)",
+        "MEGA shared link",
     ], default=1)
 
-    if action == 1:
-        videos = []
-        for root, _, files in os.walk(input_dir):
-            for f in files:
-                if os.path.splitext(f)[1].lower() in VIDEO_EXTS:
-                    videos.append(os.path.join(root, f))
+    if source == 1:
+        input_dir = ask_input("Input directory path")
+        if not input_dir or not os.path.isdir(input_dir):
+            print_error(f"Directory not found: {input_dir}")
+            sys.exit(1)
+        return input_dir
 
-        if not videos:
-            print(f"[!] No videos found in {input_dir}")
-            return
+    elif source == 2:
+        raw = ask_input("HuggingFace dataset ID or URL")
+        hf_ref = detect_hf_reference(raw)
+        if not hf_ref:
+            # Treat as local path
+            if os.path.isdir(raw):
+                return raw
+            print_error(f"Not a valid HF reference or directory: {raw}")
+            sys.exit(1)
 
-        print(f"[+] Found {len(videos):,} videos")
-        max_frames = int(ask_input("Cut to how many frames?", "5"))
-
-        workers = int(ask_input("Parallel workers", str(min(os.cpu_count() or 4, 16))))
-
-        if not ask_yes_no(f"Cut {len(videos):,} videos to {max_frames} frames (MODIFIES ORIGINALS)?", default=False):
-            print("Aborted.")
-            return
-
-        print(f"\n[*] Cutting {len(videos):,} videos to {max_frames} frames...")
-        result = cut_videos_batch(videos, max_frames, max_workers=workers)
-        print(f"[+] Done: {result['success']:,} succeeded, {result['failed']:,} failed")
-
-
-# -------------------------
-# Main
-# -------------------------
-
-def main():
-    print_banner()
-
-    # Setup
-    python = ensure_venv()
-    install_deps(python)
-
-    # Input directory — supports HuggingFace URLs / dataset IDs
-    raw_input = ask_input("Input directory (or HuggingFace ID/URL, e.g. user/dataset)")
-
-    hf_ref = detect_hf_reference(raw_input)
-    if hf_ref:
         repo_id, subfolder = hf_ref
-        print(f"[*] HuggingFace dataset detected: {repo_id}" + (f"  subfolder: {subfolder}" if subfolder else ""))
-        default_dl = os.path.join(
-            os.path.expanduser("~"), "datasets", repo_id.replace("/", "_")
-        )
+        print_info(f"HuggingFace dataset: {repo_id}" + (f" / {subfolder}" if subfolder else ""))
+        default_dl = os.path.join(os.path.expanduser("~"), "datasets", repo_id.replace("/", "_"))
         if subfolder:
             default_dl = os.path.join(default_dl, subfolder.replace("/", "_"))
         local_dir = ask_input("Download to", default_dl)
         dl_token = check_env_key("HF_TOKEN") or check_env_key("HUGGINGFACE_HUB_TOKEN")
         if not dl_token:
             dl_token = ask_input("HF token (Enter to skip for public datasets)", "")
-        input_dir = download_hf_dataset(repo_id, subfolder, local_dir, dl_token or None, python)
-    else:
-        input_dir = raw_input
+        return download_hf_dataset(repo_id, subfolder, local_dir, dl_token or None, python)
 
-    if not input_dir or not os.path.isdir(input_dir):
-        print(f"[!] Directory not found: {input_dir}")
-        sys.exit(1)
+    else:  # MEGA
+        from mega_download import (
+            check_megacmd_installed,
+            flatten_directory,
+            install_megacmd,
+            mega_download,
+        )
 
-    zip_count = len(list_zip_archives(input_dir, recursive=True))
-    if zip_count > 0:
-        pending_zips = count_pending_zips(input_dir, recursive=True)
-        if pending_zips == 0:
-            print(f"[+] Found {zip_count:,} zip files — all already extracted, skipping.")
-        else:
-            print(f"[+] Found {zip_count:,} zip files ({pending_zips:,} pending extraction)")
-            if ask_yes_no("Extract pending zip files now?", default=True):
-                report = extract_zip_archives(input_dir, recursive=True)
-                print(
-                    f"[+] Zip extraction finished: extracted={report['extracted']}, "
-                    f"skipped={report['skipped']}, failed={report['failed']}"
-                )
-                if report["failed"] > 0:
-                    print("[!] Some zips failed to extract. Fix them before processing.")
+        if not check_megacmd_installed():
+            print_warning("MEGAcmd not installed")
+            if ask_yes_no("Install MEGAcmd now?"):
+                if not install_megacmd():
+                    print_error("Could not install MEGAcmd. Install manually: https://mega.io/cmd")
+                    sys.exit(1)
+            else:
+                sys.exit(1)
 
-    img_count = count_images_quick(input_dir, recursive=True)
-    if img_count > 0:
-        print(f"[+] Found ~{img_count:,} images in {input_dir}")
-    else:
-        print(f"[!] No images found in {input_dir} (subdirs will be scanned during processing)")
+        link = ask_input("MEGA shared link (https://mega.nz/...)")
+        default_dl = os.path.join(os.path.expanduser("~"), "datasets", "mega_download")
+        local_dir = ask_input("Download to (temp folder)", default_dl)
 
-    # What to do: preprocess or tag?
-    workflow = ask_choice("What do you want to do?", [
-        "Pre-process dataset (cut frames, normalize)",
-        "Tag dataset (wd14 / pixai / grok pipeline)",
-    ], default=2)
+        if not mega_download(link, local_dir):
+            print_error("MEGA download failed")
+            sys.exit(1)
 
-    if workflow == 1:
-        run_preprocessing_menu(input_dir)
+        # Flatten subfolders into single directory
+        flat_dir = ask_input("Flatten all files to", local_dir + "_flat")
+        print_section("FLATTENING FILES")
+        stats = flatten_directory(local_dir, flat_dir)
+        print_success(
+            f"Moved {stats['moved']:,} files "
+            f"({stats['conflicts']:,} name conflicts resolved, "
+            f"{stats['pairs']:,} txt pairs preserved)"
+        )
+        return flat_dir
+
+
+# -------------------------
+# Dataset validation
+# -------------------------
+
+def run_validation(input_dir: str):
+    """Validate media/txt pairs and offer to fix issues."""
+    from dataset_validate import delete_files, scan_pairs
+
+    print_section("DATASET VALIDATION")
+    pairs = scan_pairs(input_dir, recursive=True)
+
+    print_summary_table("Dataset Contents", [
+        ("Media files", f"{pairs['total_media']:,}"),
+        ("Text files", f"{pairs['total_txt']:,}"),
+        ("Paired", f"{len(pairs['media_with_txt']):,}"),
+        ("Media without caption", f"{len(pairs['media_without_txt']):,}"),
+        ("Orphan .txt files", f"{len(pairs['txt_without_media']):,}"),
+    ])
+
+    if pairs["media_without_txt"]:
+        print_warning(f"{len(pairs['media_without_txt']):,} media files WITHOUT captions")
+        action = ask_choice("What to do with uncaptioned media?", [
+            f"Delete {len(pairs['media_without_txt']):,} uncaptioned files",
+            "Keep them (will be captioned during tagging)",
+            "Show file list first",
+        ], default=2)
+
+        if action == 1:
+            deleted = delete_files(pairs["media_without_txt"])
+            print_success(f"Deleted {deleted:,} uncaptioned media files")
+        elif action == 3:
+            for p in pairs["media_without_txt"][:20]:
+                print_info(os.path.basename(p))
+            if len(pairs["media_without_txt"]) > 20:
+                print_info(f"... and {len(pairs['media_without_txt']) - 20:,} more")
+            if ask_yes_no(f"Delete all {len(pairs['media_without_txt']):,}?", default=False):
+                deleted = delete_files(pairs["media_without_txt"])
+                print_success(f"Deleted {deleted:,} files")
+
+    if pairs["txt_without_media"]:
+        print_warning(f"{len(pairs['txt_without_media']):,} orphan .txt files (no matching media)")
+        if ask_yes_no(f"Delete {len(pairs['txt_without_media']):,} orphan .txt files?", default=False):
+            deleted = delete_files(pairs["txt_without_media"])
+            print_success(f"Deleted {deleted:,} orphan .txt files")
+
+
+# -------------------------
+# Video preprocessing
+# -------------------------
+
+def run_preprocessing(input_dir: str):
+    """Run video preprocessing: frame cut + resize."""
+    from video_preprocess import preprocess_videos, snap_frames
+
+    videos = []
+    for root, _, files in os.walk(input_dir):
+        for f in files:
+            if os.path.splitext(f)[1].lower() in VIDEO_EXTS:
+                videos.append(os.path.join(root, f))
+
+    if not videos:
+        print_info("No videos found — skipping preprocessing")
         return
+
+    print_section("VIDEO PREPROCESSING")
+    print_info(f"Found {len(videos):,} videos")
+
+    do_cut = ask_yes_no("Cut videos to max frame count?", default=True)
+    max_frames = None
+    if do_cut:
+        raw_frames = ask_int("Max frames", default=49, minimum=1)
+        max_frames = snap_frames(raw_frames)
+        if max_frames != raw_frames:
+            print_info(f"Snapped {raw_frames} → {max_frames} (F % 8 == 1 rule)")
+
+    do_resize = ask_yes_no("Resize to multiples of 32 (W/H)?", default=True)
+
+    if not do_cut and not do_resize:
+        print_info("Nothing to do — skipping")
+        return
+
+    workers = min(os.cpu_count() or 4, 16)
+
+    summary_rows = [("Videos", f"{len(videos):,}")]
+    if do_cut:
+        summary_rows.append(("Frame limit", str(max_frames)))
+    summary_rows.append(("Resize W/H to 32x", "Yes" if do_resize else "No"))
+    summary_rows.append(("Workers", str(workers)))
+    print_summary_table("Preprocessing Config", summary_rows)
+
+    if not ask_yes_no("Process videos? (MODIFIES ORIGINALS)", default=False):
+        print_info("Preprocessing skipped")
+        return
+
+    print_section("PROCESSING VIDEOS")
+    result = preprocess_videos(videos, max_frames=max_frames, resize=do_resize, max_workers=workers)
+    print_success(
+        f"Done: {result['success']:,} ok, "
+        f"{result['failed']:,} failed, "
+        f"{result['skipped']:,} skipped"
+    )
+
+    if result["failed"] > 0:
+        print_warning("Some videos failed to process. Check ffmpeg and video integrity.")
+
+
+# -------------------------
+# HuggingFace upload
+# -------------------------
+
+def run_hf_upload(input_dir: str, python: str):
+    """Upload dataset to HuggingFace."""
+    hf_token = check_env_key("HF_TOKEN") or check_env_key("HUGGINGFACE_HUB_TOKEN")
+    if not hf_token:
+        hf_token = ask_input("HuggingFace token")
+        if not hf_token:
+            print_error("No HF token provided")
+            return
+
+    repo_name = ask_input("Repository name (user/dataset)")
+    if not repo_name:
+        print_error("No repository name provided")
+        return
+
+    private = ask_yes_no("Private repository?", default=True)
+
+    print_section("UPLOADING TO HUGGINGFACE")
+    print_info(f"Uploading {input_dir} → {repo_name} ({'private' if private else 'public'})")
+
+    upload_script = (
+        "from huggingface_hub import HfApi\n"
+        "import sys, os\n"
+        "api = HfApi(token=os.environ['HF_TOKEN'])\n"
+        "api.create_repo(sys.argv[1], repo_type='dataset', private=sys.argv[3]=='true', exist_ok=True)\n"
+        "api.upload_folder(folder_path=sys.argv[2], repo_id=sys.argv[1], repo_type='dataset')\n"
+        "print('__done__')\n"
+    )
+    env = os.environ.copy()
+    env["HF_TOKEN"] = hf_token
+    result = subprocess.run(
+        [python, "-c", upload_script, repo_name, input_dir, "true" if private else "false"],
+        env=env,
+    )
+    if result.returncode == 0:
+        print_success(f"Uploaded to https://huggingface.co/datasets/{repo_name}")
+    else:
+        print_error("Upload failed — check token and permissions")
+
+
+# -------------------------
+# Tagging pipeline
+# -------------------------
+
+def run_tagging(input_dir: str, python: str, media_counts: dict):
+    """Run the tagging pipeline with full configuration wizard."""
+    img_count = media_counts["images"]
+    vid_count = media_counts["videos"]
 
     # Mode selection
     mode = ask_choice("What are you processing?", [
-        "Videos (extract frames and tag)",
-        "Images (tag directly)",
-    ], default=1)
+        f"Videos (extract frames and tag) — {vid_count:,} found",
+        f"Images (tag directly) — {img_count:,} found",
+    ], default=1 if vid_count > 0 else 2)
     is_video = mode == 1
 
     # Tagger selection
-    print("\nAvailable taggers:")
     tagger_options = [
         "pixai + grok (recommended for video LoRA)",
         "wd14 + pixai + grok (full pipeline)",
@@ -571,14 +662,7 @@ def main():
         "Custom (enter manually)",
     ]
     tagger_choice = ask_choice("Select tagger combination:", tagger_options, default=1)
-
-    tagger_map = {
-        1: "pixai,grok",
-        2: "wd14,pixai,grok",
-        3: "pixai",
-        4: "wd14",
-        5: "grok",
-    }
+    tagger_map = {1: "pixai,grok", 2: "wd14,pixai,grok", 3: "pixai", 4: "wd14", 5: "grok"}
     if tagger_choice == 6:
         taggers = ask_input("Enter taggers (comma-separated)", "pixai,grok")
     else:
@@ -586,6 +670,8 @@ def main():
 
     has_grok = "grok" in taggers
     has_local_taggers = any(t in taggers for t in ("wd14", "camie", "pixai"))
+
+    # Grok provider — xAI Batch as default for video
     grok_provider = "openrouter"
     xai_api_key = ""
     xai_batch_action = "submit"
@@ -602,15 +688,16 @@ def main():
     if is_video:
         pro_mode = ask_yes_no("Enable PRO mode? (2 frames per video, better quality)", default=False)
 
-    # Grok provider and mode (images only for xAI batch)
-    if has_grok and not is_video:
+    # Grok provider selection
+    if has_grok:
+        default_provider = 2 if is_video else 1  # xAI Batch default for video
         provider_choice = ask_choice(
             "Grok backend:",
             [
-                "OpenRouter (real-time requests)",
-                "xAI Batch API (background jobs, lower cost for large datasets)",
+                "OpenRouter (real-time, concurrent requests)",
+                "xAI Batch API (background jobs, 50% cheaper, no rate limits)",
             ],
-            default=1,
+            default=default_provider,
         )
         if provider_choice == 2:
             grok_provider = "xai-batch"
@@ -639,7 +726,7 @@ def main():
                 xai_batch_no_image = not send_images
                 chunk_default = "500" if send_images else "5000"
                 xai_batch_submit_chunk = ask_input(
-                    "Requests per submit call (encoding batch size)",
+                    "Requests per submit call",
                     chunk_default,
                 )
                 monitor_xai = ask_yes_no("Monitor batch progress after submit?", default=True)
@@ -652,12 +739,11 @@ def main():
                 monitor_poll_seconds = ask_input("Monitor poll interval (seconds)", "20")
 
     # Load existing .txt as grok context
-    # Only relevant for submit/openrouter — skip for status/collect (no output is written)
     is_collect_or_status = grok_provider == "xai-batch" and xai_batch_action in ("status", "collect")
     if has_grok and not is_video and not is_collect_or_status:
         if not has_local_taggers:
             grok_load_existing = ask_yes_no(
-                "Load existing .txt tags as context for grok? (recommended if you already have booru tags)",
+                "Load existing .txt tags as context for grok?",
                 default=True,
             )
         else:
@@ -666,56 +752,58 @@ def main():
                 default=False,
             )
 
-    # Grok API key
+    # API keys
     api_key = ""
     if has_grok:
         if grok_provider == "xai-batch":
             xai_api_key = check_env_key("XAI_API_KEY")
             if xai_api_key:
-                print(f"[+] Found XAI_API_KEY in environment ({xai_api_key[:8]}...)")
+                print_success(f"Found XAI_API_KEY in environment ({xai_api_key[:8]}...)")
             else:
                 xai_api_key = ask_input("Enter xAI API key")
                 if not xai_api_key:
-                    print("[!] No xAI API key provided. xAI batch mode will fail.")
+                    print_error("No xAI API key provided. xAI batch mode will fail.")
                     if not ask_yes_no("Continue anyway?", default=False):
                         sys.exit(1)
         else:
             api_key = check_env_key("OPENROUTER_API_KEY")
             if api_key:
-                print(f"[+] Found OPENROUTER_API_KEY in environment ({api_key[:8]}...)")
+                print_success(f"Found OPENROUTER_API_KEY in environment ({api_key[:8]}...)")
             else:
                 api_key = ask_input("Enter OpenRouter API key (sk-or-...)")
                 if not api_key:
-                    print("[!] No API key provided. Grok tagger will fail.")
+                    print_error("No API key provided. Grok tagger will fail.")
                     if not ask_yes_no("Continue anyway?", default=False):
                         sys.exit(1)
 
     # HF token (for pixai gated repo)
     hf_token = check_env_key("HF_TOKEN") or check_env_key("HUGGINGFACE_HUB_TOKEN")
     if "pixai" in taggers and not hf_token:
-        print("\n[!] PixAI model is gated. You may need a HuggingFace token.")
+        print_warning("PixAI model is gated. You may need a HuggingFace token.")
         hf_token = ask_input("Enter HF token (or press Enter to skip)", "")
 
-    # Batch size — only relevant for local booru taggers (wd14/camie/pixai)
+    # Batch size — auto VRAM detection
     batch_size = "4"
     if has_local_taggers:
         batch_size = ask_input("Batch size for local taggers (or 'auto' for VRAM-based)", "auto")
         if batch_size.lower() == "auto":
-            cmd_args = [python, "-c",
+            cmd_args = [
+                python, "-c",
                 "from tag_images_by_wd14_tagger import recommend_batch_by_vram; "
-                "r = recommend_batch_by_vram(); print(r if r else 4)"]
+                "r = recommend_batch_by_vram(); print(r if r else 4)",
+            ]
             try:
                 r = subprocess.run(cmd_args, capture_output=True, text=True, timeout=10)
                 batch_size = r.stdout.strip() if r.returncode == 0 and r.stdout.strip() else "4"
-                print(f"[+] Auto batch size from VRAM: {batch_size}")
+                print_success(f"Auto batch size from VRAM: {batch_size}")
             except Exception:
                 batch_size = "4"
-                print("[!] Could not detect VRAM, using batch_size=4")
+                print_warning("Could not detect VRAM, using batch_size=4")
 
     # Grok concurrency
-    grok_concurrency = "16"
+    grok_concurrency = "32"
     if has_grok and grok_provider == "openrouter":
-        grok_concurrency = ask_input("Grok API concurrency (parallel requests)", "16")
+        grok_concurrency = ask_input("Grok API concurrency (parallel requests)", "32")
 
     # Recursive
     recursive = ask_yes_no("Search subdirectories recursively?", default=True)
@@ -723,7 +811,7 @@ def main():
     # Force reprocess
     force = ask_yes_no("Force reprocess already-processed files?", default=False)
 
-    # Collect pre-check: show batch status, ask about partial collect, warn about paths
+    # Collect pre-check
     if has_grok and grok_provider == "xai-batch" and xai_batch_action == "collect":
         if not _collect_precheck(xai_batch_state_file, xai_api_key):
             sys.exit(0)
@@ -747,7 +835,6 @@ def main():
     if has_grok:
         cmd.extend(["--grok_provider", grok_provider])
         if grok_provider == "xai-batch":
-            # status/collect should not trigger local booru taggers accidentally
             if xai_batch_action in ("status", "collect"):
                 taggers = "grok"
                 cmd = [python, TAGGER_SCRIPT, input_dir, "--taggers", taggers, "--batch_size", batch_size]
@@ -785,51 +872,38 @@ def main():
     if hf_token:
         cmd.extend(["--hf_token", hf_token])
 
-    # Thresholds
     cmd.extend(["--thresh", "0.30"])
 
     # Summary
-    print("\n" + "-" * 60)
-    print("CONFIGURATION SUMMARY")
-    print("-" * 60)
-    print(f"  Input:        {input_dir}")
-    if img_count:
-        print(f"  Images:       ~{img_count:,}")
-    print(f"  Mode:         {'video' if is_video else 'images'}{' (PRO)' if pro_mode else ''}")
-    print(f"  Taggers:      {taggers}")
+    grok_model_display = XAI_BATCH_DEFAULT_MODEL if grok_provider == "xai-batch" else "x-ai/grok-4.20-beta-0309-reasoning"
+    summary_rows = [
+        ("Input", input_dir),
+        ("Mode", f"{'video' if is_video else 'images'}{' (PRO)' if pro_mode else ''}"),
+        ("Taggers", taggers),
+    ]
     if has_local_taggers:
-        print(f"  Batch size:   {batch_size}")
+        summary_rows.append(("Batch size", batch_size))
     if has_grok:
-        print(f"  Grok provider:{grok_provider}")
-        grok_model_display = XAI_BATCH_DEFAULT_MODEL if grok_provider == "xai-batch" else "x-ai/grok-4.1-fast"
-        print(f"  Grok model:   {grok_model_display}")
+        summary_rows.append(("Grok provider", grok_provider))
+        summary_rows.append(("Grok model", grok_model_display))
         if grok_provider == "openrouter":
-            print(f"  Concurrency:  {grok_concurrency}")
+            summary_rows.append(("Concurrency", grok_concurrency))
         else:
-            print(f"  Batch action: {xai_batch_action}")
-            print(f"  State file:   {xai_batch_state_file}")
-            if xai_batch_action == "submit":
-                print(f"  Submit chunk: {xai_batch_submit_chunk}")
-                print(f"  Send images:  {not xai_batch_no_image}")
-            if xai_batch_action == "collect":
-                print(f"  Page size:    {xai_batch_page_size}")
-            if monitor_xai:
-                print(f"  Monitor poll: {monitor_poll_seconds}s")
-    if has_grok and not is_video and not is_collect_or_status:
-        print(f"  Load existing tags: {grok_load_existing}")
-    print(f"  Recursive:    {recursive}")
-    print(f"  Force:        {force}")
-    print("-" * 60)
+            summary_rows.append(("Batch action", xai_batch_action))
+            summary_rows.append(("State file", xai_batch_state_file))
+    summary_rows.extend([
+        ("Recursive", str(recursive)),
+        ("Force", str(force)),
+    ])
+    print_summary_table("CONFIGURATION", summary_rows)
 
-    if not ask_yes_no("\nStart processing?", default=True):
-        print("Aborted.")
-        sys.exit(0)
-
-    print("\n" + "=" * 60)
-    print("  STARTING PIPELINE")
-    print("=" * 60 + "\n")
+    if not ask_yes_no("Start processing?", default=True):
+        print_info("Aborted")
+        return False
 
     # Run
+    print_section("STARTING PIPELINE")
+
     env = os.environ.copy()
     if api_key:
         env["OPENROUTER_API_KEY"] = api_key
@@ -841,12 +915,11 @@ def main():
     try:
         result = subprocess.run(cmd, env=env)
         if result.returncode == 0:
-            print("\n" + "=" * 60)
             if xai_batch_action == "collect":
-                print("  COLLECT DONE! .txt files written next to your images.")
+                print_success("COLLECT DONE! .txt files written next to your images.")
             else:
-                print("  DONE! Check your input directory for .txt files.")
-            print("=" * 60 + "\n")
+                print_success("DONE! Check your input directory for .txt files.")
+
             if has_grok and grok_provider == "xai-batch" and monitor_xai and xai_batch_action in ("submit", "status"):
                 try:
                     monitor_xai_batch(
@@ -856,16 +929,82 @@ def main():
                         poll_seconds=max(3, int(monitor_poll_seconds)),
                     )
                 except KeyboardInterrupt:
-                    print("\n[!] Monitoring stopped by user. Batch keeps running on xAI.")
+                    print_warning("Monitoring stopped by user. Batch keeps running on xAI.")
                 except Exception as e:
-                    print(f"\n[!] Monitor error: {e}")
+                    print_error(f"Monitor error: {e}")
+            return True
         else:
-            print(f"\n[!] Process exited with code {result.returncode}")
-            sys.exit(result.returncode)
+            print_error(f"Process exited with code {result.returncode}")
+            return False
     except KeyboardInterrupt:
-        print("\n\n[!] Interrupted by user.")
-        sys.exit(130)
+        print_warning("Interrupted by user")
+        return False
+
+
+# -------------------------
+# Main
+# -------------------------
+
+def main():
+    print_banner()
+
+    # Setup
+    python = ensure_venv()
+    install_deps(python)
+
+    # Resolve input source (local / HuggingFace / MEGA)
+    input_dir = resolve_input_source(python)
+
+    # Handle zip archives
+    zip_count = len(list_zip_archives(input_dir, recursive=True))
+    if zip_count > 0:
+        pending_zips = count_pending_zips(input_dir, recursive=True)
+        if pending_zips == 0:
+            print_success(f"Found {zip_count:,} zip files — all already extracted")
+        else:
+            print_info(f"Found {zip_count:,} zip files ({pending_zips:,} pending extraction)")
+            if ask_yes_no("Extract pending zip files now?", default=True):
+                report = extract_zip_archives(input_dir, recursive=True)
+                print_success(
+                    f"Zip extraction: extracted={report['extracted']}, "
+                    f"skipped={report['skipped']}, failed={report['failed']}"
+                )
+
+    # Count media
+    media_counts = count_media_quick(input_dir, recursive=True)
+    if media_counts["images"] > 0 or media_counts["videos"] > 0:
+        print_info(f"Found ~{media_counts['images']:,} images, ~{media_counts['videos']:,} videos in {input_dir}")
+    else:
+        print_warning(f"No media found in {input_dir} (subdirs will be scanned during processing)")
+
+    # Validate media/txt pairs
+    run_validation(input_dir)
+
+    # What to do?
+    workflow = ask_choice("What do you want to do?", [
+        "Pre-process dataset (cut frames, resize)",
+        "Tag dataset (wd14 / pixai / grok pipeline)",
+        "Full pipeline (preprocess → tag → upload)",
+    ], default=3)
+
+    if workflow in (1, 3):
+        run_preprocessing(input_dir)
+
+    if workflow in (2, 3):
+        run_tagging(input_dir, python, media_counts)
+
+    # HuggingFace upload (always offer at end)
+    if workflow == 3 or ask_yes_no("Upload dataset to HuggingFace?", default=False):
+        if workflow != 3 or ask_yes_no("Upload dataset to HuggingFace?", default=False):
+            run_hf_upload(input_dir, python)
+
+    print_section("ALL DONE")
+    print_success(f"Dataset ready at: {input_dir}")
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except KeyboardInterrupt:
+        print_warning("\nInterrupted by user")
+        sys.exit(130)
