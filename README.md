@@ -130,7 +130,7 @@ Only the `caption` field is written to the `.txt` file.
 
 ### Model selection
 
-Default: `x-ai/grok-2-vision-1212`
+Default: `x-ai/grok-4.1-fast`
 
 Any vision model on OpenRouter works:
 ```bash
@@ -197,7 +197,7 @@ taggers:
 
 grok:
   --grok_api_key KEY          OpenRouter API key
-  --grok_model MODEL          Model ID (default: x-ai/grok-2-vision-1212)
+  --grok_model MODEL          Model ID (default: x-ai/grok-4.1-fast)
   --grok_system_prompt_file   Path to system prompt .md
   --grok_prompt_file          Path to user prompt .md
   --grok_concurrency N        Parallel API calls (default: 8)

@@ -2367,6 +2367,12 @@ def recommend_batch_by_vram() -> Optional[int]:
     except Exception:
         return None
 
+    if free_mb >= 80000:
+        return 64
+    if free_mb >= 60000:
+        return 48
+    if free_mb >= 40000:
+        return 32
     if free_mb >= 30000:
         return 16
     if free_mb >= 20000:

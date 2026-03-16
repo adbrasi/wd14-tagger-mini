@@ -171,15 +171,6 @@ def extract_frames(video_path: str, frame_numbers: List[int]) -> List[Optional[I
     return results
 
 
-# Keep backward compat alias
-def extract_first_frame(video_path: str, output_path: Optional[str] = None) -> Optional[Image.Image]:
-    """Legacy wrapper - extracts frame 12 by default."""
-    img = extract_frame(video_path, frame_number=12)
-    if img and output_path:
-        img.save(output_path)
-    return img
-
-
 def get_pil_interpolation(interpolation: Optional[str]) -> Optional[Image.Resampling]:
     if interpolation is None:
         return None
