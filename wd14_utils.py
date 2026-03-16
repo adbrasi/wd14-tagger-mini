@@ -1,8 +1,5 @@
 import logging
-import os
-import subprocess
 import sys
-from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 from typing import Iterable, List, Optional, Tuple
 
@@ -172,58 +169,6 @@ def extract_frames(video_path: str, frame_numbers: List[int]) -> List[Optional[I
 
     cap.release()
     return results
-
-
-def cut_video_frames(video_path: str, max_frames: int) -> bool:
-    """Cut a video to its first max_frames frames, modifying in-place.
-
-    Uses ffmpeg to re-encode with frame limit. Returns True on success.
-    """
-    tmp_path = video_path + ".tmp" + os.path.splitext(video_path)[1]
-    cmd = [
-        "ffmpeg", "-y",
-        "-i", video_path,
-        "-vframes", str(max_frames),
-        "-c:v", "libx264", "-preset", "fast", "-crf", "18",
-        "-c:a", "copy",
-        tmp_path,
-    ]
-    try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
-        if result.returncode != 0:
-            logger.warning(f"ffmpeg failed for {video_path}: {result.stderr[:200]}")
-            if os.path.exists(tmp_path):
-                os.remove(tmp_path)
-            return False
-        os.replace(tmp_path, video_path)
-        return True
-    except Exception as e:
-        logger.warning(f"Error cutting {video_path}: {e}")
-        if os.path.exists(tmp_path):
-            os.remove(tmp_path)
-        return False
-
-
-def cut_videos_batch(video_paths: list, max_frames: int, max_workers: int = None) -> dict:
-    """Cut multiple videos in parallel. Returns {success: int, failed: int}."""
-    if max_workers is None:
-        max_workers = min(os.cpu_count() or 4, len(video_paths), 16)
-
-    success = 0
-    failed = 0
-
-    with ProcessPoolExecutor(max_workers=max_workers) as executor:
-        futures = {
-            executor.submit(cut_video_frames, vp, max_frames): vp
-            for vp in video_paths
-        }
-        for future in as_completed(futures):
-            if future.result():
-                success += 1
-            else:
-                failed += 1
-
-    return {"success": success, "failed": failed}
 
 
 def get_pil_interpolation(interpolation: Optional[str]) -> Optional[Image.Resampling]:

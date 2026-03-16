@@ -253,6 +253,7 @@ def download_hf_dataset(repo_id: str, subfolder, local_dir: str, token, python_p
         cmd_args.append(subfolder)
 
     env = os.environ.copy()
+    env["HF_XET_HIGH_PERFORMANCE"] = "1"
     if token:
         env["HF_TOKEN"] = token
 
@@ -430,22 +431,76 @@ def _detect_source_type(raw: str) -> str:
     return "unknown"
 
 
-def _download_direct_url(url: str, dest_dir: str) -> str:
-    """Download a direct file URL (HF resolve, etc.) using wget/curl."""
+def _parse_hf_file_url(url: str):
+    """Parse HF direct file URL into (repo_id, filename) or None.
+
+    Handles: https://huggingface.co/user/repo/resolve/main/path/file.zip?download=true
+    """
+    m = re.match(
+        r"https?://huggingface\.co/([^/]+/[^/]+)/resolve/[^/]+/(.+?)(?:\?.*)?$",
+        url.strip(),
+    )
+    return (m.group(1), m.group(2)) if m else None
+
+
+def _download_direct_url(url: str, dest_dir: str, python: str = "") -> str:
+    """Download a direct file URL. Uses HF xet for HF URLs, aria2c for others."""
     os.makedirs(dest_dir, exist_ok=True)
-    # Extract filename from URL
-    from urllib.parse import urlparse, unquote
-    parsed = urlparse(url.split("?")[0])
-    filename = unquote(os.path.basename(parsed.path)) or "download"
+    from urllib.parse import unquote, urlparse
+    parsed_url = urlparse(url.split("?")[0])
+    filename = unquote(os.path.basename(parsed_url.path)) or "download"
     dest_file = os.path.join(dest_dir, filename)
 
-    print_info(f"Downloading {filename}...")
+    # Try HF native download (uses xet protocol — fastest for HF files)
+    hf_parsed = _parse_hf_file_url(url)
+    if hf_parsed and python:
+        repo_id, filepath = hf_parsed
+        print_info(f"Downloading {filename} via HuggingFace xet protocol...")
 
-    # Try wget first (shows progress), fallback to curl
-    if subprocess.run(["which", "wget"], capture_output=True).returncode == 0:
-        result = subprocess.run(["wget", "-c", "-O", dest_file, url])
+        pip = os.path.join(VENV_DIR, "bin", "pip")
+        subprocess.run([pip, "install", "-q", "hf_xet"], capture_output=True, text=True)
+
+        dl_script = (
+            "from huggingface_hub import hf_hub_download\n"
+            "import sys, os\n"
+            "token = os.environ.get('HF_TOKEN') or None\n"
+            "path = hf_hub_download(\n"
+            "    repo_id=sys.argv[1], filename=sys.argv[2],\n"
+            "    repo_type='dataset', local_dir=sys.argv[3],\n"
+            "    token=token,\n"
+            ")\n"
+            "print(path)\n"
+        )
+        env = os.environ.copy()
+        env["HF_XET_HIGH_PERFORMANCE"] = "1"
+        r = subprocess.run(
+            [python, "-c", dl_script, repo_id, filepath, dest_dir],
+            env=env, capture_output=True, text=True,
+        )
+        if r.returncode == 0 and r.stdout.strip():
+            downloaded = r.stdout.strip()
+            if os.path.exists(downloaded) and os.path.abspath(downloaded) != os.path.abspath(dest_file):
+                import shutil as _shutil
+                _shutil.move(downloaded, dest_file)
+            if os.path.exists(dest_file):
+                print_success(f"Downloaded via xet: {filename}")
+                return dest_file
+        print_warning("HF xet download failed, falling back to aria2c...")
+
+    # Fallback: aria2c (16 parallel connections) or wget
+    print_info(f"Downloading {filename}...")
+    import shutil as _shutil
+    if _shutil.which("aria2c") is None:
+        print_info("Installing aria2 for fast parallel downloads...")
+        subprocess.run(["sudo", "apt", "install", "-y", "aria2"], capture_output=False)
+
+    if _shutil.which("aria2c"):
+        result = subprocess.run([
+            "aria2c", "-x", "16", "-s", "16", "-k", "1M",
+            "-c", "-d", dest_dir, "-o", filename, url,
+        ])
     else:
-        result = subprocess.run(["curl", "-L", "-C", "-", "-o", dest_file, url])
+        result = subprocess.run(["wget", "-c", "-O", dest_file, url])
 
     if result.returncode != 0 or not os.path.exists(dest_file):
         print_error(f"Download failed: {url}")
@@ -500,7 +555,7 @@ def _process_single_source(
     elif source_type == "hf_file":
         print_info(f"Source {source_num}: HuggingFace direct file URL")
         tmp_dir = os.path.join(target_dir, f".hf_tmp_{source_num}")
-        dest_file = _download_direct_url(raw, tmp_dir)
+        dest_file = _download_direct_url(raw, tmp_dir, python=python)
         if not dest_file:
             return False
 
@@ -751,6 +806,8 @@ def run_hf_upload(input_dir: str, python: str):
     pip = os.path.join(VENV_DIR, "bin", "pip")
     subprocess.run([pip, "install", "-q", "hf_xet"], capture_output=True, text=True)
 
+    num_workers = max(4, min(64, (os.cpu_count() or 4) * 2))
+
     upload_script = (
         "from huggingface_hub import HfApi\n"
         "import sys, os\n"
@@ -761,18 +818,19 @@ def run_hf_upload(input_dir: str, python: str):
         "    repo_id=sys.argv[1],\n"
         "    repo_type='dataset',\n"
         "    folder_path=sys.argv[2],\n"
-        "    num_workers=16,\n"
+        "    num_workers=int(sys.argv[4]),\n"
         ")\n"
         "print('__done__')\n"
     )
 
     env = os.environ.copy()
     env["HF_TOKEN"] = hf_token
+    env["HF_XET_HIGH_PERFORMANCE"] = "1"
 
     try:
         result = subprocess.run(
             [python, "-c", upload_script, repo_name, input_dir,
-             "true" if private else "false"],
+             "true" if private else "false", str(num_workers)],
             env=env,
         )
         if result.returncode == 0:

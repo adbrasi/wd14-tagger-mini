@@ -10,13 +10,11 @@ from rich.panel import Panel
 from rich.progress import (
     Progress,
     BarColumn,
-    DownloadColumn,
     MofNCompleteColumn,
     SpinnerColumn,
     TextColumn,
     TimeElapsedColumn,
     TimeRemainingColumn,
-    TransferSpeedColumn,
 )
 from rich.prompt import Confirm, IntPrompt, Prompt
 from rich.table import Table
@@ -95,21 +93,6 @@ def make_progress(**kwargs) -> Progress:
         TextColumn("[progress.description]{task.description}"),
         BarColumn(),
         MofNCompleteColumn(),
-        TimeElapsedColumn(),
-        TimeRemainingColumn(),
-        console=console,
-        **kwargs,
-    )
-
-
-def make_download_progress(**kwargs) -> Progress:
-    """Download-specific progress bar with transfer speed."""
-    return Progress(
-        SpinnerColumn(),
-        TextColumn("[progress.description]{task.description}"),
-        BarColumn(),
-        DownloadColumn(),
-        TransferSpeedColumn(),
         TimeElapsedColumn(),
         TimeRemainingColumn(),
         console=console,
