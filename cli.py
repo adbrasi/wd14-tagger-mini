@@ -539,6 +539,15 @@ def run_validation(input_dir: str):
 
 def run_preprocessing(input_dir: str):
     """Run video preprocessing: frame cut + resize."""
+    import shutil
+
+    if shutil.which("ffmpeg") is None:
+        print_error("ffmpeg not found in PATH. Install it: sudo apt install ffmpeg")
+        return
+    if shutil.which("ffprobe") is None:
+        print_error("ffprobe not found in PATH. Install it: sudo apt install ffmpeg")
+        return
+
     from video_preprocess import preprocess_videos, snap_frames
 
     videos = []
@@ -598,7 +607,15 @@ def run_preprocessing(input_dir: str):
 # -------------------------
 
 def run_hf_upload(input_dir: str, python: str):
-    """Upload dataset to HuggingFace."""
+    """Upload dataset to HuggingFace using the chunked zip uploader.
+
+    Uses upload_hf_images_txt_zip.py which supports:
+    - Chunked commits (5GB per chunk)
+    - Exponential backoff retry (up to 12 retries)
+    - xet high-performance protocol
+    - Resume support
+    - KeyboardInterrupt safety
+    """
     hf_token = check_env_key("HF_TOKEN") or check_env_key("HUGGINGFACE_HUB_TOKEN")
     if not hf_token:
         hf_token = ask_input("HuggingFace token")
@@ -612,28 +629,39 @@ def run_hf_upload(input_dir: str, python: str):
         return
 
     private = ask_yes_no("Private repository?", default=True)
+    chunk_gb = ask_input("Chunk size in GB (per commit)", "5")
+    resume = ask_yes_no("Auto-resume from last uploaded chunk?", default=True)
 
     print_section("UPLOADING TO HUGGINGFACE")
     print_info(f"Uploading {input_dir} → {repo_name} ({'private' if private else 'public'})")
+    print_info(f"Chunk size: {chunk_gb}GB, resume: {resume}")
 
-    upload_script = (
-        "from huggingface_hub import HfApi\n"
-        "import sys, os\n"
-        "api = HfApi(token=os.environ['HF_TOKEN'])\n"
-        "api.create_repo(sys.argv[1], repo_type='dataset', private=sys.argv[3]=='true', exist_ok=True)\n"
-        "api.upload_folder(folder_path=sys.argv[2], repo_id=sys.argv[1], repo_type='dataset')\n"
-        "print('__done__')\n"
-    )
+    upload_script = os.path.join(SCRIPT_DIR, "upload_hf_images_txt_zip.py")
+    cmd = [
+        python, upload_script,
+        "--root", input_dir,
+        "--hf_repo_id", repo_name,
+        "--chunk_gb", chunk_gb,
+        "--allow_existing_repo",
+    ]
+    if private:
+        cmd.append("--hf_private")
+    if resume:
+        cmd.append("--resume_auto")
+
     env = os.environ.copy()
     env["HF_TOKEN"] = hf_token
-    result = subprocess.run(
-        [python, "-c", upload_script, repo_name, input_dir, "true" if private else "false"],
-        env=env,
-    )
-    if result.returncode == 0:
-        print_success(f"Uploaded to https://huggingface.co/datasets/{repo_name}")
-    else:
-        print_error("Upload failed — check token and permissions")
+
+    try:
+        result = subprocess.run(cmd, env=env)
+        if result.returncode == 0:
+            print_success(f"Uploaded to https://huggingface.co/datasets/{repo_name}")
+        else:
+            print_error("Upload failed — check logs above for details")
+            if resume:
+                print_info("You can re-run with resume to continue from where it stopped")
+    except KeyboardInterrupt:
+        print_warning("Upload interrupted. Re-run with resume to continue.")
 
 
 # -------------------------

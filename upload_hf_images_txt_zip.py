@@ -15,8 +15,9 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
 
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".avif", ".jxl"}
+VIDEO_EXTS = {".mp4", ".avi", ".mov", ".mkv", ".webm", ".flv", ".wmv"}
 TEXT_EXTS = {".txt"}
-ALLOWED_EXTS = IMAGE_EXTS | TEXT_EXTS
+ALLOWED_EXTS = IMAGE_EXTS | VIDEO_EXTS | TEXT_EXTS
 
 DEFAULT_CHUNK_GB = 5.0
 DEFAULT_MAX_FILES_PER_CHUNK = 5000
@@ -88,7 +89,7 @@ def collect_allowed_entries(
     for p in iter_files(root=root, excluded_dirs=excluded_dirs, include_hidden=include_hidden):
         stats["total_seen"] += 1
         suffix = p.suffix.lower()
-        if suffix in IMAGE_EXTS:
+        if suffix in IMAGE_EXTS or suffix in VIDEO_EXTS:
             stats["images"] += 1
             entries.append((p, p.relative_to(root).as_posix(), p.stat().st_size))
         elif suffix in TEXT_EXTS:
