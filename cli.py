@@ -414,77 +414,186 @@ def _collect_precheck(xai_batch_state_file: str, xai_api_key: str) -> bool:
 # Input source resolution
 # -------------------------
 
-def resolve_input_source(python: str) -> str:
-    """Ask user for data source and resolve to a local directory path."""
-    source = ask_choice("Data source:", [
-        "Local directory",
-        "HuggingFace dataset (URL or ID)",
-        "MEGA shared link",
-    ], default=1)
+def _detect_source_type(raw: str) -> str:
+    """Detect what kind of input source a string is."""
+    raw = raw.strip()
+    if os.path.isdir(raw):
+        return "local_dir"
+    if raw.startswith("https://mega.nz/"):
+        return "mega"
+    if "huggingface.co" in raw and "/resolve/" in raw:
+        return "hf_file"  # Direct file URL (e.g. .zip)
+    if "huggingface.co" in raw:
+        return "hf_dataset"
+    if _HF_ID_RE.match(raw) and not os.path.exists(raw):
+        return "hf_dataset"
+    return "unknown"
 
-    if source == 1:
-        input_dir = ask_input("Input directory path")
-        if not input_dir or not os.path.isdir(input_dir):
-            print_error(f"Directory not found: {input_dir}")
-            sys.exit(1)
-        return input_dir
 
-    elif source == 2:
-        raw = ask_input("HuggingFace dataset ID or URL")
-        hf_ref = detect_hf_reference(raw)
-        if not hf_ref:
-            # Treat as local path
-            if os.path.isdir(raw):
-                return raw
-            print_error(f"Not a valid HF reference or directory: {raw}")
-            sys.exit(1)
+def _download_direct_url(url: str, dest_dir: str) -> str:
+    """Download a direct file URL (HF resolve, etc.) using wget/curl."""
+    os.makedirs(dest_dir, exist_ok=True)
+    # Extract filename from URL
+    from urllib.parse import urlparse, unquote
+    parsed = urlparse(url.split("?")[0])
+    filename = unquote(os.path.basename(parsed.path)) or "download"
+    dest_file = os.path.join(dest_dir, filename)
 
-        repo_id, subfolder = hf_ref
-        print_info(f"HuggingFace dataset: {repo_id}" + (f" / {subfolder}" if subfolder else ""))
-        default_dl = os.path.join(os.path.expanduser("~"), "datasets", repo_id.replace("/", "_"))
-        if subfolder:
-            default_dl = os.path.join(default_dl, subfolder.replace("/", "_"))
-        local_dir = ask_input("Download to", default_dl)
-        dl_token = check_env_key("HF_TOKEN") or check_env_key("HUGGINGFACE_HUB_TOKEN")
-        if not dl_token:
-            dl_token = ask_input("HF token (Enter to skip for public datasets)", "")
-        return download_hf_dataset(repo_id, subfolder, local_dir, dl_token or None, python)
+    print_info(f"Downloading {filename}...")
 
-    else:  # MEGA
-        from mega_download import (
-            check_megacmd_installed,
-            flatten_directory,
-            install_megacmd,
-            mega_download,
-        )
+    # Try wget first (shows progress), fallback to curl
+    if subprocess.run(["which", "wget"], capture_output=True).returncode == 0:
+        result = subprocess.run(["wget", "-c", "-O", dest_file, url])
+    else:
+        result = subprocess.run(["curl", "-L", "-C", "-", "-o", dest_file, url])
+
+    if result.returncode != 0 or not os.path.exists(dest_file):
+        print_error(f"Download failed: {url}")
+        return ""
+
+    print_success(f"Downloaded: {dest_file}")
+    return dest_file
+
+
+def _process_single_source(
+    raw: str, target_dir: str, python: str, source_num: int
+) -> bool:
+    """Process a single data source and move files into target_dir.
+
+    Returns True if files were added successfully.
+    """
+    from mega_download import (
+        check_megacmd_installed,
+        flatten_directory,
+        install_megacmd,
+        mega_download,
+    )
+
+    source_type = _detect_source_type(raw)
+
+    if source_type == "local_dir":
+        print_info(f"Source {source_num}: local directory → {raw}")
+        flatten_directory(raw, target_dir)
+        return True
+
+    elif source_type == "mega":
+        print_info(f"Source {source_num}: MEGA link")
 
         if not check_megacmd_installed():
-            print_warning("MEGAcmd not installed")
-            if ask_yes_no("Install MEGAcmd now?"):
-                if not install_megacmd():
-                    print_error("Could not install MEGAcmd. Install manually: https://mega.io/cmd")
-                    sys.exit(1)
-            else:
-                sys.exit(1)
+            print_info("MEGAcmd not found — installing automatically...")
+            if not install_megacmd():
+                print_error("Could not install MEGAcmd")
+                return False
 
-        link = ask_input("MEGA shared link (https://mega.nz/...)")
-        default_dl = os.path.join(os.path.expanduser("~"), "datasets", "mega_download")
-        local_dir = ask_input("Download to (temp folder)", default_dl)
-
-        if not mega_download(link, local_dir):
+        tmp_dir = os.path.join(target_dir, f".mega_tmp_{source_num}")
+        if not mega_download(raw, tmp_dir):
             print_error("MEGA download failed")
-            sys.exit(1)
-
-        # Flatten subfolders into single directory
-        flat_dir = ask_input("Flatten all files to", local_dir + "_flat")
-        print_section("FLATTENING FILES")
-        stats = flatten_directory(local_dir, flat_dir)
+            return False
+        stats = flatten_directory(tmp_dir, target_dir)
         print_success(
-            f"Moved {stats['moved']:,} files "
-            f"({stats['conflicts']:,} name conflicts resolved, "
-            f"{stats['pairs']:,} txt pairs preserved)"
+            f"MEGA: {stats['moved']:,} files "
+            f"({stats['conflicts']:,} conflicts resolved, "
+            f"{stats['pairs']:,} txt pairs)"
         )
-        return flat_dir
+        return True
+
+    elif source_type == "hf_file":
+        print_info(f"Source {source_num}: HuggingFace direct file URL")
+        tmp_dir = os.path.join(target_dir, f".hf_tmp_{source_num}")
+        dest_file = _download_direct_url(raw, tmp_dir)
+        if not dest_file:
+            return False
+
+        # If it's a zip, extract it
+        if dest_file.lower().endswith(".zip"):
+            print_info("Extracting zip...")
+            import zipfile as zf
+            try:
+                with zf.ZipFile(dest_file, "r") as z:
+                    z.extractall(tmp_dir)
+                os.remove(dest_file)
+                print_success("Zip extracted")
+            except Exception as e:
+                print_error(f"Zip extraction failed: {e}")
+                return False
+
+        stats = flatten_directory(tmp_dir, target_dir)
+        print_success(
+            f"HF: {stats['moved']:,} files "
+            f"({stats['conflicts']:,} conflicts resolved, "
+            f"{stats['pairs']:,} txt pairs)"
+        )
+        return True
+
+    elif source_type == "hf_dataset":
+        print_info(f"Source {source_num}: HuggingFace dataset")
+        hf_ref = detect_hf_reference(raw)
+        if not hf_ref:
+            print_error(f"Not a valid HF reference: {raw}")
+            return False
+
+        repo_id, subfolder = hf_ref
+        tmp_dir = os.path.join(target_dir, f".hf_tmp_{source_num}")
+        dl_token = check_env_key("HF_TOKEN") or check_env_key("HUGGINGFACE_HUB_TOKEN")
+        downloaded = download_hf_dataset(repo_id, subfolder, tmp_dir, dl_token or None, python)
+        stats = flatten_directory(downloaded, target_dir)
+        print_success(
+            f"HF: {stats['moved']:,} files "
+            f"({stats['conflicts']:,} conflicts resolved, "
+            f"{stats['pairs']:,} txt pairs)"
+        )
+        return True
+
+    else:
+        print_error(f"Could not detect source type for: {raw}")
+        return False
+
+
+def resolve_input_source(python: str) -> str:
+    """Ask user for data sources (supports multiple) and merge into one directory.
+
+    Accepts any mix of: local dirs, MEGA links, HF URLs, HF dataset IDs.
+    All files are flattened into a single target directory with conflict resolution.
+    """
+    default_target = os.path.join(os.path.expanduser("~"), "datasets", "araknideo_dataset")
+    target_dir = ask_input("Target dataset directory (all files will be merged here)", default_target)
+    os.makedirs(target_dir, exist_ok=True)
+
+    source_num = 0
+    while True:
+        source_num += 1
+        if source_num == 1:
+            raw = ask_input("Data source (local path, MEGA link, or HuggingFace URL/ID)")
+        else:
+            raw = ask_input(f"Another data source (or press Enter to continue)")
+
+        if not raw:
+            if source_num == 1:
+                print_error("At least one data source is required")
+                continue
+            break
+
+        print_section(f"PROCESSING SOURCE {source_num}")
+        ok = _process_single_source(raw, target_dir, python, source_num)
+        if not ok:
+            print_warning(f"Source {source_num} failed — skipping")
+
+        # Count what we have so far
+        from dataset_validate import scan_pairs
+        pairs = scan_pairs(target_dir, recursive=True)
+        print_info(
+            f"Dataset so far: {pairs['total_media']:,} media files, "
+            f"{len(pairs['media_with_txt']):,} with captions"
+        )
+
+        if not ask_yes_no("Add another data source?", default=False):
+            break
+
+    if not os.listdir(target_dir):
+        print_error(f"No files in {target_dir}")
+        sys.exit(1)
+
+    return target_dir
 
 
 # -------------------------
