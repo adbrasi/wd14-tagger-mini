@@ -482,34 +482,42 @@ def _download_direct_url(url: str, dest_dir: str, python: str = "") -> str:
         )
         env = os.environ.copy()
         env["HF_XET_HIGH_PERFORMANCE"] = "1"
+        hf_token = check_env_key("HF_TOKEN") or check_env_key("HUGGINGFACE_HUB_TOKEN")
+        if hf_token:
+            env["HF_TOKEN"] = hf_token
         r = subprocess.run(
             [python, "-c", dl_script, repo_id, filepath, dest_dir],
-            env=env, capture_output=True, text=True,
+            env=env,
         )
-        if r.returncode == 0 and r.stdout.strip():
-            downloaded = r.stdout.strip()
-            if os.path.exists(downloaded) and os.path.abspath(downloaded) != os.path.abspath(dest_file):
-                import shutil as _shutil
-                _shutil.move(downloaded, dest_file)
-            if os.path.exists(dest_file):
-                print_success(f"Downloaded via xet: {filename}")
-                return dest_file
-        print_warning("HF xet download failed, falling back to aria2c...")
+        if r.returncode == 0:
+            # hf_hub_download puts file in local_dir preserving repo structure
+            # Find the actual downloaded file
+            for root, _, files in os.walk(dest_dir):
+                for f in files:
+                    if f == filename:
+                        downloaded = os.path.join(root, f)
+                        if os.path.abspath(downloaded) != os.path.abspath(dest_file):
+                            import shutil as _shutil
+                            _shutil.move(downloaded, dest_file)
+                        print_success(f"Downloaded via xet: {filename}")
+                        return dest_file
+            # File may have been saved with a different name
+            for root, _, files in os.walk(dest_dir):
+                for f in files:
+                    full = os.path.join(root, f)
+                    if os.path.getsize(full) > 0:
+                        print_success(f"Downloaded via xet: {f}")
+                        return full
+        print_warning("HF xet download failed, falling back to wget...")
 
-    # Fallback: aria2c (16 parallel connections) or wget
-    print_info(f"Downloading {filename}...")
-    import shutil as _shutil
-    if _shutil.which("aria2c") is None:
-        print_info("Installing aria2 for fast parallel downloads...")
-        subprocess.run(["sudo", "apt", "install", "-y", "aria2"], capture_output=False)
-
-    if _shutil.which("aria2c"):
-        result = subprocess.run([
-            "aria2c", "-x", "16", "-s", "16", "-k", "1M",
-            "-c", "-d", dest_dir, "-o", filename, url,
-        ])
-    else:
-        result = subprocess.run(["wget", "-c", "-O", dest_file, url])
+    # Fallback: wget with HF token auth header
+    print_info(f"Downloading {filename} via wget...")
+    wget_cmd = ["wget", "-c", "-O", dest_file]
+    hf_token = check_env_key("HF_TOKEN") or check_env_key("HUGGINGFACE_HUB_TOKEN")
+    if hf_token:
+        wget_cmd.extend(["--header", f"Authorization: Bearer {hf_token}"])
+    wget_cmd.append(url)
+    result = subprocess.run(wget_cmd)
 
     if result.returncode != 0 or not os.path.exists(dest_file):
         print_error(f"Download failed: {url}")
@@ -564,7 +572,8 @@ def _process_single_source(
                 print_error("Could not install MEGAcmd")
                 return False
 
-        tmp_dir = os.path.join(target_dir, f".mega_tmp_{source_num}")
+        import tempfile as _tmp
+        tmp_dir = _tmp.mkdtemp(prefix=f"araknideo_mega_{source_num}_")
         if not mega_download(raw, tmp_dir):
             print_error("MEGA download failed")
             return False
@@ -578,7 +587,8 @@ def _process_single_source(
 
     elif source_type == "hf_file":
         print_info(f"Source {source_num}: HuggingFace direct file URL")
-        tmp_dir = os.path.join(target_dir, f".hf_tmp_{source_num}")
+        import tempfile as _tmp
+        tmp_dir = _tmp.mkdtemp(prefix=f"araknideo_hf_{source_num}_")
         dest_file = _download_direct_url(raw, tmp_dir, python=python)
         if not dest_file:
             return False
@@ -612,7 +622,8 @@ def _process_single_source(
             return False
 
         repo_id, subfolder = hf_ref
-        tmp_dir = os.path.join(target_dir, f".hf_tmp_{source_num}")
+        import tempfile as _tmp
+        tmp_dir = _tmp.mkdtemp(prefix=f"araknideo_hfds_{source_num}_")
         dl_token = check_env_key("HF_TOKEN") or check_env_key("HUGGINGFACE_HUB_TOKEN")
         downloaded = download_hf_dataset(repo_id, subfolder, tmp_dir, dl_token or None, python)
         stats = flatten_directory(downloaded, target_dir)
