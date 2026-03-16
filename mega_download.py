@@ -1,12 +1,8 @@
 """MEGA download with automatic flatten and pair preservation.
 
-Downloads from a MEGA shared link using megatools (megadl), then flattens
-all files from subfolders into a single target directory. Handles name
-conflicts with numeric suffixes and preserves video+txt / image+txt pairs.
-
-Uses megatools instead of MEGAcmd because it's lighter (no daemon),
-installs with a single apt command, and supports --parallel-transfers
-for maximum download speed.
+Downloads from a MEGA shared link using MEGAcmd (mega-get), which downloads
+multiple files in parallel natively. Then flattens all files from subfolders
+into a single target directory with name conflict resolution.
 """
 import os
 import shutil
@@ -21,56 +17,74 @@ MEDIA_EXTS = VIDEO_EXTS | IMAGE_EXTS
 PAIR_EXT = ".txt"
 
 
-def check_megatools_installed() -> bool:
-    """Check if megatools (megadl) is available."""
-    return shutil.which("megadl") is not None
+def check_mega_installed() -> bool:
+    """Check if MEGAcmd (mega-get) is available."""
+    return shutil.which("mega-get") is not None
 
 
-def install_megatools() -> bool:
-    """Install megatools via apt."""
-    print_info("Installing megatools...")
-    result = subprocess.run(
-        ["sudo", "apt", "install", "-y", "megatools"],
-        capture_output=False,
-    )
-    if result.returncode != 0 or not check_megatools_installed():
-        print_error("megatools installation failed. Install manually: sudo apt install megatools")
-        return False
-    print_success("megatools installed")
+def install_mega() -> bool:
+    """Install MEGAcmd from official MEGA repo."""
+    print_info("Installing MEGAcmd...")
+    cmds = [
+        "sudo mkdir -p /etc/apt/keyrings",
+        "curl -fsSL https://mega.nz/linux/repo/xUbuntu_24.04/Release.key | sudo gpg --dearmor -o /etc/apt/keyrings/mega.nz.gpg",
+        'echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/mega.nz.gpg] https://mega.nz/linux/repo/xUbuntu_24.04/ ./" | sudo tee /etc/apt/sources.list.d/mega.nz.list > /dev/null',
+        "sudo apt update -qq",
+        "sudo apt install -y megacmd",
+    ]
+    for cmd in cmds:
+        result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
+        if result.returncode != 0:
+            # Try Debian 12 repo as fallback
+            if "xUbuntu_24.04" in cmd:
+                fallback = cmd.replace("xUbuntu_24.04", "Debian_12")
+                result = subprocess.run(fallback, shell=True, capture_output=True, text=True)
+                if result.returncode != 0:
+                    print_error(f"Failed: {cmd}")
+                    print_error(result.stderr[:500])
+                    subprocess.run(
+                        "sudo rm -f /etc/apt/sources.list.d/mega.nz.list /etc/apt/keyrings/mega.nz.gpg",
+                        shell=True, capture_output=True,
+                    )
+                    return False
+            else:
+                print_error(f"Failed: {cmd}")
+                subprocess.run(
+                    "sudo rm -f /etc/apt/sources.list.d/mega.nz.list /etc/apt/keyrings/mega.nz.gpg",
+                    shell=True, capture_output=True,
+                )
+                return False
+
+    # Max speed, no limits
+    subprocess.run(["mega-speedlimit", "-d", "0"], capture_output=True)
+    subprocess.run(["mega-speedlimit", "-u", "0"], capture_output=True)
+    print_success("MEGAcmd installed")
     return True
 
 
 def mega_download(link: str, local_dir: str) -> bool:
-    """Download from MEGA shared link to local directory.
-
-    Uses megadl with max parallel transfers (16) and no speed limit.
-    """
+    """Download from MEGA shared link using mega-get (parallel natively)."""
     os.makedirs(local_dir, exist_ok=True)
     print_info(f"Downloading to {local_dir} ...")
+    print_info("mega-get downloads multiple files in parallel")
 
-    # megadl downloads to --path; no speed limit
-    cmd = ["megadl", "--path", local_dir]
-
-    # Check if this version supports --limit-speed (1.11 does not on some builds)
-    help_result = subprocess.run(["megadl", "--help"], capture_output=True, text=True)
-    help_text = help_result.stdout + help_result.stderr
-    if "--limit-speed" in help_text:
-        cmd.extend(["--limit-speed", "0"])
-
-    cmd.append(link)
-    result = subprocess.run(cmd, timeout=None)
+    # mega-get handles folders recursively and in parallel
+    result = subprocess.run(
+        ["mega-get", link, local_dir],
+        timeout=None,
+    )
     if result.returncode != 0:
         print_error("MEGA download failed")
         return False
 
-    # Verify that at least one file was actually downloaded
+    # Verify files were downloaded
     has_files = False
     for _, _, files in os.walk(local_dir):
         if files:
             has_files = True
             break
     if not has_files:
-        print_error("MEGA download completed but no files were found in target directory")
+        print_error("MEGA download completed but no files were found")
         return False
 
     print_success("Download complete")
@@ -100,7 +114,7 @@ def flatten_directory(source_dir: str, target_dir: str) -> dict:
     # Collect all media files first
     media_files = []
     for root, _, files in os.walk(source_dir):
-        # Skip target_dir if it's inside source_dir
+        # Skip target_dir if inside source_dir
         if os.path.abspath(root).startswith(os.path.abspath(target_dir) + os.sep):
             continue
         for f in files:
@@ -123,7 +137,6 @@ def flatten_directory(source_dir: str, target_dir: str) -> dict:
                 if actual_name != filename:
                     stats["conflicts"] += 1
 
-                # Move media file
                 shutil.move(src_path, dst_path)
                 stats["moved"] += 1
 
