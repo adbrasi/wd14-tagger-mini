@@ -463,9 +463,9 @@ def _process_single_source(
     Returns True if files were added successfully.
     """
     from mega_download import (
-        check_megacmd_installed,
+        check_megatools_installed,
         flatten_directory,
-        install_megacmd,
+        install_megatools,
         mega_download,
     )
 
@@ -479,10 +479,10 @@ def _process_single_source(
     elif source_type == "mega":
         print_info(f"Source {source_num}: MEGA link")
 
-        if not check_megacmd_installed():
-            print_info("MEGAcmd not found — installing automatically...")
-            if not install_megacmd():
-                print_error("Could not install MEGAcmd")
+        if not check_megatools_installed():
+            print_info("megatools not found — installing automatically...")
+            if not install_megatools():
+                print_error("Could not install megatools")
                 return False
 
         tmp_dir = os.path.join(target_dir, f".mega_tmp_{source_num}")
