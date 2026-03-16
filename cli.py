@@ -450,6 +450,42 @@ def _collect_precheck(xai_batch_state_file: str, xai_api_key: str) -> bool:
     return True
 
 
+VIDEO_EXTS = {".mp4", ".avi", ".mov", ".mkv", ".webm", ".flv", ".wmv"}
+
+
+def run_preprocessing_menu(input_dir: str):
+    """Interactive preprocessing menu."""
+    from wd14_utils import cut_videos_batch
+
+    action = ask_choice("Preprocessing action:", [
+        "Cut videos to first N frames",
+    ], default=1)
+
+    if action == 1:
+        videos = []
+        for root, _, files in os.walk(input_dir):
+            for f in files:
+                if os.path.splitext(f)[1].lower() in VIDEO_EXTS:
+                    videos.append(os.path.join(root, f))
+
+        if not videos:
+            print(f"[!] No videos found in {input_dir}")
+            return
+
+        print(f"[+] Found {len(videos):,} videos")
+        max_frames = int(ask_input("Cut to how many frames?", "5"))
+
+        workers = int(ask_input("Parallel workers", str(min(os.cpu_count() or 4, 16))))
+
+        if not ask_yes_no(f"Cut {len(videos):,} videos to {max_frames} frames (MODIFIES ORIGINALS)?", default=False):
+            print("Aborted.")
+            return
+
+        print(f"\n[*] Cutting {len(videos):,} videos to {max_frames} frames...")
+        result = cut_videos_batch(videos, max_frames, max_workers=workers)
+        print(f"[+] Done: {result['success']:,} succeeded, {result['failed']:,} failed")
+
+
 # -------------------------
 # Main
 # -------------------------
@@ -506,6 +542,16 @@ def main():
         print(f"[+] Found ~{img_count:,} images in {input_dir}")
     else:
         print(f"[!] No images found in {input_dir} (subdirs will be scanned during processing)")
+
+    # What to do: preprocess or tag?
+    workflow = ask_choice("What do you want to do?", [
+        "Pre-process dataset (cut frames, normalize)",
+        "Tag dataset (wd14 / pixai / grok pipeline)",
+    ], default=2)
+
+    if workflow == 1:
+        run_preprocessing_menu(input_dir)
+        return
 
     # Mode selection
     mode = ask_choice("What are you processing?", [
