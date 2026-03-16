@@ -101,7 +101,7 @@ def process_single_video(
 
     cmd = ["ffmpeg", "-y", "-i", video_path]
 
-    if max_frames:
+    if max_frames is not None:
         cmd.extend(["-vframes", str(max_frames)])
 
     if filters:
@@ -164,7 +164,7 @@ def preprocess_videos(
     if max_workers is None:
         max_workers = max(1, min(os.cpu_count() or 4, len(video_paths), 16))
 
-    snapped_frames = snap_frames(max_frames) if max_frames else None
+    snapped_frames = snap_frames(max_frames) if max_frames is not None else None
 
     # Pre-scan videos for dimensions and frame counts
     targets = {}  # path -> (target_w, target_h, needs_work)
@@ -188,7 +188,7 @@ def preprocess_videos(
                 probe_failures += 1
 
         # Skip frame cut if video already has <= snapped_frames
-        if snapped_frames and info and info.get("frames", 0) > 0:
+        if snapped_frames is not None and info and info.get("frames", 0) > 0:
             if info["frames"] <= snapped_frames:
                 needs_cut = False
 

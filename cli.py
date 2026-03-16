@@ -156,6 +156,7 @@ def monitor_xai_batch(state_file: str, api_key: str, base_url: str, poll_seconds
 
     first_ts = None
     first_done = None
+    zero_total_streak = 0
 
     while True:
         try:
@@ -197,6 +198,14 @@ def monitor_xai_batch(state_file: str, api_key: str, base_url: str, poll_seconds
             f"pending={pending} success=[green]{success}[/] error=[red]{errors}[/] "
             f"eta={eta_text}"
         )
+
+        if total == 0:
+            zero_total_streak += 1
+            if zero_total_streak >= 5:
+                print_warning("Batch reports 0 requests for 5 consecutive polls — check batch ID")
+                return
+        else:
+            zero_total_streak = 0
 
         if pending <= 0 and total > 0:
             print_success("Batch completed (no pending requests)")
@@ -631,18 +640,19 @@ def resolve_input_source(python: str) -> str:
 
     source_num = 0
     while True:
-        source_num += 1
-        if source_num == 1:
+        is_first = source_num == 0
+        if is_first:
             raw = ask_input("Data source (local path, MEGA link, or HuggingFace URL/ID)")
         else:
-            raw = ask_input(f"Another data source (or press Enter to continue)")
+            raw = ask_input("Another data source (or press Enter to continue)")
 
         if not raw:
-            if source_num == 1:
+            if is_first:
                 print_error("At least one data source is required")
                 continue
             break
 
+        source_num += 1
         print_section(f"PROCESSING SOURCE {source_num}")
         ok = _process_single_source(raw, target_dir, python, source_num)
         if not ok:
@@ -1197,21 +1207,26 @@ def run_tagging(input_dir: str, python: str, media_counts: dict):
                     xkey = xai_api_key or check_env_key("XAI_API_KEY")
                     if bid and xkey:
                         # Poll until done (should be fast for 1 request)
+                        last_total = 0
                         for _ in range(60):  # max 5 min
                             time.sleep(5)
                             try:
                                 data = fetch_xai_batch_status(bid, xkey)
+                                last_total = int(data.get("state", {}).get("num_requests", 0) or 0)
                                 pending = int(data.get("state", {}).get("num_pending", 0) or 0)
-                                if pending <= 0:
+                                if pending <= 0 and last_total > 0:
                                     break
                             except Exception:
                                 pass
-                        # Collect the result
-                        collect_cmd = list(test_cmd)
-                        for i, arg in enumerate(collect_cmd):
-                            if arg == "--xai_batch_action":
-                                collect_cmd[i + 1] = "collect"
-                        subprocess.run(collect_cmd, env=test_env)
+                        if last_total == 0:
+                            print_warning("xAI batch returned 0 requests — test submission may have failed")
+                        else:
+                            # Collect the result
+                            collect_cmd = list(test_cmd)
+                            for i, arg in enumerate(collect_cmd):
+                                if arg == "--xai_batch_action":
+                                    collect_cmd[i + 1] = "collect"
+                            subprocess.run(collect_cmd, env=test_env)
 
             if test_result.returncode != 0:
                 print_error("Test run FAILED")

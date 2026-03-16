@@ -102,7 +102,7 @@ def flatten_directory(source_dir: str, target_dir: str) -> dict:
     media_files = []
     for root, _, files in os.walk(source_dir):
         # Skip target_dir if it's inside source_dir
-        if os.path.abspath(root).startswith(os.path.abspath(target_dir)):
+        if os.path.abspath(root).startswith(os.path.abspath(target_dir) + os.sep):
             continue
         for f in files:
             if Path(f).suffix.lower() in MEDIA_EXTS:

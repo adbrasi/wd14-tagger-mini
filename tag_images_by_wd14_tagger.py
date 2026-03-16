@@ -998,7 +998,7 @@ def call_openrouter(
 ) -> Optional[str]:
     """Call OpenRouter API with one or more images and return the text response.
 
-    Uses json_object response_format + response-healing plugin for reliable JSON output.
+    Uses json_schema structured output (strict) + response-healing plugin for reliable JSON.
     Retries with exponential backoff on 429/5xx errors.
     """
     headers = {
@@ -1878,7 +1878,8 @@ def run_grok_xai_batch(
                                 {"role": "system", "content": system_prompt},
                                 {"role": "user", "content": user_content},
                             ],
-                            "response_format": CAPTION_JSON_SCHEMA,
+                            "response_format": {"type": "json_object"},
+                            "reasoning": {"effort": "none"},
                         }
                     }
                     item_wrapper = {
