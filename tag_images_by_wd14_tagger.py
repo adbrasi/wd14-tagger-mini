@@ -2180,7 +2180,8 @@ def extract_video_frames(
     frame_to_video: Dict[str, str] = {}
     extra_frames_map: Dict[str, List[str]] = {}
 
-    for vpath in tqdm(video_paths, desc="extracting frames", smoothing=0.0):
+    def _extract_single(vpath: str):
+        """Extract frame(s) from one video. Returns (vpath, primary_path, secondary_path_or_none)."""
         video_stem = Path(vpath).stem
         uid = hashlib.md5(vpath.encode()).hexdigest()[:10]
 
@@ -2189,32 +2190,42 @@ def extract_video_frames(
             primary = frames[0]
             secondary = frames[1] if len(frames) > 1 else None
 
-            # If primary failed, try secondary as primary
             if primary is None and secondary is not None:
                 primary = secondary
                 secondary = None
 
             if primary is None:
-                logger.warning(f"Skipping video (no frames extracted): {vpath}")
-                continue
+                return vpath, None, None
 
             primary_path = os.path.join(temp_dir, f"{video_stem}_{uid}_f{pro_frames[0]}.jpg")
             primary.save(primary_path, "JPEG", quality=95)
-            frame_to_video[primary_path] = vpath
 
+            secondary_path = None
             if secondary is not None:
                 secondary_path = os.path.join(temp_dir, f"{video_stem}_{uid}_f{pro_frames[1]}.jpg")
                 secondary.save(secondary_path, "JPEG", quality=95)
-                extra_frames_map[primary_path] = [secondary_path]
+
+            return vpath, primary_path, secondary_path
         else:
             frame = extract_frame(vpath, frame_number)
             if frame is None:
-                logger.warning(f"Skipping video (no frame extracted): {vpath}")
-                continue
+                return vpath, None, None
 
             frame_path = os.path.join(temp_dir, f"{video_stem}_{uid}_f{frame_number}.jpg")
             frame.save(frame_path, "JPEG", quality=95)
-            frame_to_video[frame_path] = vpath
+            return vpath, frame_path, None
+
+    max_workers = min(os.cpu_count() or 4, len(video_paths), 32)
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = {executor.submit(_extract_single, vp): vp for vp in video_paths}
+        for future in tqdm(as_completed(futures), total=len(futures), desc="extracting frames", smoothing=0.0):
+            vpath, primary_path, secondary_path = future.result()
+            if primary_path is None:
+                logger.warning(f"Skipping video (no frame extracted): {vpath}")
+                continue
+            frame_to_video[primary_path] = vpath
+            if secondary_path is not None:
+                extra_frames_map[primary_path] = [secondary_path]
 
     return frame_to_video, extra_frames_map
 
