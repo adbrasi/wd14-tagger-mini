@@ -803,8 +803,8 @@ def run_pixai(
 # Grok tagger (OpenRouter API)
 # -------------------------
 
-DEFAULT_GROK_MODEL = "x-ai/grok-4.1-fast"
-DEFAULT_XAI_BATCH_MODEL = "grok-4-1-fast-non-reasoning"
+DEFAULT_GROK_MODEL = "x-ai/grok-4.20-beta-0309-reasoning"
+DEFAULT_XAI_BATCH_MODEL = "grok-4.20-beta-0309-reasoning"
 OPENROUTER_API_URL = "https://openrouter.ai/api/v1/chat/completions"
 XAI_API_BASE_URL = "https://api.x.ai"
 # xAI Batch API documented limits (docs.x.ai/guides/batch-api):
@@ -2766,7 +2766,7 @@ def setup_parser() -> argparse.ArgumentParser:
         default=None,
         help="optional path to camie metadata JSON used to annotate tags for grok prompt context",
     )
-    parser.add_argument("--grok_concurrency", type=int, default=8, help="max concurrent API calls for grok (default: 8)")
+    parser.add_argument("--grok_concurrency", type=int, default=32, help="max concurrent API calls for grok (default: 32)")
     parser.add_argument("--xai_api_key", type=str, default=None, help="xAI API key (or set XAI_API_KEY env)")
     parser.add_argument("--xai_api_base_url", type=str, default=XAI_API_BASE_URL, help="xAI API base URL")
     parser.add_argument("--xai_batch_action", type=str, choices=["submit", "status", "collect"], default="submit")
