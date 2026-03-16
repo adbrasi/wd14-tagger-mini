@@ -528,6 +528,21 @@ def _process_single_source(
 
     if source_type == "local_dir":
         print_info(f"Source {source_num}: local directory → {raw}")
+        # If source IS the target, skip flatten (files already there)
+        if os.path.abspath(raw) == os.path.abspath(target_dir):
+            print_info("Source is target directory — no flatten needed")
+            return True
+        # Prevent flatten if source is parent of target (would cause duplication)
+        if os.path.abspath(target_dir).startswith(os.path.abspath(raw) + os.sep):
+            print_warning("Source is parent of target — copying instead of moving to avoid duplication")
+            import shutil as _shutil
+            for root, _, files in os.walk(raw):
+                if os.path.abspath(root).startswith(os.path.abspath(target_dir)):
+                    continue
+                for f in files:
+                    src = os.path.join(root, f)
+                    _shutil.copy2(src, target_dir)
+            return True
         flatten_directory(raw, target_dir)
         return True
 

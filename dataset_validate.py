@@ -84,13 +84,19 @@ def scan_pairs(directory: str, recursive: bool = True) -> dict:
 
 
 def delete_files(file_list: List[str]) -> int:
-    """Delete files and return count of successfully deleted."""
+    """Delete files and return count of successfully deleted.
+
+    Logs warnings for files that could not be deleted.
+    """
     deleted = 0
     failed = 0
     for f in file_list:
         try:
             os.remove(f)
             deleted += 1
-        except OSError as e:
+        except OSError:
             failed += 1
+    if failed > 0:
+        import logging
+        logging.warning(f"Failed to delete {failed} files (permissions or missing)")
     return deleted
