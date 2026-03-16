@@ -1017,7 +1017,7 @@ def call_openrouter(
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": content_parts},
         ],
-        "reasoning": {"effort": "none"},
+        "reasoning": {"effort": "low"},
     }
 
     if json_mode:
@@ -1879,7 +1879,7 @@ def run_grok_xai_batch(
                                 {"role": "user", "content": user_content},
                             ],
                             "response_format": {"type": "json_object"},
-                            "reasoning": {"effort": "none"},
+                            "reasoning": {"effort": "low"},
                         }
                     }
                     item_wrapper = {
