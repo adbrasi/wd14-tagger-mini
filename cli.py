@@ -981,40 +981,14 @@ def run_tagging(input_dir: str, python: str, media_counts: dict):
                 test_cmd.remove("--recursive")
             if "--force" not in test_cmd:
                 test_cmd.append("--force")
-            # For xAI batch, switch to OpenRouter for instant test result
+            # xAI batch: test uses the same provider — submits 1 request,
+            # waits for it, then collects the result automatically
             if grok_provider == "xai-batch" and has_grok:
-                # Use OpenRouter for the test so we get immediate feedback
-                or_key = api_key or check_env_key("OPENROUTER_API_KEY")
-                if or_key:
-                    print_info("Using OpenRouter for test (instant result instead of batch)")
-                    for i, arg in enumerate(test_cmd):
-                        if arg == "--grok_provider":
-                            test_cmd[i + 1] = "openrouter"
-                        if arg == "--xai_batch_action":
-                            test_cmd[i + 1] = "submit"
-                    # Remove xAI-specific args that would fail with openrouter
-                    xai_args_to_remove = [
-                        "--xai_api_key", "--xai_batch_state_file",
-                        "--xai_api_base_url", "--xai_batch_model",
-                        "--xai_batch_submit_chunk", "--xai_batch_page_size",
-                        "--xai_batch_no_image",
-                    ]
-                    cleaned = []
-                    skip_next = False
-                    for arg in test_cmd:
-                        if skip_next:
-                            skip_next = False
-                            continue
-                        if arg in xai_args_to_remove:
-                            skip_next = True
-                            continue
-                        cleaned.append(arg)
-                    test_cmd = cleaned
-                    if "--grok_api_key" not in test_cmd:
-                        test_cmd.extend(["--grok_api_key", or_key])
-                    test_cmd.extend(["--grok_concurrency", "1"])
-                else:
-                    print_info("No OpenRouter key — test will use xAI batch (slower)")
+                # Use a separate state file for the test
+                test_state = os.path.join(test_dir, ".xai_test_state.json")
+                for i, arg in enumerate(test_cmd):
+                    if arg == "--xai_batch_state_file":
+                        test_cmd[i + 1] = test_state
 
             test_env = os.environ.copy()
             if api_key:
@@ -1025,6 +999,37 @@ def run_tagging(input_dir: str, python: str, media_counts: dict):
                 test_env["HF_TOKEN"] = hf_token
 
             test_result = subprocess.run(test_cmd, env=test_env)
+
+            # For xAI batch: wait for the single request then collect
+            if grok_provider == "xai-batch" and has_grok and test_result.returncode == 0:
+                test_state = None
+                for i, arg in enumerate(test_cmd):
+                    if arg == "--xai_batch_state_file" and i + 1 < len(test_cmd):
+                        test_state = test_cmd[i + 1]
+                        break
+                if test_state and os.path.exists(test_state):
+                    print_info("Waiting for xAI batch to process 1 test request...")
+                    with open(test_state, "r", encoding="utf-8") as sf:
+                        st = json.load(sf)
+                    bid = st.get("batch_id", "")
+                    xkey = xai_api_key or check_env_key("XAI_API_KEY")
+                    if bid and xkey:
+                        # Poll until done (should be fast for 1 request)
+                        for _ in range(60):  # max 5 min
+                            time.sleep(5)
+                            try:
+                                data = fetch_xai_batch_status(bid, xkey)
+                                pending = int(data.get("state", {}).get("num_pending", 0) or 0)
+                                if pending <= 0:
+                                    break
+                            except Exception:
+                                pass
+                        # Collect the result
+                        collect_cmd = list(test_cmd)
+                        for i, arg in enumerate(collect_cmd):
+                            if arg == "--xai_batch_action":
+                                collect_cmd[i + 1] = "collect"
+                        subprocess.run(collect_cmd, env=test_env)
 
             if test_result.returncode != 0:
                 print_error("Test run FAILED")
