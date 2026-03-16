@@ -542,19 +542,15 @@ def run_preprocessing(input_dir: str):
     import shutil
 
     if shutil.which("ffmpeg") is None or shutil.which("ffprobe") is None:
-        print_warning("ffmpeg/ffprobe not found in PATH")
-        if ask_yes_no("Install ffmpeg now? (sudo apt install ffmpeg)", default=True):
-            result = subprocess.run(
-                ["sudo", "apt", "install", "-y", "ffmpeg"],
-                capture_output=False,
-            )
-            if result.returncode != 0 or shutil.which("ffmpeg") is None:
-                print_error("ffmpeg installation failed. Install manually: sudo apt install ffmpeg")
-                return
-            print_success("ffmpeg installed")
-        else:
-            print_error("ffmpeg is required for video preprocessing")
+        print_info("ffmpeg not found — installing automatically...")
+        result = subprocess.run(
+            ["sudo", "apt", "install", "-y", "ffmpeg"],
+            capture_output=False,
+        )
+        if result.returncode != 0 or shutil.which("ffmpeg") is None:
+            print_error("ffmpeg installation failed. Install manually: sudo apt install ffmpeg")
             return
+        print_success("ffmpeg installed")
 
     from video_preprocess import preprocess_videos, snap_frames
 
@@ -615,14 +611,14 @@ def run_preprocessing(input_dir: str):
 # -------------------------
 
 def run_hf_upload(input_dir: str, python: str):
-    """Upload dataset to HuggingFace using the chunked zip uploader.
+    """Upload dataset to HuggingFace using upload_large_folder.
 
-    Uses upload_hf_images_txt_zip.py which supports:
-    - Chunked commits (5GB per chunk)
-    - Exponential backoff retry (up to 12 retries)
+    Uses HuggingFace's native upload_large_folder which provides:
+    - Multi-threaded upload (16 workers)
+    - Automatic resume (locally cached state)
+    - Resilient retry on any error
     - xet high-performance protocol
-    - Resume support
-    - KeyboardInterrupt safety
+    - No manual chunking needed
     """
     hf_token = check_env_key("HF_TOKEN") or check_env_key("HUGGINGFACE_HUB_TOKEN")
     if not hf_token:
@@ -637,39 +633,46 @@ def run_hf_upload(input_dir: str, python: str):
         return
 
     private = ask_yes_no("Private repository?", default=True)
-    chunk_gb = "5"
-    resume = True
 
     print_section("UPLOADING TO HUGGINGFACE")
     print_info(f"Uploading {input_dir} → {repo_name} ({'private' if private else 'public'})")
-    print_info(f"Chunk size: {chunk_gb}GB, resume: {resume}")
+    print_info("Using upload_large_folder (multi-threaded, resumable, auto-retry)")
 
-    upload_script = os.path.join(SCRIPT_DIR, "upload_hf_images_txt_zip.py")
-    cmd = [
-        python, upload_script,
-        "--root", input_dir,
-        "--hf_repo_id", repo_name,
-        "--chunk_gb", chunk_gb,
-        "--allow_existing_repo",
-    ]
-    if private:
-        cmd.append("--hf_private")
-    if resume:
-        cmd.append("--resume_auto")
+    # Install hf_xet for max speed
+    pip = os.path.join(VENV_DIR, "bin", "pip")
+    subprocess.run([pip, "install", "-q", "hf_xet"], capture_output=True, text=True)
+
+    upload_script = (
+        "from huggingface_hub import HfApi\n"
+        "import sys, os\n"
+        "api = HfApi(token=os.environ['HF_TOKEN'])\n"
+        "api.create_repo(sys.argv[1], repo_type='dataset', "
+        "private=sys.argv[3]=='true', exist_ok=True)\n"
+        "api.upload_large_folder(\n"
+        "    repo_id=sys.argv[1],\n"
+        "    repo_type='dataset',\n"
+        "    folder_path=sys.argv[2],\n"
+        "    num_workers=16,\n"
+        ")\n"
+        "print('__done__')\n"
+    )
 
     env = os.environ.copy()
     env["HF_TOKEN"] = hf_token
 
     try:
-        result = subprocess.run(cmd, env=env)
+        result = subprocess.run(
+            [python, "-c", upload_script, repo_name, input_dir,
+             "true" if private else "false"],
+            env=env,
+        )
         if result.returncode == 0:
             print_success(f"Uploaded to https://huggingface.co/datasets/{repo_name}")
         else:
-            print_error("Upload failed — check logs above for details")
-            if resume:
-                print_info("You can re-run with resume to continue from where it stopped")
+            print_error("Upload failed — check logs above")
+            print_info("Re-run the same command to resume (upload_large_folder is resumable)")
     except KeyboardInterrupt:
-        print_warning("Upload interrupted. Re-run with resume to continue.")
+        print_warning("Upload interrupted. Re-run to resume automatically.")
 
 
 # -------------------------
