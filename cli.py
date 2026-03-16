@@ -699,12 +699,23 @@ def main():
     # Batch size — only relevant for local booru taggers (wd14/camie/pixai)
     batch_size = "4"
     if has_local_taggers:
-        batch_size = ask_input("Batch size for local taggers", "4")
+        batch_size = ask_input("Batch size for local taggers (or 'auto' for VRAM-based)", "auto")
+        if batch_size.lower() == "auto":
+            cmd_args = [python, "-c",
+                "from tag_images_by_wd14_tagger import recommend_batch_by_vram; "
+                "r = recommend_batch_by_vram(); print(r if r else 4)"]
+            try:
+                r = subprocess.run(cmd_args, capture_output=True, text=True, timeout=10)
+                batch_size = r.stdout.strip() if r.returncode == 0 and r.stdout.strip() else "4"
+                print(f"[+] Auto batch size from VRAM: {batch_size}")
+            except Exception:
+                batch_size = "4"
+                print("[!] Could not detect VRAM, using batch_size=4")
 
     # Grok concurrency
-    grok_concurrency = "8"
+    grok_concurrency = "16"
     if has_grok and grok_provider == "openrouter":
-        grok_concurrency = ask_input("Grok API concurrency (parallel requests)", "8")
+        grok_concurrency = ask_input("Grok API concurrency (parallel requests)", "16")
 
     # Recursive
     recursive = ask_yes_no("Search subdirectories recursively?", default=True)

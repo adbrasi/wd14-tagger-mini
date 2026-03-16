@@ -2720,7 +2720,7 @@ def setup_parser() -> argparse.ArgumentParser:
     parser.add_argument("--pixai_category_thresholds_file", type=str, default=None)
 
     parser.add_argument("--batch_size", type=int, default=1)
-    parser.add_argument("--max_workers", type=int, default=4)
+    parser.add_argument("--max_workers", type=int, default=8)
     parser.add_argument("--no_progress", action="store_true")
     parser.add_argument("--suggest_batch", action="store_true")
 
