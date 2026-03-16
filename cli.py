@@ -940,7 +940,117 @@ def run_tagging(input_dir: str, python: str, media_counts: dict):
         print_info("Aborted")
         return False
 
-    # Run
+    # --- Dry-run: test with a single sample first ---
+    print_section("TEST RUN (1 sample)")
+    print_info("Running pipeline on a single file to verify everything works...")
+
+    # Find one sample file to test with
+    import tempfile
+    sample_file = None
+    test_exts = VIDEO_EXTS if is_video else IMAGE_EXTS
+    for root, _, files in os.walk(input_dir):
+        for f in files:
+            if os.path.splitext(f)[1].lower() in test_exts:
+                sample_file = os.path.join(root, f)
+                break
+        if sample_file:
+            break
+
+    if not sample_file:
+        print_warning("No sample file found — skipping test run")
+    else:
+        print_info(f"Test file: {os.path.basename(sample_file)}")
+
+        # Create temp dir with just that one file (symlinked)
+        with tempfile.TemporaryDirectory(prefix="araknideo_test_") as test_dir:
+            test_link = os.path.join(test_dir, os.path.basename(sample_file))
+            os.symlink(os.path.abspath(sample_file), test_link)
+
+            # Also copy the .txt if it exists (for context)
+            txt_src = os.path.splitext(sample_file)[0] + ".txt"
+            if os.path.exists(txt_src):
+                txt_link = os.path.join(test_dir, os.path.basename(txt_src))
+                os.symlink(os.path.abspath(txt_src), txt_link)
+
+            # Build test command — same as full but on the test dir, no recursive, force
+            test_cmd = list(cmd)
+            # Replace input_dir with test_dir
+            test_cmd[2] = test_dir
+            # Override flags for single-file test
+            if "--recursive" in test_cmd:
+                test_cmd.remove("--recursive")
+            if "--force" not in test_cmd:
+                test_cmd.append("--force")
+            # For xAI batch, switch to OpenRouter for instant test result
+            if grok_provider == "xai-batch" and has_grok:
+                # Use OpenRouter for the test so we get immediate feedback
+                or_key = api_key or check_env_key("OPENROUTER_API_KEY")
+                if or_key:
+                    print_info("Using OpenRouter for test (instant result instead of batch)")
+                    for i, arg in enumerate(test_cmd):
+                        if arg == "--grok_provider":
+                            test_cmd[i + 1] = "openrouter"
+                        if arg == "--xai_batch_action":
+                            test_cmd[i + 1] = "submit"
+                    # Remove xAI-specific args that would fail with openrouter
+                    xai_args_to_remove = [
+                        "--xai_api_key", "--xai_batch_state_file",
+                        "--xai_api_base_url", "--xai_batch_model",
+                        "--xai_batch_submit_chunk", "--xai_batch_page_size",
+                        "--xai_batch_no_image",
+                    ]
+                    cleaned = []
+                    skip_next = False
+                    for arg in test_cmd:
+                        if skip_next:
+                            skip_next = False
+                            continue
+                        if arg in xai_args_to_remove:
+                            skip_next = True
+                            continue
+                        cleaned.append(arg)
+                    test_cmd = cleaned
+                    if "--grok_api_key" not in test_cmd:
+                        test_cmd.extend(["--grok_api_key", or_key])
+                    test_cmd.extend(["--grok_concurrency", "1"])
+                else:
+                    print_info("No OpenRouter key — test will use xAI batch (slower)")
+
+            test_env = os.environ.copy()
+            if api_key:
+                test_env["OPENROUTER_API_KEY"] = api_key
+            if xai_api_key:
+                test_env["XAI_API_KEY"] = xai_api_key
+            if hf_token:
+                test_env["HF_TOKEN"] = hf_token
+
+            test_result = subprocess.run(test_cmd, env=test_env)
+
+            if test_result.returncode != 0:
+                print_error("Test run FAILED")
+                if not ask_yes_no("Continue with full pipeline anyway?", default=False):
+                    print_info("Aborted")
+                    return False
+            else:
+                # Show the generated caption
+                test_txt = os.path.splitext(test_link)[0] + ".txt"
+                if os.path.exists(test_txt):
+                    with open(test_txt, "r", encoding="utf-8") as f:
+                        caption = f.read().strip()
+                    print_success("Test caption generated:")
+                    console.print(f"\n[dim]{'─' * 50}[/]")
+                    console.print(f"[italic]{caption[:500]}[/]")
+                    if len(caption) > 500:
+                        console.print(f"[dim]... ({len(caption)} chars total)[/]")
+                    console.print(f"[dim]{'─' * 50}[/]\n")
+                else:
+                    print_success("Test run completed (no caption file — may be tags-only mode)")
+
+                if not ask_yes_no("Looks good? Proceed with full dataset?", default=True):
+                    print_info("Aborted")
+                    return False
+
+    # Run full pipeline
     print_section("STARTING PIPELINE")
 
     env = os.environ.copy()
