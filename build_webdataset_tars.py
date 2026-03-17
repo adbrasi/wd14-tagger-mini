@@ -4,8 +4,9 @@
 Creates TAR archives in the standard WebDataset format:
   train-0000.tar, train-0001.tar, ...
 
-Each TAR contains paired files with matching numeric keys:
-  000000.mp4 + 000000.txt, 000001.mp4 + 000001.txt, ...
+Each shard contains paired files numbered from 000000 within that shard:
+  shard 0: 000000.mp4 + 000000.txt, 000001.mp4 + 000001.txt, ...
+  shard 1: 000000.mp4 + 000000.txt, ...  (keys reset per shard)
 
 Optimized for HuggingFace Hub streaming with load_dataset("webdataset").
 """
@@ -13,6 +14,7 @@ Optimized for HuggingFace Hub streaming with load_dataset("webdataset").
 import argparse
 import json
 import os
+import re
 import tarfile
 from pathlib import Path
 from typing import List, Optional, Tuple
@@ -54,8 +56,8 @@ def build_tars(
         split: shard name prefix (e.g. "train").
 
     Returns:
-        dict with stats: total_pairs, shards_created, total_bytes,
-                         missing_txt, shard_paths.
+        dict with stats: total_pairs, samples_written, shards_created,
+                         total_bytes, missing_txt, shard_paths.
     """
     pairs = find_video_txt_pairs(root)
     if not pairs:
@@ -66,6 +68,7 @@ def build_tars(
 
     stats = {
         "total_pairs": len(pairs),
+        "samples_written": 0,
         "shards_created": 0,
         "total_bytes": 0,
         "missing_txt": 0,
@@ -79,14 +82,15 @@ def build_tars(
     tar_path: Optional[Path] = None
 
     def _close_current_shard():
-        """Close current shard and record its stats."""
-        nonlocal tar, current_bytes
+        """Close current shard and record its stats using actual TAR size."""
+        nonlocal tar, tar_path, current_bytes
         if tar is not None:
             tar.close()
             tar = None
+            actual_bytes = tar_path.stat().st_size
             stats["shard_paths"].append(str(tar_path))
             stats["shards_created"] += 1
-            stats["total_bytes"] += current_bytes
+            stats["total_bytes"] += actual_bytes
             current_bytes = 0
 
     def _open_new_shard():
@@ -124,15 +128,22 @@ def build_tars(
 
             current_bytes += pair_size
             sample_idx += 1
+            stats["samples_written"] += 1
 
         # Close final shard
         _close_current_shard()
 
     finally:
-        # Safety: ensure TAR handle is always closed
+        # Safety: ensure TAR handle is always closed + clean up empty shard
         if tar is not None:
             tar.close()
             tar = None
+            # Remove empty/partial shard that was never properly closed
+            if tar_path and tar_path.exists() and tar_path.stat().st_size <= 1024:
+                try:
+                    tar_path.unlink()
+                except OSError:
+                    pass
 
     # Write metadata for dataset loading
     _write_metadata(output_dir, split, stats)
@@ -145,7 +156,7 @@ def _write_metadata(output_dir: Path, split: str, stats: dict):
     info = {
         "description": "Video dataset in WebDataset TAR format",
         "split": split,
-        "total_samples": stats["total_pairs"],
+        "total_samples": stats["samples_written"],
         "total_shards": stats["shards_created"],
         "total_bytes": stats["total_bytes"],
         "missing_captions": stats["missing_txt"],
@@ -177,6 +188,9 @@ def main():
     )
     args = parser.parse_args()
 
+    if not re.match(r'^[A-Za-z0-9_-]+$', args.split):
+        raise SystemExit(f"--split must match [A-Za-z0-9_-]+, got: {args.split!r}")
+
     root = Path(args.root).resolve()
     output = Path(args.output).resolve()
 
@@ -191,7 +205,7 @@ def main():
     )
 
     print(f"Done: {stats['shards_created']} shards, "
-          f"{stats['total_pairs']} samples, "
+          f"{stats['samples_written']} samples, "
           f"{stats['total_bytes'] / (1024**3):.2f} GB")
     if stats["missing_txt"]:
         print(f"Warning: {stats['missing_txt']} videos without .txt caption")

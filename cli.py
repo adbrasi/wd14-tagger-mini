@@ -745,9 +745,6 @@ def run_validation(input_dir: str):
 # Video preprocessing
 # -------------------------
 
-CONVERTIBLE_EXTS = {".gif", ".webp", ".avi", ".mov", ".mkv", ".webm", ".flv", ".wmv"}
-
-
 def run_preprocessing(input_dir: str):
     """Run video preprocessing: normalize formats, fix audio, trim frames."""
     import shutil
@@ -763,12 +760,23 @@ def run_preprocessing(input_dir: str):
             return
         print_success("ffmpeg installed")
 
-    # Scan all media files (videos + convertible formats)
+    # Import CONVERTIBLE_EXTS from the normalize module (single source of truth)
+    import importlib.util
+    _spec = importlib.util.spec_from_file_location(
+        "video_normalize",
+        os.path.join(SCRIPT_DIR, "video_normalize.py"),
+    )
+    _mod = importlib.util.module_from_spec(_spec)
+    _spec.loader.exec_module(_mod)
+    convertible_exts = _mod.CONVERTIBLE_EXTS
+
+    # Scan all media files: mp4 + convertible formats (gif/webp/avi/mov/etc)
+    scan_exts = {".mp4"} | convertible_exts
     all_media = []
     for root, _, files in os.walk(input_dir):
         for f in files:
             ext = os.path.splitext(f)[1].lower()
-            if ext in VIDEO_EXTS or ext in CONVERTIBLE_EXTS:
+            if ext in scan_exts:
                 all_media.append(os.path.join(root, f))
 
     if not all_media:
@@ -783,10 +791,11 @@ def run_preprocessing(input_dir: str):
 
     workers = max(4, min(os.cpu_count() or 4, 64))
 
-    # ── Step 1: Normalize formats + fix mono audio ──
-    do_normalize = non_mp4_count > 0
+    # ── Step 1: Normalize formats + fix mono audio + fps ──
+    do_normalize = False
     if non_mp4_count > 0:
-        print_info(f"{non_mp4_count:,} files need format conversion (gif/webp/avi/etc → mp4)")
+        print_info(f"{non_mp4_count:,} files can be converted to mp4 (gif/webp/avi/etc)")
+        do_normalize = ask_yes_no("Convert all formats to mp4?", default=True)
     do_stereo = ask_yes_no("Fix mono audio → stereo?", default=True)
     do_fps = ask_yes_no("Normalize framerate (fixed fps for all videos)?", default=False)
     target_fps = None
@@ -794,14 +803,7 @@ def run_preprocessing(input_dir: str):
         target_fps = float(ask_int("Target fps", default=25, minimum=1))
 
     if do_normalize or do_stereo or do_fps:
-        import importlib.util
-        _spec = importlib.util.spec_from_file_location(
-            "video_normalize",
-            os.path.join(SCRIPT_DIR, "video_normalize.py"),
-        )
-        _mod = importlib.util.module_from_spec(_spec)
-        _spec.loader.exec_module(_mod)
-
+        # _mod already loaded above for CONVERTIBLE_EXTS
         print_section("NORMALIZING VIDEOS")
         progress = make_progress()
         progress.start()

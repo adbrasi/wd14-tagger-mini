@@ -5,7 +5,7 @@ Three independent operations, all parallelized:
 1. Format normalization: convert gif/webp/avi/mov/mkv/webm/flv/wmv → mp4
    Uses re-encoding with libx264 + aac. Original non-mp4 file is removed.
 
-2. Mono → stereo: duplicate mono channel into L+R.
+2. Mono → stereo: duplicate mono channel into L+R via pan filter.
    Video stream is copied (no re-encode). Only audio is re-encoded.
    Videos already stereo or without audio are untouched.
 
@@ -58,6 +58,11 @@ def convert_to_mp4(src_path: str) -> dict:
     dst_path = os.path.splitext(src_path)[0] + ".mp4"
     video_dir = os.path.dirname(src_path) or "."
 
+    # Guard against overwriting an existing mp4 with the same stem
+    if os.path.exists(dst_path) and os.path.abspath(src_path) != os.path.abspath(dst_path):
+        result["detail"] = f"destination already exists: {dst_path}"
+        return result
+
     try:
         fd, tmp_path = tempfile.mkstemp(suffix=".mp4", dir=video_dir)
         os.close(fd)
@@ -108,7 +113,10 @@ def convert_to_mp4(src_path: str) -> dict:
         old_txt = os.path.splitext(src_path)[0] + ".txt"
         new_txt = os.path.splitext(dst_path)[0] + ".txt"
         if old_txt != new_txt and os.path.exists(old_txt) and not os.path.exists(new_txt):
-            os.rename(old_txt, new_txt)
+            try:
+                os.replace(old_txt, new_txt)
+            except OSError:
+                pass  # video converted ok, txt rename is best-effort
 
         result["ok"] = True
         result["new_path"] = dst_path
@@ -122,6 +130,8 @@ def convert_to_mp4(src_path: str) -> dict:
 
 def fix_mono_to_stereo(video_path: str) -> dict:
     """Convert mono audio to stereo. Video is stream-copied (no re-encode).
+
+    Uses pan filter to explicitly duplicate mono channel: L=mono, R=mono.
 
     Returns {path, ok, detail, action} where action is one of:
     "converted", "already_stereo", "no_audio", "error".
@@ -156,7 +166,7 @@ def fix_mono_to_stereo(video_path: str) -> dict:
         "-i", video_path,
         "-c:v", "copy",
         "-c:a", "aac", "-b:a", "192k",
-        "-af", "aformat=channel_layouts=stereo",
+        "-af", "pan=stereo|c0=c0|c1=c0",
         tmp_path,
     ]
 
@@ -235,6 +245,7 @@ def _fix_fps_single(args: tuple) -> dict:
 
     current_fps = get_video_fps(video_path)
     if current_fps is None:
+        result["ok"] = False
         result["action"] = "probe_failed"
         return result
 
@@ -244,10 +255,9 @@ def _fix_fps_single(args: tuple) -> dict:
         return result
 
     video_dir = os.path.dirname(video_path) or "."
-    ext = os.path.splitext(video_path)[1]
 
     try:
-        fd, tmp_path = tempfile.mkstemp(suffix=ext, dir=video_dir)
+        fd, tmp_path = tempfile.mkstemp(suffix=".mp4", dir=video_dir)
         os.close(fd)
     except OSError as e:
         result["ok"] = False
@@ -345,13 +355,14 @@ def normalize_videos(
 
     # Phase 1: Format conversion
     to_convert = [p for p in file_paths if os.path.splitext(p)[1].lower() in CONVERTIBLE_EXTS]
-    mp4_files = [p for p in file_paths if os.path.splitext(p)[1].lower() == ".mp4"]
-    stats["convert_skipped"] = len(mp4_files)
+    # All non-convertible files pass through to Phase 2/3 (includes .mp4 and any other format)
+    non_convert = [p for p in file_paths if os.path.splitext(p)[1].lower() not in CONVERTIBLE_EXTS]
+    stats["convert_skipped"] = len(non_convert)
 
     if on_progress:
         on_progress("convert", 0, len(to_convert))
 
-    converted_paths = list(mp4_files)  # start with existing mp4s
+    converted_paths = list(non_convert)
     interrupted = False
 
     if to_convert:
@@ -426,7 +437,7 @@ def normalize_videos(
                 action = res["action"]
                 if action == "converted":
                     stats["fps_converted"] += 1
-                elif action in ("already_correct", "probe_failed"):
+                elif action == "already_correct":
                     stats["fps_skipped"] += 1
                 else:
                     stats["fps_failed"] += 1
