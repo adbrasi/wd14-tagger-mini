@@ -1006,10 +1006,12 @@ def call_openrouter(
         "Content-Type": "application/json",
     }
 
-    # OpenRouter docs: text first, then images
-    content_parts = [{"type": "text", "text": user_prompt}]
+    # Images first, then text — vision models produce better results when
+    # they process the visual context before reading the text instructions.
+    content_parts = []
     for uri in image_data_uris:
         content_parts.append({"type": "image_url", "image_url": {"url": uri}})
+    content_parts.append({"type": "text", "text": user_prompt})
 
     payload = {
         "model": model,
@@ -1313,7 +1315,9 @@ def _xai_build_user_content(user_prompt: str, image_path: str, extra_image_paths
     if not include_images:
         return user_prompt
 
-    content_parts = [{"type": "text", "text": user_prompt}]
+    # Images FIRST, then text — vision models process visual context before
+    # reading instructions, producing better results when images come first.
+    content_parts = []
 
     image_paths = [image_path]
     if extra_image_paths:
@@ -1337,6 +1341,8 @@ def _xai_build_user_content(user_prompt: str, image_path: str, extra_image_paths
                 )
         except Exception as e:
             logger.warning(f"failed to load image for xai batch request {ipath}: {e}")
+
+    content_parts.append({"type": "text", "text": user_prompt})
     return content_parts
 
 
