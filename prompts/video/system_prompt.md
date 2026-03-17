@@ -299,6 +299,14 @@ Only describe secondary motion if it would realistically be visible based on the
 ---
 
 
+---
+
+## Jiggle tags
+
+if have any jiggle tag, like "breast_jiggle", "ass_jiggle" or others, you need put this info in the result "the giant ass jiggle a lot", for example.
+
+---
+
 
 ## Conditional Tag Rules
 
