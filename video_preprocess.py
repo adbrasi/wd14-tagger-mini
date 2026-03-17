@@ -1,13 +1,16 @@
-"""Video preprocessing: frame cutting and resolution normalization.
+"""Video preprocessing: trim videos to a maximum frame count.
 
-- Frame count snaps to F % 8 == 1 (1, 9, 17, 25, 33, 41, 49, ...)
-- Width/Height snapped to multiples of 32 (scale-to-fit, minimal crop)
-- Uses ffmpeg for all operations
-- Parallel processing with ProcessPoolExecutor
+Uses stream copy (-c copy) for lossless, codec-agnostic trimming.
+No re-encoding, no filters, no pixel format conversion.
+Works with any video codec/container. Preserves audio when present.
+
+Frame count target follows F % 8 == 1 (1, 9, 17, 25, 33, 41, 49, ...).
+Cutting is time-based: cut_time = max_frames / fps.
 """
+import json
 import os
-import signal
 import subprocess
+import tempfile
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from typing import Optional
 
@@ -15,6 +18,8 @@ from typing import Optional
 # (Rich Console is not fork-safe). Logging is returned as results instead.
 
 VIDEO_EXTS = {".mp4", ".avi", ".mov", ".mkv", ".webm", ".flv", ".wmv"}
+
+_DEVNULL = subprocess.DEVNULL
 
 
 def snap_frames(n: int) -> int:
@@ -24,290 +29,271 @@ def snap_frames(n: int) -> int:
     """
     if n <= 1:
         return 1
-    # Find nearest F where F % 8 == 1
     lower = ((n - 1) // 8) * 8 + 1
     upper = lower + 8
-    if abs(n - lower) <= abs(n - upper):
-        return lower
-    return upper
-
-
-def snap_dimension(d: int) -> int:
-    """Snap dimension to nearest multiple of 32."""
-    return max(32, round(d / 32) * 32)
+    return lower if abs(n - lower) <= abs(n - upper) else upper
 
 
 def get_video_info(video_path: str) -> Optional[dict]:
-    """Get video width, height, frame count via ffprobe."""
+    """Get video fps, frame count, and duration via ffprobe.
+
+    Returns dict with keys: fps (float), frames (int), duration (float).
+    Returns None on any error (corrupt file, missing codec, etc.).
+    """
     cmd = [
         "ffprobe", "-v", "error",
         "-select_streams", "v:0",
-        "-show_entries", "stream=width,height,nb_frames,r_frame_rate",
+        "-show_entries", "stream=nb_frames,r_frame_rate,avg_frame_rate",
         "-show_entries", "format=duration",
         "-of", "json",
         video_path,
     ]
     try:
-        result = subprocess.run(cmd, stdin=subprocess.DEVNULL,
-                                capture_output=True, text=True, timeout=30)
-        if result.returncode != 0:
+        r = subprocess.run(cmd, stdin=_DEVNULL,
+                           capture_output=True, text=True, timeout=30)
+        if r.returncode != 0:
             return None
-        import json
-        data = json.loads(result.stdout)
+
+        data = json.loads(r.stdout)
         stream = data.get("streams", [{}])[0]
         fmt = data.get("format", {})
 
-        w = int(stream.get("width", 0))
-        h = int(stream.get("height", 0))
+        # Prefer avg_frame_rate (reliable for VFR), fall back to r_frame_rate
+        fps = _parse_fps(stream.get("avg_frame_rate", ""))
+        if fps <= 0:
+            fps = _parse_fps(stream.get("r_frame_rate", ""))
 
-        # nb_frames can be "N/A" for some containers
+        duration = float(fmt.get("duration", 0))
+
+        # nb_frames can be "N/A" or missing for some containers
         nb = stream.get("nb_frames", "N/A")
-        if nb == "N/A" or not nb:
-            # Estimate from duration * fps
-            duration = float(fmt.get("duration", 0))
-            fps_str = stream.get("r_frame_rate", "24/1")
-            num, den = fps_str.split("/")
-            fps = float(num) / float(den) if float(den) else 24.0
-            nb = int(duration * fps) if duration else 0
+        if nb and nb != "N/A":
+            frames = int(nb)
+        elif duration > 0 and fps > 0:
+            frames = int(duration * fps)
         else:
-            nb = int(nb)
+            frames = 0
 
-        return {"width": w, "height": h, "frames": nb}
+        return {"fps": fps, "frames": frames, "duration": duration}
     except Exception:
         return None
 
 
-def _has_audio_stream(video_path: str) -> bool:
-    """Check if video has an audio stream via ffprobe."""
+def _parse_fps(fps_str: str) -> float:
+    """Parse ffprobe fps string like '30000/1001' or '24/1'."""
+    if not fps_str or "/" not in fps_str:
+        return 0.0
     try:
-        r = subprocess.run(
-            ["ffprobe", "-v", "error", "-select_streams", "a",
-             "-show_entries", "stream=index", "-of", "csv=p=0", video_path],
-            stdin=subprocess.DEVNULL,
-            capture_output=True, text=True, timeout=10,
-        )
-        return bool(r.stdout.strip())
-    except Exception:
-        return False
+        num, den = fps_str.split("/")
+        return float(num) / float(den) if float(den) else 0.0
+    except (ValueError, ZeroDivisionError):
+        return 0.0
 
 
 def _extract_ffmpeg_error(stderr: str) -> str:
-    """Extract meaningful error line from ffmpeg stderr."""
+    """Extract meaningful error line from ffmpeg stderr output."""
     lines = (stderr or "").strip().split("\n")
+    skip_prefixes = (
+        "ffmpeg version", "built with", "configuration:",
+        "lib", "  ", "Metadata:", "Stream #", "Input #",
+        "Output #", "Duration:", "Press [q]",
+    )
     for line in reversed(lines):
-        line = line.strip()
-        if not line:
+        stripped = line.strip()
+        if not stripped:
             continue
-        if line.startswith(("ffmpeg version", "built with", "configuration:",
-                            "lib", "  ", "Metadata:", "Stream #", "Input #",
-                            "Output #", "Duration:", "Press [q]")):
+        if stripped.startswith(skip_prefixes):
             continue
-        return line[:200]
+        return stripped[:200]
     return lines[-1].strip()[:200] if lines else "unknown error"
 
 
-def _run_ffmpeg(cmd: list, tmp_path: str) -> tuple:
-    """Run ffmpeg command. Returns (success: bool, stderr: str)."""
+def trim_video(video_path: str, cut_seconds: float) -> dict:
+    """Trim a single video to cut_seconds using stream copy.
+
+    Stream copy is lossless, codec-agnostic, and preserves all streams
+    (video, audio, subtitles). No re-encoding occurs.
+
+    Returns dict: {path, ok, detail}.
+    """
+    result = {"path": video_path, "ok": False, "detail": ""}
+
+    # Create tmp file on same filesystem for atomic os.replace
+    video_dir = os.path.dirname(video_path) or "."
+    ext = os.path.splitext(video_path)[1]
+    try:
+        fd, tmp_path = tempfile.mkstemp(suffix=ext, dir=video_dir)
+        os.close(fd)
+    except OSError as e:
+        result["detail"] = f"cannot create temp file: {e}"
+        return result
+
+    cmd = [
+        "ffmpeg", "-y",
+        "-i", video_path,
+        "-t", f"{cut_seconds:.4f}",
+        "-c", "copy",
+        "-avoid_negative_ts", "make_zero",
+        tmp_path,
+    ]
+
     try:
         proc = subprocess.Popen(
-            cmd, stdin=subprocess.DEVNULL,
+            cmd, stdin=_DEVNULL,
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
         )
         try:
-            _, stderr = proc.communicate(timeout=600)
+            _, stderr = proc.communicate(timeout=300)
         except subprocess.TimeoutExpired:
             proc.kill()
             proc.wait()
-            return False, "timeout (600s)"
-        return proc.returncode == 0, stderr or ""
+            result["detail"] = "timeout (300s)"
+            _remove_if_exists(tmp_path)
+            return result
+
+        if proc.returncode != 0:
+            result["detail"] = _extract_ffmpeg_error(stderr)
+            _remove_if_exists(tmp_path)
+            return result
+
+        # Verify output is valid (non-zero size)
+        if not os.path.exists(tmp_path) or os.path.getsize(tmp_path) == 0:
+            result["detail"] = "output file empty or missing"
+            _remove_if_exists(tmp_path)
+            return result
+
+        os.replace(tmp_path, video_path)
+        result["ok"] = True
+        return result
+
     except Exception as e:
-        return False, str(e)
+        result["detail"] = str(e)
+        _remove_if_exists(tmp_path)
+        return result
 
 
-def _build_ffmpeg_cmd(
-    video_path: str, tmp_path: str,
-    max_frames: Optional[int],
-    target_w: Optional[int], target_h: Optional[int],
-    has_audio: bool,
-) -> list:
-    """Build ffmpeg command with proper pixel format handling."""
-    filters = []
-
-    # Force pixel format first — fixes "Conversion failed!" and assertion errors
-    # with exotic input formats (yuv444p10le, gbrp, etc.)
-    filters.append("format=yuv420p")
-
-    if target_w and target_h:
-        filters.append(
-            f"scale={target_w}:{target_h}:force_original_aspect_ratio=increase,"
-            f"crop={target_w}:{target_h}"
-        )
-
-    cmd = ["ffmpeg", "-y", "-i", video_path]
-
-    if max_frames is not None:
-        cmd.extend(["-frames:v", str(max_frames)])
-
-    cmd.extend(["-vf", ",".join(filters)])
-    cmd.extend(["-c:v", "libx264", "-preset", "fast", "-crf", "18"])
-
-    if has_audio:
-        cmd.extend(["-c:a", "copy"])
-    else:
-        cmd.append("-an")
-
-    cmd.append(tmp_path)
-    return cmd
-
-
-def process_single_video(
-    video_path: str,
-    max_frames: Optional[int],
-    target_w: Optional[int],
-    target_h: Optional[int],
-) -> dict:
-    """Process a single video: cut frames and/or resize.
-
-    Strategy: try with resize+format, fallback to format-only on failure.
-    Returns dict with status info (no Rich imports — subprocess safe).
-    """
-    result = {"path": video_path, "ok": False, "detail": ""}
-    tmp_path = video_path + ".tmp" + os.path.splitext(video_path)[1]
-    has_audio = _has_audio_stream(video_path)
-
-    # Attempt 1: full processing (format + scale/crop if requested)
-    cmd = _build_ffmpeg_cmd(video_path, tmp_path, max_frames, target_w, target_h, has_audio)
-    ok, stderr = _run_ffmpeg(cmd, tmp_path)
-
-    if not ok and (target_w and target_h):
-        # Attempt 2: retry without resize (just frame cut + format fix)
-        if os.path.exists(tmp_path):
-            os.remove(tmp_path)
-        cmd = _build_ffmpeg_cmd(video_path, tmp_path, max_frames, None, None, has_audio)
-        ok, stderr = _run_ffmpeg(cmd, tmp_path)
-        if ok:
-            result["detail"] = "ok (resize skipped)"
-
-    if not ok and has_audio:
-        # Attempt 3: retry without audio (some audio streams are incompatible)
-        if os.path.exists(tmp_path):
-            os.remove(tmp_path)
-        cmd = _build_ffmpeg_cmd(video_path, tmp_path, max_frames, None, None, False)
-        ok, stderr = _run_ffmpeg(cmd, tmp_path)
-        if ok:
-            result["detail"] = "ok (resize+audio skipped)"
-
-    if ok:
-        try:
-            os.replace(tmp_path, video_path)
-            result["ok"] = True
-        except Exception as e:
-            result["detail"] = f"replace failed: {e}"
-    else:
-        result["detail"] = _extract_ffmpeg_error(stderr)
-        if os.path.exists(tmp_path):
-            os.remove(tmp_path)
-
-    return result
+def _remove_if_exists(path: str):
+    try:
+        if os.path.exists(path):
+            os.remove(path)
+    except OSError:
+        pass
 
 
 def preprocess_videos(
     video_paths: list,
-    max_frames: Optional[int] = None,
-    resize: bool = False,
+    max_frames: int,
     max_workers: int = None,
     on_progress=None,
 ) -> dict:
-    """Preprocess multiple videos in parallel.
+    """Trim multiple videos in parallel using stream copy.
+
+    max_frames must already be snapped to F%8==1 by the caller.
 
     Args:
-        video_paths: list of video file paths
-        max_frames: if set, snap to F%8==1 and cut. None = skip cutting.
-        resize: if True, snap W/H to multiples of 32
-        max_workers: parallel workers (default: min(cpu_count, 16))
+        video_paths: list of video file paths.
+        max_frames: target frame count (already snapped). Videos longer
+                    than this will be trimmed.
+        max_workers: parallel workers (default: min(cpu_count, 64)).
+        on_progress: callback with signature:
+            on_scan_progress(scan_done: int, scan_total: int) during Phase 1
+            on_trim_progress(success: int, failed: int, trim_total: int) during Phase 2
+            To distinguish phases, Phase 1 calls: callback("scan", done, total)
+            Phase 2 calls: callback("trim", success, failed, total)
 
-    Returns: {total, success, failed, skipped, details: [{path, ok, detail}]}
+    Returns: {total, trimmed, failed, skipped, probe_failed,
+              details: [{path, ok, detail}]}
     """
+    empty = {"total": len(video_paths), "trimmed": 0, "failed": 0,
+             "skipped": 0, "probe_failed": 0, "details": []}
+
     if not video_paths:
-        return {"total": 0, "success": 0, "failed": 0, "skipped": 0, "details": []}
+        empty["total"] = 0
+        return empty
 
     if max_workers is None:
         max_workers = max(1, min(os.cpu_count() or 4, len(video_paths), 64))
 
-    snapped_frames = snap_frames(max_frames) if max_frames is not None else None
+    # Phase 1: Parallel ffprobe to get fps + frame count
+    infos = {}
+    scan_done = 0
+    executor = ProcessPoolExecutor(max_workers=max_workers)
+    try:
+        futures = {executor.submit(get_video_info, vp): vp for vp in video_paths}
+        for f in as_completed(futures):
+            vp = futures[f]
+            infos[vp] = f.result()
+            scan_done += 1
+            if on_progress:
+                on_progress("scan", scan_done, len(video_paths))
+    except KeyboardInterrupt:
+        executor.shutdown(wait=False, cancel_futures=True)
+        raise
+    else:
+        executor.shutdown(wait=True)
 
-    # Pre-scan videos for dimensions and frame counts (parallel ffprobe)
-    need_probe = resize or (snapped_frames is not None)
-    infos = {}  # vp -> info_dict_or_None
-    if need_probe:
-        with ProcessPoolExecutor(max_workers=max_workers) as probe_pool:
-            probe_futures = {probe_pool.submit(get_video_info, vp): vp for vp in video_paths}
-            for f in as_completed(probe_futures):
-                vp = probe_futures[f]
-                infos[vp] = f.result()
-                if on_progress:
-                    on_progress(0, 0, len(video_paths))  # signal scan progress
-
-    targets = {}
-    probe_failures = 0
+    # Phase 2: Decide which videos need trimming
+    to_trim = []  # (video_path, cut_seconds)
+    probe_failed = 0
     for vp in video_paths:
-        tw, th = None, None
-        needs_cut = snapped_frames is not None
-        probe_ok = True
         info = infos.get(vp)
+        if info is None:
+            probe_failed += 1
+            continue
 
-        if resize:
-            if info and info["width"] and info["height"]:
-                tw = snap_dimension(info["width"])
-                th = snap_dimension(info["height"])
-                if tw == info["width"] and th == info["height"]:
-                    tw, th = None, None
-            elif info is None:
-                probe_ok = False
-                probe_failures += 1
+        fps = info["fps"]
+        frames = info["frames"]
 
-        if snapped_frames is not None and info and info.get("frames", 0) > 0:
-            if info["frames"] <= snapped_frames:
-                needs_cut = False
+        if fps <= 0:
+            probe_failed += 1
+            continue
 
-        needs_work = needs_cut or (tw is not None)
-        if not probe_ok and snapped_frames:
-            needs_work = True
+        if frames <= max_frames:
+            continue
 
-        targets[vp] = (tw, th, needs_work, needs_cut)
+        cut_seconds = max_frames / fps
+        to_trim.append((vp, cut_seconds))
 
-    to_process = [
-        (vp, snapped_frames if needs_cut else None, tw, th)
-        for vp, (tw, th, needs, needs_cut) in targets.items()
-        if needs
-    ]
-    skipped = len(video_paths) - len(to_process)
+    skipped = len(video_paths) - len(to_trim) - probe_failed
+    stats = {
+        "total": len(video_paths),
+        "trimmed": 0,
+        "failed": 0,
+        "skipped": skipped,
+        "probe_failed": probe_failed,
+        "details": [],
+    }
 
-    stats = {"total": len(video_paths), "success": 0, "failed": 0, "skipped": skipped, "details": []}
-
-    if not to_process:
+    if not to_trim:
+        # Signal trim phase done immediately
+        if on_progress:
+            on_progress("trim", 0, 0, 0)
         return stats
 
+    # Signal trim phase start with correct total
+    if on_progress:
+        on_progress("trim", 0, 0, len(to_trim))
+
+    # Phase 3: Parallel stream-copy trim
     executor = ProcessPoolExecutor(max_workers=max_workers)
     try:
         futures = {
-            executor.submit(process_single_video, vp, mf, tw, th): vp
-            for vp, mf, tw, th in to_process
+            executor.submit(trim_video, vp, secs): vp
+            for vp, secs in to_trim
         }
         for future in as_completed(futures):
             res = future.result()
             stats["details"].append(res)
             if res["ok"]:
-                stats["success"] += 1
+                stats["trimmed"] += 1
             else:
                 stats["failed"] += 1
             if on_progress:
-                on_progress(stats["success"], stats["failed"], len(to_process))
+                on_progress("trim", stats["trimmed"], stats["failed"], len(to_trim))
     except KeyboardInterrupt:
-        # Kill all running workers immediately
         executor.shutdown(wait=False, cancel_futures=True)
         raise
-    finally:
-        executor.shutdown(wait=False)
+    else:
+        executor.shutdown(wait=True)
 
     return stats

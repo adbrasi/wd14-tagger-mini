@@ -738,7 +738,7 @@ def run_validation(input_dir: str):
 # -------------------------
 
 def run_preprocessing(input_dir: str):
-    """Run video preprocessing: frame cut + resize."""
+    """Run video preprocessing: trim to max frame count via stream copy."""
     import shutil
 
     if shutil.which("ffmpeg") is None or shutil.which("ffprobe") is None:
@@ -766,33 +766,19 @@ def run_preprocessing(input_dir: str):
 
     print_section("VIDEO PREPROCESSING")
     print_info(f"Found {len(videos):,} videos")
+    print_info("Method: stream copy (lossless, preserves audio)")
 
-    do_cut = ask_yes_no("Cut videos to max frame count?", default=True)
-    max_frames = None
-    if do_cut:
-        raw_frames = ask_int("Max frames", default=49, minimum=1)
-        max_frames = snap_frames(raw_frames)
-        if max_frames != raw_frames:
-            print_info(f"Snapped {raw_frames} → {max_frames} (F % 8 == 1 rule)")
-
-    do_resize = ask_yes_no("Resize to multiples of 32 (W/H)?", default=True)
-
-    if not do_cut and not do_resize:
+    do_cut = ask_yes_no("Trim videos to max frame count?", default=True)
+    if not do_cut:
         print_info("Nothing to do — skipping")
         return
 
+    raw_frames = ask_int("Max frames", default=49, minimum=1)
+    max_frames = snap_frames(raw_frames)
+    if max_frames != raw_frames:
+        print_info(f"Snapped {raw_frames} → {max_frames} (F % 8 == 1 rule)")
+
     workers = max(4, min(os.cpu_count() or 4, 64))
-
-    summary_rows = [("Videos", f"{len(videos):,}")]
-    if do_cut:
-        summary_rows.append(("Frame limit", str(max_frames)))
-    summary_rows.append(("Resize W/H to 32x", "Yes" if do_resize else "No"))
-    summary_rows.append(("Workers", str(workers)))
-    print_summary_table("Preprocessing Config", summary_rows)
-
-    if not ask_yes_no("Process videos? (MODIFIES ORIGINALS)", default=False):
-        print_info("Preprocessing skipped")
-        return
 
     # Optional sample limit for testing
     test_limit = ask_int("How many videos to process? (0 = all)", default=0, minimum=0)
@@ -802,26 +788,39 @@ def run_preprocessing(input_dir: str):
         videos = videos[:test_limit]
         print_info(f"Testing with {test_limit} sample videos")
 
-    print_section("PROCESSING VIDEOS")
+    print_summary_table("Preprocessing Config", [
+        ("Videos", f"{len(videos):,}"),
+        ("Frame limit", str(max_frames)),
+        ("Method", "stream copy (lossless)"),
+        ("Workers", str(workers)),
+    ])
+
+    if not ask_yes_no("Trim videos? (MODIFIES ORIGINALS)", default=False):
+        print_info("Preprocessing skipped")
+        return
+
+    print_section("TRIMMING VIDEOS")
     progress = make_progress()
     progress.start()
     scan_task = progress.add_task("Scanning videos (ffprobe)", total=len(videos))
-    proc_task = progress.add_task("Processing videos (ffmpeg)", total=len(videos))
-    scan_done = 0
+    trim_task = None  # created after scan, when we know the real total
 
-    def _on_progress(success, failed, total):
-        nonlocal scan_done
-        done = success + failed
-        if done == 0 and scan_done < len(videos):
-            scan_done += 1
-            progress.update(scan_task, completed=scan_done)
-        else:
-            progress.update(scan_task, completed=len(videos))
-            progress.update(proc_task, completed=done)
+    def _on_progress(*args):
+        nonlocal trim_task
+        phase = args[0]
+        if phase == "scan":
+            _, done, total = args
+            progress.update(scan_task, completed=done, total=total)
+        elif phase == "trim":
+            _, success, failed, total = args
+            if trim_task is None and total > 0:
+                trim_task = progress.add_task("Trimming videos (stream copy)", total=total)
+            if trim_task is not None:
+                progress.update(trim_task, completed=success + failed)
 
     try:
         result = preprocess_videos(
-            videos, max_frames=max_frames, resize=do_resize, max_workers=workers,
+            videos, max_frames=max_frames, max_workers=workers,
             on_progress=_on_progress,
         )
     except KeyboardInterrupt:
@@ -830,20 +829,23 @@ def run_preprocessing(input_dir: str):
         return
 
     progress.update(scan_task, completed=len(videos))
-    progress.update(proc_task, completed=len(videos))
+    if trim_task is not None:
+        progress.update(trim_task, completed=result["trimmed"] + result["failed"])
     progress.stop()
+
     print_success(
-        f"Done: {result['success']:,} ok, "
+        f"Done: {result['trimmed']:,} trimmed, "
         f"{result['failed']:,} failed, "
-        f"{result['skipped']:,} skipped"
+        f"{result['skipped']:,} already short enough"
     )
+    if result["probe_failed"] > 0:
+        print_warning(f"{result['probe_failed']:,} videos could not be probed (corrupt or unreadable)")
 
     if result["failed"] > 0:
-        print_warning(f"{result['failed']:,} videos failed to process")
-        # Show first few error details
+        print_warning(f"{result['failed']:,} videos failed to trim")
         errors = [d for d in result.get("details", []) if not d.get("ok")]
         for e in errors[:5]:
-            print_info(f"  {os.path.basename(e['path'])}: {e.get('detail', 'unknown error')[:100]}")
+            print_info(f"  {os.path.basename(e['path'])}: {e.get('detail', 'unknown error')}")
         if len(errors) > 5:
             print_info(f"  ... and {len(errors) - 5:,} more")
 
@@ -1386,7 +1388,7 @@ def main():
 
     # What to do?
     workflow = ask_choice("What do you want to do?", [
-        "Pre-process dataset (cut frames, resize)",
+        "Pre-process dataset (trim to max frames)",
         "Tag dataset (wd14 / pixai / grok pipeline)",
         "Full pipeline (preprocess → tag → upload)",
         "Upload dataset to HuggingFace",
