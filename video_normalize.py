@@ -238,8 +238,8 @@ def _fix_fps_single(args: tuple) -> dict:
         result["action"] = "probe_failed"
         return result
 
-    # Allow 0.5 fps tolerance to avoid unnecessary re-encodes
-    if abs(current_fps - target_fps) < 0.5:
+    # Exact match only — no tolerance
+    if current_fps == target_fps:
         result["action"] = "already_correct"
         return result
 
