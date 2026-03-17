@@ -4,9 +4,9 @@
 Creates TAR archives in the standard WebDataset format:
   train-0000.tar, train-0001.tar, ...
 
-Each shard contains paired files numbered from 000000 within that shard:
+Each TAR contains paired files with globally unique numeric keys:
   shard 0: 000000.mp4 + 000000.txt, 000001.mp4 + 000001.txt, ...
-  shard 1: 000000.mp4 + 000000.txt, ...  (keys reset per shard)
+  shard 1: 001000.mp4 + 001000.txt, ...  (keys are globally unique)
 
 Optimized for HuggingFace Hub streaming with load_dataset("webdataset").
 """
@@ -95,10 +95,9 @@ def build_tars(
 
     def _open_new_shard():
         """Open a fresh TAR shard."""
-        nonlocal tar, tar_path, shard_idx, sample_idx
+        nonlocal tar, tar_path, shard_idx
         tar_path = output_dir / f"{split}-{shard_idx:04d}.tar"
         tar = tarfile.open(tar_path, "w")
-        sample_idx = 0
         shard_idx += 1
 
     try:
