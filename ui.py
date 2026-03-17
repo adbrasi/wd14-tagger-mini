@@ -25,15 +25,15 @@ console = Console()
 
 def print_banner():
     banner = Text()
-    banner.append("DATA ARAKNIDEO\n", style="bold cyan")
-    banner.append("dataset preprocessing & tagging pipeline", style="dim")
-    console.print(Panel(banner, border_style="cyan", padding=(1, 4)))
+    banner.append("DATA ARAKNIDEO\n", style="bold blue")
+    banner.append("dataset preprocessing & tagging pipeline", style="dark_blue")
+    console.print(Panel(banner, border_style="blue", padding=(1, 4)))
 
 
 def print_section(title: str):
-    console.print(f"\n[bold cyan]{'─' * 60}[/]")
-    console.print(f"[bold white]  {title}[/]")
-    console.print(f"[bold cyan]{'─' * 60}[/]\n")
+    console.print(f"\n[bold blue]{'─' * 60}[/]")
+    console.print(f"[bold dark_blue]  {title}[/]")
+    console.print(f"[bold blue]{'─' * 60}[/]\n")
 
 
 def print_success(msg: str):
@@ -61,7 +61,7 @@ def ask_choice(prompt: str, options: List[str], default: int = 1) -> int:
         raise ValueError("ask_choice requires at least one option")
     console.print(f"\n[bold]{prompt}[/]")
     for i, opt in enumerate(options, 1):
-        marker = " [cyan]*[/]" if i == default else ""
+        marker = " [blue]*[/]" if i == default else ""
         console.print(f"  [bold]{i})[/] {opt}{marker}")
     while True:
         raw = Prompt.ask("Choice", default=str(default))
