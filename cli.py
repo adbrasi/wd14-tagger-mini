@@ -1099,9 +1099,11 @@ def run_tagging(input_dir: str, python: str, media_counts: dict):
         print_warning("PixAI model is gated. You may need a HuggingFace token.")
         hf_token = ask_input("Enter HF token (or press Enter to skip)", "")
 
-    # Batch size — auto VRAM detection
+    # Batch size — auto VRAM detection (skip for collect/status — no local inference)
     batch_size = "4"
-    if has_local_taggers:
+    is_collect_or_status = (grok_provider == "xai-batch" and has_grok
+                            and xai_batch_action in ("collect", "status"))
+    if has_local_taggers and not is_collect_or_status:
         batch_size = ask_input("Batch size for local taggers (or 'auto' for VRAM-based)", "auto")
         if batch_size.lower() == "auto":
             cmd_args = [
