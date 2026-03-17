@@ -48,7 +48,8 @@ def get_video_info(video_path: str) -> Optional[dict]:
         video_path,
     ]
     try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        result = subprocess.run(cmd, stdin=subprocess.DEVNULL,
+                                capture_output=True, text=True, timeout=30)
         if result.returncode != 0:
             return None
         import json
@@ -82,6 +83,7 @@ def _has_audio_stream(video_path: str) -> bool:
         r = subprocess.run(
             ["ffprobe", "-v", "error", "-select_streams", "a",
              "-show_entries", "stream=index", "-of", "csv=p=0", video_path],
+            stdin=subprocess.DEVNULL,
             capture_output=True, text=True, timeout=10,
         )
         return bool(r.stdout.strip())
@@ -131,7 +133,8 @@ def process_single_video(
 
     try:
         proc = subprocess.Popen(
-            cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+            cmd, stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
         )
         try:
             _, stderr = proc.communicate(timeout=600)
@@ -144,7 +147,24 @@ def process_single_video(
             return result
 
         if proc.returncode != 0:
-            result["detail"] = (stderr or "").strip().split("\n")[-1][:200]
+            # ffmpeg sends everything to stderr (header, info, and errors)
+            # Extract meaningful error: lines with known error patterns
+            lines = (stderr or "").strip().split("\n")
+            error_line = ""
+            for line in reversed(lines):
+                line = line.strip()
+                if not line:
+                    continue
+                # Skip ffmpeg header/info lines
+                if line.startswith(("ffmpeg version", "built with", "configuration:",
+                                    "lib", "  ", "Metadata:", "Stream #", "Input #",
+                                    "Output #", "Duration:", "Press [q]")):
+                    continue
+                error_line = line
+                break
+            if not error_line and lines:
+                error_line = lines[-1].strip()
+            result["detail"] = error_line[:200]
             if os.path.exists(tmp_path):
                 os.remove(tmp_path)
             return result

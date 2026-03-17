@@ -794,6 +794,14 @@ def run_preprocessing(input_dir: str):
         print_info("Preprocessing skipped")
         return
 
+    # Optional sample limit for testing
+    test_limit = ask_int("How many videos to process? (0 = all)", default=0, minimum=0)
+    if test_limit > 0 and test_limit < len(videos):
+        import random
+        random.shuffle(videos)
+        videos = videos[:test_limit]
+        print_info(f"Testing with {test_limit} sample videos")
+
     print_section("PROCESSING VIDEOS")
     progress = make_progress()
     progress.start()
