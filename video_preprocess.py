@@ -91,46 +91,23 @@ def _has_audio_stream(video_path: str) -> bool:
         return False
 
 
-def process_single_video(
-    video_path: str,
-    max_frames: Optional[int],
-    target_w: Optional[int],
-    target_h: Optional[int],
-) -> dict:
-    """Process a single video: cut frames and/or resize.
+def _extract_ffmpeg_error(stderr: str) -> str:
+    """Extract meaningful error line from ffmpeg stderr."""
+    lines = (stderr or "").strip().split("\n")
+    for line in reversed(lines):
+        line = line.strip()
+        if not line:
+            continue
+        if line.startswith(("ffmpeg version", "built with", "configuration:",
+                            "lib", "  ", "Metadata:", "Stream #", "Input #",
+                            "Output #", "Duration:", "Press [q]")):
+            continue
+        return line[:200]
+    return lines[-1].strip()[:200] if lines else "unknown error"
 
-    Returns dict with status info (no Rich imports — subprocess safe).
-    """
-    result = {"path": video_path, "ok": False, "detail": ""}
-    tmp_path = video_path + ".tmp" + os.path.splitext(video_path)[1]
 
-    filters = []
-
-    # Build ffmpeg filter chain
-    if target_w and target_h:
-        filters.append(
-            f"scale={target_w}:{target_h}:force_original_aspect_ratio=increase,"
-            f"crop={target_w}:{target_h}"
-        )
-
-    cmd = ["ffmpeg", "-y", "-i", video_path]
-
-    if max_frames is not None:
-        cmd.extend(["-vframes", str(max_frames)])
-
-    if filters:
-        cmd.extend(["-vf", ",".join(filters)])
-
-    cmd.extend(["-c:v", "libx264", "-preset", "fast", "-crf", "18"])
-
-    # Keep audio if present, skip if not
-    if _has_audio_stream(video_path):
-        cmd.extend(["-c:a", "copy"])
-    else:
-        cmd.append("-an")
-
-    cmd.append(tmp_path)
-
+def _run_ffmpeg(cmd: list, tmp_path: str) -> tuple:
+    """Run ffmpeg command. Returns (success: bool, stderr: str)."""
     try:
         proc = subprocess.Popen(
             cmd, stdin=subprocess.DEVNULL,
@@ -141,41 +118,97 @@ def process_single_video(
         except subprocess.TimeoutExpired:
             proc.kill()
             proc.wait()
-            result["detail"] = "timeout (600s)"
-            if os.path.exists(tmp_path):
-                os.remove(tmp_path)
-            return result
-
-        if proc.returncode != 0:
-            # ffmpeg sends everything to stderr (header, info, and errors)
-            # Extract meaningful error: lines with known error patterns
-            lines = (stderr or "").strip().split("\n")
-            error_line = ""
-            for line in reversed(lines):
-                line = line.strip()
-                if not line:
-                    continue
-                # Skip ffmpeg header/info lines
-                if line.startswith(("ffmpeg version", "built with", "configuration:",
-                                    "lib", "  ", "Metadata:", "Stream #", "Input #",
-                                    "Output #", "Duration:", "Press [q]")):
-                    continue
-                error_line = line
-                break
-            if not error_line and lines:
-                error_line = lines[-1].strip()
-            result["detail"] = error_line[:200]
-            if os.path.exists(tmp_path):
-                os.remove(tmp_path)
-            return result
-        os.replace(tmp_path, video_path)
-        result["ok"] = True
-        return result
+            return False, "timeout (600s)"
+        return proc.returncode == 0, stderr or ""
     except Exception as e:
-        result["detail"] = str(e)
+        return False, str(e)
+
+
+def _build_ffmpeg_cmd(
+    video_path: str, tmp_path: str,
+    max_frames: Optional[int],
+    target_w: Optional[int], target_h: Optional[int],
+    has_audio: bool,
+) -> list:
+    """Build ffmpeg command with proper pixel format handling."""
+    filters = []
+
+    # Force pixel format first — fixes "Conversion failed!" and assertion errors
+    # with exotic input formats (yuv444p10le, gbrp, etc.)
+    filters.append("format=yuv420p")
+
+    if target_w and target_h:
+        filters.append(
+            f"scale={target_w}:{target_h}:force_original_aspect_ratio=increase,"
+            f"crop={target_w}:{target_h}"
+        )
+
+    cmd = ["ffmpeg", "-y", "-i", video_path]
+
+    if max_frames is not None:
+        cmd.extend(["-frames:v", str(max_frames)])
+
+    cmd.extend(["-vf", ",".join(filters)])
+    cmd.extend(["-c:v", "libx264", "-preset", "fast", "-crf", "18"])
+
+    if has_audio:
+        cmd.extend(["-c:a", "copy"])
+    else:
+        cmd.append("-an")
+
+    cmd.append(tmp_path)
+    return cmd
+
+
+def process_single_video(
+    video_path: str,
+    max_frames: Optional[int],
+    target_w: Optional[int],
+    target_h: Optional[int],
+) -> dict:
+    """Process a single video: cut frames and/or resize.
+
+    Strategy: try with resize+format, fallback to format-only on failure.
+    Returns dict with status info (no Rich imports — subprocess safe).
+    """
+    result = {"path": video_path, "ok": False, "detail": ""}
+    tmp_path = video_path + ".tmp" + os.path.splitext(video_path)[1]
+    has_audio = _has_audio_stream(video_path)
+
+    # Attempt 1: full processing (format + scale/crop if requested)
+    cmd = _build_ffmpeg_cmd(video_path, tmp_path, max_frames, target_w, target_h, has_audio)
+    ok, stderr = _run_ffmpeg(cmd, tmp_path)
+
+    if not ok and (target_w and target_h):
+        # Attempt 2: retry without resize (just frame cut + format fix)
         if os.path.exists(tmp_path):
             os.remove(tmp_path)
-        return result
+        cmd = _build_ffmpeg_cmd(video_path, tmp_path, max_frames, None, None, has_audio)
+        ok, stderr = _run_ffmpeg(cmd, tmp_path)
+        if ok:
+            result["detail"] = "ok (resize skipped)"
+
+    if not ok and has_audio:
+        # Attempt 3: retry without audio (some audio streams are incompatible)
+        if os.path.exists(tmp_path):
+            os.remove(tmp_path)
+        cmd = _build_ffmpeg_cmd(video_path, tmp_path, max_frames, None, None, False)
+        ok, stderr = _run_ffmpeg(cmd, tmp_path)
+        if ok:
+            result["detail"] = "ok (resize+audio skipped)"
+
+    if ok:
+        try:
+            os.replace(tmp_path, video_path)
+            result["ok"] = True
+        except Exception as e:
+            result["detail"] = f"replace failed: {e}"
+    else:
+        result["detail"] = _extract_ffmpeg_error(stderr)
+        if os.path.exists(tmp_path):
+            os.remove(tmp_path)
+
+    return result
 
 
 def preprocess_videos(
