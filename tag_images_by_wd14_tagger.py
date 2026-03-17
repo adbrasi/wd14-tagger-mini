@@ -2708,12 +2708,15 @@ def main(args):
         # Replace combined with grok output (grok caption is the final output)
         combined = grok_combined
 
-    # In video mode, remap frame paths to original video paths for output
+    # In video mode, remap frame paths to original video paths for output.
+    # Only overwrite if tags are non-empty — prevents pre-seeded empty frame
+    # path entries from clobbering real captions added during collect.
     if video_mode and frame_to_video:
         video_combined: Dict[str, List[str]] = {}
         for frame_path, tags in combined.items():
             video_path = frame_to_video.get(frame_path, frame_path)
-            video_combined[video_path] = tags
+            if tags or video_path not in video_combined:
+                video_combined[video_path] = tags
         combined = video_combined
         if grok_completed_paths:
             grok_completed_paths = [frame_to_video.get(p, p) for p in grok_completed_paths]
