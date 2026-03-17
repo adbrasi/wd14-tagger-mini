@@ -745,8 +745,11 @@ def run_validation(input_dir: str):
 # Video preprocessing
 # -------------------------
 
+CONVERTIBLE_EXTS = {".gif", ".webp", ".avi", ".mov", ".mkv", ".webm", ".flv", ".wmv"}
+
+
 def run_preprocessing(input_dir: str):
-    """Run video preprocessing: trim to max frame count via stream copy."""
+    """Run video preprocessing: normalize formats, fix audio, trim frames."""
     import shutil
 
     if shutil.which("ffmpeg") is None or shutil.which("ffprobe") is None:
@@ -760,33 +763,120 @@ def run_preprocessing(input_dir: str):
             return
         print_success("ffmpeg installed")
 
-    from video_preprocess import preprocess_videos, snap_frames
-
-    videos = []
+    # Scan all media files (videos + convertible formats)
+    all_media = []
     for root, _, files in os.walk(input_dir):
         for f in files:
-            if os.path.splitext(f)[1].lower() in VIDEO_EXTS:
-                videos.append(os.path.join(root, f))
+            ext = os.path.splitext(f)[1].lower()
+            if ext in VIDEO_EXTS or ext in CONVERTIBLE_EXTS:
+                all_media.append(os.path.join(root, f))
 
-    if not videos:
+    if not all_media:
         print_info("No videos found — skipping preprocessing")
         return
 
+    mp4_count = sum(1 for p in all_media if os.path.splitext(p)[1].lower() == ".mp4")
+    non_mp4_count = len(all_media) - mp4_count
+
     print_section("VIDEO PREPROCESSING")
-    print_info(f"Found {len(videos):,} videos")
+    print_info(f"Found {len(all_media):,} media files ({mp4_count:,} mp4, {non_mp4_count:,} other formats)")
+
+    workers = max(4, min(os.cpu_count() or 4, 64))
+
+    # ── Step 1: Normalize formats + fix mono audio ──
+    do_normalize = non_mp4_count > 0
+    if non_mp4_count > 0:
+        print_info(f"{non_mp4_count:,} files need format conversion (gif/webp/avi/etc → mp4)")
+    do_stereo = ask_yes_no("Fix mono audio → stereo?", default=True)
+
+    if do_normalize or do_stereo:
+        import importlib.util
+        _spec = importlib.util.spec_from_file_location(
+            "video_normalize",
+            os.path.join(SCRIPT_DIR, "video_normalize.py"),
+        )
+        _mod = importlib.util.module_from_spec(_spec)
+        _spec.loader.exec_module(_mod)
+
+        print_section("NORMALIZING VIDEOS")
+        progress = make_progress()
+        progress.start()
+        convert_task = None
+        stereo_task = None
+
+        def _on_norm_progress(*args):
+            nonlocal convert_task, stereo_task
+            phase = args[0]
+            if phase == "convert":
+                _, done, total = args
+                if convert_task is None and total > 0:
+                    convert_task = progress.add_task("Converting formats → mp4", total=total)
+                if convert_task is not None:
+                    progress.update(convert_task, completed=done)
+            elif phase == "stereo":
+                _, done, total = args
+                if stereo_task is None and total > 0:
+                    stereo_task = progress.add_task("Fixing mono → stereo", total=total)
+                if stereo_task is not None:
+                    progress.update(stereo_task, completed=done)
+
+        try:
+            norm_result = _mod.normalize_videos(
+                all_media, fix_stereo=do_stereo,
+                max_workers=workers, on_progress=_on_norm_progress,
+            )
+        except KeyboardInterrupt:
+            progress.stop()
+            print_warning("Normalization interrupted")
+            return
+
+        progress.stop()
+
+        if norm_result["converted"] > 0:
+            print_success(f"{norm_result['converted']:,} files converted to mp4")
+        if norm_result["convert_failed"] > 0:
+            print_warning(f"{norm_result['convert_failed']:,} conversions failed")
+        if do_stereo:
+            print_success(
+                f"Stereo: {norm_result['stereo_converted']:,} fixed, "
+                f"{norm_result['stereo_skipped']:,} already stereo, "
+                f"{norm_result['stereo_no_audio']:,} no audio"
+            )
+            if norm_result["stereo_failed"] > 0:
+                print_warning(f"{norm_result['stereo_failed']:,} stereo conversions failed")
+
+        if norm_result["details"]:
+            for d in norm_result["details"][:5]:
+                print_info(f"  {os.path.basename(d['path'])}: {d.get('detail', '')}")
+            if len(norm_result["details"]) > 5:
+                print_info(f"  ... and {len(norm_result['details']) - 5:,} more errors")
+
+    # ── Step 2: Trim frames ──
+    # Re-scan for mp4 files after normalization
+    videos = []
+    for root, _, files in os.walk(input_dir):
+        for f in files:
+            if os.path.splitext(f)[1].lower() == ".mp4":
+                videos.append(os.path.join(root, f))
+
+    if not videos:
+        print_info("No mp4 videos found after normalization")
+        return
+
+    from video_preprocess import preprocess_videos, snap_frames
+
+    print_info(f"\n{len(videos):,} mp4 videos ready for trimming")
     print_info("Method: stream copy (lossless, preserves audio)")
 
     do_cut = ask_yes_no("Trim videos to max frame count?", default=True)
     if not do_cut:
-        print_info("Nothing to do — skipping")
+        print_info("Trimming skipped — preprocessing done")
         return
 
     raw_frames = ask_int("Max frames", default=49, minimum=1)
     max_frames = snap_frames(raw_frames)
     if max_frames != raw_frames:
         print_info(f"Snapped {raw_frames} → {max_frames} (F % 8 == 1 rule)")
-
-    workers = max(4, min(os.cpu_count() or 4, 64))
 
     # Optional sample limit for testing
     test_limit = ask_int("How many videos to process? (0 = all)", default=0, minimum=0)
@@ -796,7 +886,7 @@ def run_preprocessing(input_dir: str):
         videos = videos[:test_limit]
         print_info(f"Testing with {test_limit} sample videos")
 
-    print_summary_table("Preprocessing Config", [
+    print_summary_table("Trim Config", [
         ("Videos", f"{len(videos):,}"),
         ("Frame limit", str(max_frames)),
         ("Method", "stream copy (lossless)"),
@@ -804,14 +894,14 @@ def run_preprocessing(input_dir: str):
     ])
 
     if not ask_yes_no("Trim videos? (MODIFIES ORIGINALS)", default=False):
-        print_info("Preprocessing skipped")
+        print_info("Trimming skipped")
         return
 
     print_section("TRIMMING VIDEOS")
     progress = make_progress()
     progress.start()
     scan_task = progress.add_task("Scanning videos (ffprobe)", total=len(videos))
-    trim_task = None  # created after scan, when we know the real total
+    trim_task = None
 
     def _on_progress(*args):
         nonlocal trim_task
@@ -833,7 +923,7 @@ def run_preprocessing(input_dir: str):
         )
     except KeyboardInterrupt:
         progress.stop()
-        print_warning("Preprocessing interrupted by user")
+        print_warning("Trimming interrupted by user")
         return
 
     progress.update(scan_task, completed=len(videos))
