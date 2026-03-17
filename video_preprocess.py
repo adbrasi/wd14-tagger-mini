@@ -163,7 +163,7 @@ def preprocess_videos(
         return {"total": 0, "success": 0, "failed": 0, "skipped": 0, "details": []}
 
     if max_workers is None:
-        max_workers = max(1, min(os.cpu_count() or 4, len(video_paths), 16))
+        max_workers = max(1, min(os.cpu_count() or 4, len(video_paths), 64))
 
     snapped_frames = snap_frames(max_frames) if max_frames is not None else None
 

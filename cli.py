@@ -781,7 +781,7 @@ def run_preprocessing(input_dir: str):
         print_info("Nothing to do — skipping")
         return
 
-    workers = min(os.cpu_count() or 4, 16)
+    workers = max(4, min(os.cpu_count() or 4, 64))
 
     summary_rows = [("Videos", f"{len(videos):,}")]
     if do_cut:

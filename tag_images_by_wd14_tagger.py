@@ -2218,7 +2218,7 @@ def extract_video_frames(
             frame.save(frame_path, "JPEG", quality=95)
             return vpath, frame_path, None
 
-    max_workers = min(os.cpu_count() or 4, len(video_paths), 32)
+    max_workers = min(os.cpu_count() or 4, len(video_paths), 64)
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         futures = {executor.submit(_extract_single, vp): vp for vp in video_paths}
         for future in tqdm(as_completed(futures), total=len(futures), desc="extracting frames", smoothing=0.0):
