@@ -1,6 +1,6 @@
-"""Normalize video files: convert non-mp4 formats and fix mono audio.
+"""Normalize video files: convert formats, fix mono audio, fix framerate.
 
-Two independent operations, both parallelized:
+Three independent operations, all parallelized:
 
 1. Format normalization: convert gif/webp/avi/mov/mkv/webm/flv/wmv → mp4
    Uses re-encoding with libx264 + aac. Original non-mp4 file is removed.
@@ -9,7 +9,11 @@ Two independent operations, both parallelized:
    Video stream is copied (no re-encode). Only audio is re-encoded.
    Videos already stereo or without audio are untouched.
 
-Both operations work in-place with atomic replace via temp files.
+3. Framerate normalization: re-encode video to a fixed fps (e.g. 25).
+   Videos already at the target fps are skipped (no re-encode).
+   Audio is stream-copied.
+
+All operations work in-place with atomic replace via temp files.
 """
 
 import os
@@ -198,24 +202,133 @@ def fix_mono_to_stereo(video_path: str) -> dict:
         return result
 
 
+def get_video_fps(video_path: str) -> Optional[float]:
+    """Return the video stream fps, or None on error."""
+    cmd = [
+        "ffprobe", "-v", "error",
+        "-select_streams", "v:0",
+        "-show_entries", "stream=r_frame_rate",
+        "-of", "csv=p=0",
+        video_path,
+    ]
+    try:
+        r = subprocess.run(cmd, stdin=_DEVNULL,
+                           capture_output=True, text=True, timeout=30)
+        out = r.stdout.strip()
+        if not out or "/" not in out:
+            return None
+        num, den = out.split("/")
+        d = float(den)
+        return float(num) / d if d else None
+    except Exception:
+        return None
+
+
+def _fix_fps_single(args: tuple) -> dict:
+    """Re-encode a single video to target fps. Receives (video_path, target_fps).
+
+    Returns {path, ok, detail, action} where action is one of:
+    "converted", "already_correct", "probe_failed", "error".
+    """
+    video_path, target_fps = args
+    result = {"path": video_path, "ok": True, "detail": "", "action": "already_correct"}
+
+    current_fps = get_video_fps(video_path)
+    if current_fps is None:
+        result["action"] = "probe_failed"
+        return result
+
+    # Allow 0.5 fps tolerance to avoid unnecessary re-encodes
+    if abs(current_fps - target_fps) < 0.5:
+        result["action"] = "already_correct"
+        return result
+
+    video_dir = os.path.dirname(video_path) or "."
+    ext = os.path.splitext(video_path)[1]
+
+    try:
+        fd, tmp_path = tempfile.mkstemp(suffix=ext, dir=video_dir)
+        os.close(fd)
+    except OSError as e:
+        result["ok"] = False
+        result["detail"] = f"cannot create temp file: {e}"
+        result["action"] = "error"
+        return result
+
+    cmd = [
+        "ffmpeg", "-y",
+        "-i", video_path,
+        "-r", str(target_fps),
+        "-c:v", "libx264", "-preset", "fast", "-crf", "18",
+        "-c:a", "copy",
+        "-movflags", "+faststart",
+        tmp_path,
+    ]
+
+    try:
+        proc = subprocess.Popen(
+            cmd, stdin=_DEVNULL,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        )
+        try:
+            _, stderr = proc.communicate(timeout=600)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait()
+            result["ok"] = False
+            result["detail"] = "timeout (600s)"
+            result["action"] = "error"
+            _remove(tmp_path)
+            return result
+
+        if proc.returncode != 0:
+            result["ok"] = False
+            result["detail"] = _last_error(stderr)
+            result["action"] = "error"
+            _remove(tmp_path)
+            return result
+
+        if not os.path.exists(tmp_path) or os.path.getsize(tmp_path) == 0:
+            result["ok"] = False
+            result["detail"] = "output empty"
+            result["action"] = "error"
+            _remove(tmp_path)
+            return result
+
+        os.replace(tmp_path, video_path)
+        result["action"] = "converted"
+        return result
+
+    except Exception as e:
+        result["ok"] = False
+        result["detail"] = str(e)
+        result["action"] = "error"
+        _remove(tmp_path)
+        return result
+
+
 def normalize_videos(
     file_paths: list,
     fix_stereo: bool = True,
+    target_fps: Optional[float] = None,
     max_workers: int = None,
     on_progress=None,
 ) -> dict:
-    """Run format conversion and optional mono→stereo fix in parallel.
+    """Run format conversion, optional mono→stereo fix, and optional fps normalization.
 
     Phase 1: Convert non-mp4 files to mp4.
     Phase 2: Fix mono→stereo (if enabled).
+    Phase 3: Normalize framerate (if target_fps is set).
 
     Args:
         file_paths: all media files (videos + convertible formats).
         fix_stereo: whether to run mono→stereo pass.
+        target_fps: if set, re-encode videos to this fps. None = skip.
         max_workers: parallel workers.
         on_progress: callback with signature:
             ("convert", done, total) for Phase 1
             ("stereo", done, total) for Phase 2
+            ("fps", done, total) for Phase 3
 
     Returns dict with stats.
     """
@@ -226,6 +339,7 @@ def normalize_videos(
         "converted": 0, "convert_failed": 0, "convert_skipped": 0,
         "stereo_converted": 0, "stereo_skipped": 0, "stereo_no_audio": 0,
         "stereo_failed": 0,
+        "fps_converted": 0, "fps_skipped": 0, "fps_failed": 0,
         "details": [],
     }
 
@@ -287,6 +401,38 @@ def normalize_videos(
                     stats["details"].append(res)
                 if on_progress:
                     on_progress("stereo", done, len(converted_paths))
+        except KeyboardInterrupt:
+            interrupted = True
+            raise
+        finally:
+            executor.shutdown(wait=not interrupted, cancel_futures=interrupted)
+
+    # Phase 3: Framerate normalization
+    if target_fps and converted_paths:
+        if on_progress:
+            on_progress("fps", 0, len(converted_paths))
+
+        executor = ProcessPoolExecutor(max_workers=max_workers)
+        interrupted = False
+        try:
+            futures = {
+                executor.submit(_fix_fps_single, (p, target_fps)): p
+                for p in converted_paths
+            }
+            done = 0
+            for f in as_completed(futures):
+                res = f.result()
+                done += 1
+                action = res["action"]
+                if action == "converted":
+                    stats["fps_converted"] += 1
+                elif action in ("already_correct", "probe_failed"):
+                    stats["fps_skipped"] += 1
+                else:
+                    stats["fps_failed"] += 1
+                    stats["details"].append(res)
+                if on_progress:
+                    on_progress("fps", done, len(converted_paths))
         except KeyboardInterrupt:
             interrupted = True
             raise

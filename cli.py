@@ -788,8 +788,12 @@ def run_preprocessing(input_dir: str):
     if non_mp4_count > 0:
         print_info(f"{non_mp4_count:,} files need format conversion (gif/webp/avi/etc → mp4)")
     do_stereo = ask_yes_no("Fix mono audio → stereo?", default=True)
+    do_fps = ask_yes_no("Normalize framerate (fixed fps for all videos)?", default=False)
+    target_fps = None
+    if do_fps:
+        target_fps = float(ask_int("Target fps", default=25, minimum=1))
 
-    if do_normalize or do_stereo:
+    if do_normalize or do_stereo or do_fps:
         import importlib.util
         _spec = importlib.util.spec_from_file_location(
             "video_normalize",
@@ -803,9 +807,10 @@ def run_preprocessing(input_dir: str):
         progress.start()
         convert_task = None
         stereo_task = None
+        fps_task = None
 
         def _on_norm_progress(*args):
-            nonlocal convert_task, stereo_task
+            nonlocal convert_task, stereo_task, fps_task
             phase = args[0]
             if phase == "convert":
                 _, done, total = args
@@ -819,10 +824,16 @@ def run_preprocessing(input_dir: str):
                     stereo_task = progress.add_task("Fixing mono → stereo", total=total)
                 if stereo_task is not None:
                     progress.update(stereo_task, completed=done)
+            elif phase == "fps":
+                _, done, total = args
+                if fps_task is None and total > 0:
+                    fps_task = progress.add_task(f"Normalizing fps → {target_fps}", total=total)
+                if fps_task is not None:
+                    progress.update(fps_task, completed=done)
 
         try:
             norm_result = _mod.normalize_videos(
-                all_media, fix_stereo=do_stereo,
+                all_media, fix_stereo=do_stereo, target_fps=target_fps,
                 max_workers=workers, on_progress=_on_norm_progress,
             )
         except KeyboardInterrupt:
@@ -844,6 +855,13 @@ def run_preprocessing(input_dir: str):
             )
             if norm_result["stereo_failed"] > 0:
                 print_warning(f"{norm_result['stereo_failed']:,} stereo conversions failed")
+        if do_fps:
+            print_success(
+                f"FPS: {norm_result['fps_converted']:,} re-encoded to {target_fps} fps, "
+                f"{norm_result['fps_skipped']:,} already correct"
+            )
+            if norm_result["fps_failed"] > 0:
+                print_warning(f"{norm_result['fps_failed']:,} fps conversions failed")
 
         if norm_result["details"]:
             for d in norm_result["details"][:5]:
