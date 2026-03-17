@@ -147,6 +147,7 @@ def preprocess_videos(
     max_frames: Optional[int] = None,
     resize: bool = False,
     max_workers: int = None,
+    on_progress=None,
 ) -> dict:
     """Preprocess multiple videos in parallel.
 
@@ -166,35 +167,41 @@ def preprocess_videos(
 
     snapped_frames = snap_frames(max_frames) if max_frames is not None else None
 
-    # Pre-scan videos for dimensions and frame counts
-    targets = {}  # path -> (target_w, target_h, needs_work)
+    # Pre-scan videos for dimensions and frame counts (parallel ffprobe)
+    need_probe = resize or (snapped_frames is not None)
+    infos = {}  # vp -> info_dict_or_None
+    if need_probe:
+        with ProcessPoolExecutor(max_workers=max_workers) as probe_pool:
+            probe_futures = {probe_pool.submit(get_video_info, vp): vp for vp in video_paths}
+            for f in as_completed(probe_futures):
+                vp = probe_futures[f]
+                infos[vp] = f.result()
+                if on_progress:
+                    on_progress(0, 0, len(video_paths))  # signal scan progress
+
+    targets = {}
     probe_failures = 0
     for vp in video_paths:
         tw, th = None, None
         needs_cut = snapped_frames is not None
         probe_ok = True
-
-        info = get_video_info(vp) if (resize or snapped_frames) else None
+        info = infos.get(vp)
 
         if resize:
             if info and info["width"] and info["height"]:
                 tw = snap_dimension(info["width"])
                 th = snap_dimension(info["height"])
-                # Skip resize if already aligned
                 if tw == info["width"] and th == info["height"]:
                     tw, th = None, None
             elif info is None:
                 probe_ok = False
                 probe_failures += 1
 
-        # Skip frame cut if video already has <= snapped_frames
         if snapped_frames is not None and info and info.get("frames", 0) > 0:
             if info["frames"] <= snapped_frames:
                 needs_cut = False
 
         needs_work = needs_cut or (tw is not None)
-
-        # If probe failed but we need to cut, still submit (ffmpeg handles it)
         if not probe_ok and snapped_frames:
             needs_work = True
 
@@ -224,5 +231,7 @@ def preprocess_videos(
                 stats["success"] += 1
             else:
                 stats["failed"] += 1
+            if on_progress:
+                on_progress(stats["success"], stats["failed"], len(to_process))
 
     return stats

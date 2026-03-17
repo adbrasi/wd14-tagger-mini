@@ -795,7 +795,31 @@ def run_preprocessing(input_dir: str):
         return
 
     print_section("PROCESSING VIDEOS")
-    result = preprocess_videos(videos, max_frames=max_frames, resize=do_resize, max_workers=workers)
+    progress = make_progress()
+    progress.start()
+    scan_task = progress.add_task("Scanning videos (ffprobe)", total=len(videos))
+    proc_task = progress.add_task("Processing videos (ffmpeg)", total=len(videos))
+    scan_done = 0
+
+    def _on_progress(success, failed, total):
+        nonlocal scan_done
+        done = success + failed
+        if done == 0 and scan_done < len(videos):
+            # Still in scan phase
+            scan_done += 1
+            progress.update(scan_task, completed=scan_done)
+        else:
+            # Processing phase
+            progress.update(scan_task, completed=len(videos))
+            progress.update(proc_task, completed=done)
+
+    result = preprocess_videos(
+        videos, max_frames=max_frames, resize=do_resize, max_workers=workers,
+        on_progress=_on_progress,
+    )
+    progress.update(scan_task, completed=len(videos))
+    progress.update(proc_task, completed=len(videos))
+    progress.stop()
     print_success(
         f"Done: {result['success']:,} ok, "
         f"{result['failed']:,} failed, "
