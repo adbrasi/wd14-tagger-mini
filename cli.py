@@ -649,16 +649,24 @@ def resolve_input_source(python: str) -> str:
     target_dir = ask_input("Target dataset directory (all files will be merged here)", default_target)
     os.makedirs(target_dir, exist_ok=True)
 
+    # If target dir already has files, data source is optional
+    existing_files = any(
+        f for _, _, files in os.walk(target_dir) for f in files
+    ) if os.path.isdir(target_dir) else False
+
     source_num = 0
     while True:
         is_first = source_num == 0
         if is_first:
-            raw = ask_input("Data source (local path, MEGA link, or HuggingFace URL/ID)")
+            if existing_files:
+                raw = ask_input("Data source (Enter to skip — files already in target dir)")
+            else:
+                raw = ask_input("Data source (local path, MEGA link, or HuggingFace URL/ID)")
         else:
             raw = ask_input("Another data source (or press Enter to continue)")
 
         if not raw:
-            if is_first:
+            if is_first and not existing_files:
                 print_error("At least one data source is required")
                 continue
             break
@@ -871,9 +879,26 @@ def run_hf_upload(input_dir: str, python: str):
             print_error("No HF token provided")
             return
 
-    repo_name = ask_input("Repository name (user/dataset)")
-    if not repo_name:
-        print_error("No repository name provided")
+    # Try to get HF username for default repo name
+    default_repo = ""
+    try:
+        r = subprocess.run(
+            [python, "-c",
+             "from huggingface_hub import HfApi; import os; "
+             "api = HfApi(token=os.environ.get('HF_TOKEN','')); "
+             "print(api.whoami()['name'])"],
+            capture_output=True, text=True, timeout=10,
+            env={**os.environ, "HF_TOKEN": hf_token},
+        )
+        if r.returncode == 0 and r.stdout.strip():
+            folder_name = os.path.basename(os.path.abspath(input_dir))
+            default_repo = f"{r.stdout.strip()}/{folder_name}"
+    except Exception:
+        pass
+
+    repo_name = ask_input("Repository name (user/dataset)", default=default_repo)
+    if not repo_name or "/" not in repo_name:
+        print_error("Repository name must be in format user/dataset")
         return
 
     private = ask_yes_no("Private repository?", default=True)
@@ -1420,6 +1445,10 @@ def main():
         if tag_ok is False and workflow == 3:
             print_info("Pipeline stopped — tagging was aborted")
             return
+        # After tagging, offer upload if not already in full pipeline
+        if workflow == 2 and tag_ok is not False:
+            if ask_yes_no("Upload dataset to HuggingFace?", default=False):
+                run_hf_upload(input_dir, python)
 
     if workflow in (3, 4):
         run_hf_upload(input_dir, python)
