@@ -918,15 +918,26 @@ def run_hf_upload(input_dir: str, python: str):
                                   os.path.basename(input_dir) + "_webdataset")
         print_info(f"Packing video+txt pairs into TAR shards → {tar_output}")
 
-        from build_webdataset_tars import build_tars
-        from pathlib import Path
-
-        stats = build_tars(
-            root=Path(input_dir),
-            output_dir=Path(tar_output),
-            shard_size_gb=1.0,
-            split="train",
+        import importlib.util
+        _spec = importlib.util.spec_from_file_location(
+            "build_webdataset_tars",
+            os.path.join(SCRIPT_DIR, "build_webdataset_tars.py"),
         )
+        _mod = importlib.util.module_from_spec(_spec)
+        _spec.loader.exec_module(_mod)
+
+        from pathlib import Path
+        try:
+            stats = _mod.build_tars(
+                root=Path(input_dir),
+                output_dir=Path(tar_output),
+                shard_size_gb=1.0,
+                split="train",
+            )
+        except KeyboardInterrupt:
+            print_warning("\nTAR building interrupted")
+            return
+
         print_success(
             f"{stats['shards_created']} shards created, "
             f"{stats['total_pairs']} samples, "

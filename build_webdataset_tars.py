@@ -5,7 +5,7 @@ Creates TAR archives in the standard WebDataset format:
   train-0000.tar, train-0001.tar, ...
 
 Each TAR contains paired files with matching numeric keys:
-  000.mp4 + 000.txt, 001.mp4 + 001.txt, ...
+  000000.mp4 + 000000.txt, 000001.mp4 + 000001.txt, ...
 
 Optimized for HuggingFace Hub streaming with load_dataset("webdataset").
 """
@@ -25,7 +25,7 @@ DEFAULT_SPLIT = "train"
 def find_video_txt_pairs(root: Path) -> List[Tuple[Path, Optional[Path]]]:
     """Find all video files and their matching .txt caption files.
 
-    Returns list of (video_path, txt_path_or_None) sorted by name.
+    Returns list of (video_path, txt_path_or_None) sorted by full path.
     """
     pairs = []
     for dirpath, _, filenames in os.walk(root):
@@ -35,7 +35,7 @@ def find_video_txt_pairs(root: Path) -> List[Tuple[Path, Optional[Path]]]:
             if p.suffix.lower() in VIDEO_EXTS:
                 txt = p.with_suffix(".txt")
                 pairs.append((p, txt if txt.exists() else None))
-    pairs.sort(key=lambda x: x[0].name)
+    pairs.sort(key=lambda x: str(x[0]))
     return pairs
 
 
@@ -78,52 +78,61 @@ def build_tars(
     tar: Optional[tarfile.TarFile] = None
     tar_path: Optional[Path] = None
 
-    def open_new_shard():
-        nonlocal tar, tar_path, shard_idx, current_bytes, sample_idx
+    def _close_current_shard():
+        """Close current shard and record its stats."""
+        nonlocal tar, current_bytes
         if tar is not None:
             tar.close()
-        tar_path = output_dir / f"{split}-{shard_idx:04d}.tar"
-        tar = tarfile.open(tar_path, "w")
-        current_bytes = 0
-        sample_idx = 0
-        shard_idx += 1
-
-    open_new_shard()
-
-    for video_path, txt_path in pairs:
-        video_size = video_path.stat().st_size
-        txt_size = txt_path.stat().st_size if txt_path else 0
-        pair_size = video_size + txt_size
-
-        # Start new shard if current one would exceed target
-        if current_bytes > 0 and current_bytes + pair_size > max_shard_bytes:
-            tar.close()
+            tar = None
             stats["shard_paths"].append(str(tar_path))
             stats["shards_created"] += 1
             stats["total_bytes"] += current_bytes
-            open_new_shard()
+            current_bytes = 0
 
-        key = f"{sample_idx:06d}"
-        video_ext = video_path.suffix.lower()
+    def _open_new_shard():
+        """Open a fresh TAR shard."""
+        nonlocal tar, tar_path, shard_idx, sample_idx
+        tar_path = output_dir / f"{split}-{shard_idx:04d}.tar"
+        tar = tarfile.open(tar_path, "w")
+        sample_idx = 0
+        shard_idx += 1
 
-        # Add video
-        tar.add(str(video_path), arcname=f"{key}{video_ext}")
+    try:
+        _open_new_shard()
 
-        # Add txt caption
-        if txt_path:
-            tar.add(str(txt_path), arcname=f"{key}.txt")
-        else:
-            stats["missing_txt"] += 1
+        for video_path, txt_path in pairs:
+            video_size = video_path.stat().st_size
+            txt_size = txt_path.stat().st_size if txt_path else 0
+            pair_size = video_size + txt_size
 
-        current_bytes += pair_size
-        sample_idx += 1
+            # Start new shard if current one would exceed target
+            if current_bytes > 0 and current_bytes + pair_size > max_shard_bytes:
+                _close_current_shard()
+                _open_new_shard()
 
-    # Close final shard
-    if tar is not None:
-        tar.close()
-        stats["shard_paths"].append(str(tar_path))
-        stats["shards_created"] += 1
-        stats["total_bytes"] += current_bytes
+            key = f"{sample_idx:06d}"
+            video_ext = video_path.suffix.lower()
+
+            # Add video
+            tar.add(str(video_path), arcname=f"{key}{video_ext}")
+
+            # Add txt caption
+            if txt_path:
+                tar.add(str(txt_path), arcname=f"{key}.txt")
+            else:
+                stats["missing_txt"] += 1
+
+            current_bytes += pair_size
+            sample_idx += 1
+
+        # Close final shard
+        _close_current_shard()
+
+    finally:
+        # Safety: ensure TAR handle is always closed
+        if tar is not None:
+            tar.close()
+            tar = None
 
     # Write metadata for dataset loading
     _write_metadata(output_dir, split, stats)
@@ -139,6 +148,7 @@ def _write_metadata(output_dir: Path, split: str, stats: dict):
         "total_samples": stats["total_pairs"],
         "total_shards": stats["shards_created"],
         "total_bytes": stats["total_bytes"],
+        "missing_captions": stats["missing_txt"],
     }
     info_path = output_dir / "dataset_info.json"
     with open(info_path, "w") as f:
