@@ -1219,132 +1219,133 @@ def run_tagging(input_dir: str, python: str, media_counts: dict):
         return False
 
     # --- Dry-run: test with a single sample first ---
-    print_section("TEST RUN (1 sample)")
-    print_info("Running pipeline on a single file to verify everything works...")
+    # Skip test run for collect/status actions (nothing to test locally)
+    skip_test = (grok_provider == "xai-batch" and has_grok
+                 and xai_batch_action in ("collect", "status"))
+    if skip_test:
+        print_info("Skipping test run (collect/status — no local test needed)")
 
-    # Find one sample file to test with
-    import tempfile
-    sample_file = None
-    test_exts = VIDEO_EXTS if is_video else IMAGE_EXTS
-    for root, _, files in os.walk(input_dir):
-        for f in files:
-            if os.path.splitext(f)[1].lower() in test_exts:
-                sample_file = os.path.join(root, f)
+    if not skip_test:
+        print_section("TEST RUN (1 sample)")
+        print_info("Running pipeline on a single file to verify everything works...")
+
+        # Find one sample file to test with
+        import tempfile
+        sample_file = None
+        test_exts = VIDEO_EXTS if is_video else IMAGE_EXTS
+        for root, _, files in os.walk(input_dir):
+            for f in files:
+                if os.path.splitext(f)[1].lower() in test_exts:
+                    sample_file = os.path.join(root, f)
+                    break
+            if sample_file:
                 break
-        if sample_file:
-            break
 
-    if not sample_file:
-        print_warning("No sample file found — skipping test run")
-    else:
-        print_info(f"Test file: {os.path.basename(sample_file)}")
+        if not sample_file:
+            print_warning("No sample file found — skipping test run")
+        else:
+            print_info(f"Test file: {os.path.basename(sample_file)}")
 
-        # Create temp dir with just that one file (symlinked)
-        with tempfile.TemporaryDirectory(prefix="araknideo_test_") as test_dir:
-            test_link = os.path.join(test_dir, os.path.basename(sample_file))
-            os.symlink(os.path.abspath(sample_file), test_link)
+            # Create temp dir with just that one file (symlinked)
+            with tempfile.TemporaryDirectory(prefix="araknideo_test_") as test_dir:
+                test_link = os.path.join(test_dir, os.path.basename(sample_file))
+                os.symlink(os.path.abspath(sample_file), test_link)
 
-            # Also copy the .txt if it exists (for context)
-            txt_src = os.path.splitext(sample_file)[0] + ".txt"
-            if os.path.exists(txt_src):
-                txt_link = os.path.join(test_dir, os.path.basename(txt_src))
-                os.symlink(os.path.abspath(txt_src), txt_link)
+                # Also copy the .txt if it exists (for context)
+                txt_src = os.path.splitext(sample_file)[0] + ".txt"
+                if os.path.exists(txt_src):
+                    txt_link = os.path.join(test_dir, os.path.basename(txt_src))
+                    os.symlink(os.path.abspath(txt_src), txt_link)
 
-            # Build test command — same as full but on the test dir, no recursive, force
-            test_cmd = list(cmd)
-            # Replace input_dir with test_dir
-            test_cmd[2] = test_dir
-            # Override flags for single-file test
-            if "--recursive" in test_cmd:
-                test_cmd.remove("--recursive")
-            if "--force" not in test_cmd:
-                test_cmd.append("--force")
-            # xAI batch: test uses the same provider — submits 1 request,
-            # waits for it, then collects the result automatically
-            if grok_provider == "xai-batch" and has_grok:
-                # Use a separate state file for the test
-                test_state = os.path.join(test_dir, ".xai_test_state.json")
-                for i, arg in enumerate(test_cmd):
-                    if arg == "--xai_batch_state_file":
-                        test_cmd[i + 1] = test_state
+                # Build test command — same as full but on the test dir, no recursive, force
+                test_cmd = list(cmd)
+                test_cmd[2] = test_dir
+                if "--recursive" in test_cmd:
+                    test_cmd.remove("--recursive")
+                if "--force" not in test_cmd:
+                    test_cmd.append("--force")
+                # xAI batch: use a separate state file for the test
+                if grok_provider == "xai-batch" and has_grok:
+                    test_state = os.path.join(test_dir, ".xai_test_state.json")
+                    for i, arg in enumerate(test_cmd):
+                        if arg == "--xai_batch_state_file":
+                            test_cmd[i + 1] = test_state
 
-            test_env = os.environ.copy()
-            if api_key:
-                test_env["OPENROUTER_API_KEY"] = api_key
-            if xai_api_key:
-                test_env["XAI_API_KEY"] = xai_api_key
-            if hf_token:
-                test_env["HF_TOKEN"] = hf_token
+                test_env = os.environ.copy()
+                if api_key:
+                    test_env["OPENROUTER_API_KEY"] = api_key
+                if xai_api_key:
+                    test_env["XAI_API_KEY"] = xai_api_key
+                if hf_token:
+                    test_env["HF_TOKEN"] = hf_token
 
-            test_proc = subprocess.Popen(test_cmd, env=test_env)
-            try:
-                test_proc.wait()
-            except KeyboardInterrupt:
-                print_warning("\nInterrupted — killing test process...")
-                test_proc.kill()
-                test_proc.wait()
-                return False
-            test_result = test_proc
-
-            # For xAI batch: wait for the single request then collect
-            if grok_provider == "xai-batch" and has_grok and test_result.returncode == 0:
-                test_state = None
-                for i, arg in enumerate(test_cmd):
-                    if arg == "--xai_batch_state_file" and i + 1 < len(test_cmd):
-                        test_state = test_cmd[i + 1]
-                        break
-                if test_state and os.path.exists(test_state):
-                    print_info("Waiting for xAI batch to process 1 test request...")
-                    with open(test_state, "r", encoding="utf-8") as sf:
-                        st = json.load(sf)
-                    bid = st.get("batch_id", "")
-                    xkey = xai_api_key or check_env_key("XAI_API_KEY")
-                    if bid and xkey:
-                        # Poll until done (should be fast for 1 request)
-                        last_total = 0
-                        for _ in range(60):  # max 5 min
-                            time.sleep(5)
-                            try:
-                                data = fetch_xai_batch_status(bid, xkey)
-                                last_total = int(data.get("state", {}).get("num_requests", 0) or 0)
-                                pending = int(data.get("state", {}).get("num_pending", 0) or 0)
-                                if pending <= 0 and last_total > 0:
-                                    break
-                            except Exception:
-                                pass
-                        if last_total == 0:
-                            print_warning("xAI batch returned 0 requests — test submission may have failed")
-                        else:
-                            # Collect the result
-                            collect_cmd = list(test_cmd)
-                            for i, arg in enumerate(collect_cmd):
-                                if arg == "--xai_batch_action":
-                                    collect_cmd[i + 1] = "collect"
-                            subprocess.run(collect_cmd, env=test_env)
-
-            if test_result.returncode != 0:
-                print_error("Test run FAILED")
-                if not ask_yes_no("Continue with full pipeline anyway?", default=False):
-                    print_info("Aborted")
+                test_proc = subprocess.Popen(test_cmd, env=test_env)
+                try:
+                    test_proc.wait()
+                except KeyboardInterrupt:
+                    print_warning("\nInterrupted — killing test process...")
+                    test_proc.kill()
+                    test_proc.wait()
                     return False
-            else:
-                # Show the generated caption
-                test_txt = os.path.splitext(test_link)[0] + ".txt"
-                if os.path.exists(test_txt):
-                    with open(test_txt, "r", encoding="utf-8") as f:
-                        caption = f.read().strip()
-                    print_success("Test caption generated:")
-                    console.print(f"\n[dim]{'─' * 50}[/]")
-                    console.print(f"[italic]{caption[:500]}[/]")
-                    if len(caption) > 500:
-                        console.print(f"[dim]... ({len(caption)} chars total)[/]")
-                    console.print(f"[dim]{'─' * 50}[/]\n")
+                test_result = test_proc
+
+                # For xAI batch: wait for the single request then collect
+                if grok_provider == "xai-batch" and has_grok and test_result.returncode == 0:
+                    test_state = None
+                    for i, arg in enumerate(test_cmd):
+                        if arg == "--xai_batch_state_file" and i + 1 < len(test_cmd):
+                            test_state = test_cmd[i + 1]
+                            break
+                    if test_state and os.path.exists(test_state):
+                        print_info("Waiting for xAI batch to process 1 test request...")
+                        with open(test_state, "r", encoding="utf-8") as sf:
+                            st = json.load(sf)
+                        bid = st.get("batch_id", "")
+                        xkey = xai_api_key or check_env_key("XAI_API_KEY")
+                        if bid and xkey:
+                            last_total = 0
+                            for _ in range(60):  # max 5 min
+                                time.sleep(5)
+                                try:
+                                    data = fetch_xai_batch_status(bid, xkey)
+                                    last_total = int(data.get("state", {}).get("num_requests", 0) or 0)
+                                    pending = int(data.get("state", {}).get("num_pending", 0) or 0)
+                                    if pending <= 0 and last_total > 0:
+                                        break
+                                except Exception:
+                                    pass
+                            if last_total == 0:
+                                print_warning("xAI batch returned 0 requests — test submission may have failed")
+                            else:
+                                collect_cmd = list(test_cmd)
+                                for i, arg in enumerate(collect_cmd):
+                                    if arg == "--xai_batch_action":
+                                        collect_cmd[i + 1] = "collect"
+                                subprocess.run(collect_cmd, env=test_env)
+
+                if test_result.returncode != 0:
+                    print_error("Test run FAILED")
+                    if not ask_yes_no("Continue with full pipeline anyway?", default=False):
+                        print_info("Aborted")
+                        return False
                 else:
-                    print_success("Test run completed (no caption file — may be tags-only mode)")
+                    # Show the generated caption
+                    test_txt = os.path.splitext(test_link)[0] + ".txt"
+                    if os.path.exists(test_txt):
+                        with open(test_txt, "r", encoding="utf-8") as f:
+                            caption = f.read().strip()
+                        print_success("Test caption generated:")
+                        console.print(f"\n[dim]{'─' * 50}[/]")
+                        console.print(f"[italic]{caption[:500]}[/]")
+                        if len(caption) > 500:
+                            console.print(f"[dim]... ({len(caption)} chars total)[/]")
+                        console.print(f"[dim]{'─' * 50}[/]\n")
+                    else:
+                        print_success("Test run completed (no caption file — may be tags-only mode)")
 
-                if not ask_yes_no("Looks good? Proceed with full dataset?", default=True):
-                    print_info("Aborted")
-                    return False
+                    if not ask_yes_no("Looks good? Proceed with full dataset?", default=True):
+                        print_info("Aborted")
+                        return False
 
     # Run full pipeline
     print_section("STARTING PIPELINE")
