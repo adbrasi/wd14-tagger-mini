@@ -907,19 +907,25 @@ def run_hf_upload(input_dir: str, python: str):
     env["HF_TOKEN"] = hf_token
     env["HF_XET_HIGH_PERFORMANCE"] = "1"
 
+    proc = subprocess.Popen(
+        [python, "-c", upload_script, repo_name, input_dir,
+         "true" if private else "false", str(num_workers)],
+        env=env,
+    )
     try:
-        result = subprocess.run(
-            [python, "-c", upload_script, repo_name, input_dir,
-             "true" if private else "false", str(num_workers)],
-            env=env,
-        )
-        if result.returncode == 0:
-            print_success(f"Uploaded to https://huggingface.co/datasets/{repo_name}")
-        else:
-            print_error("Upload failed — check logs above")
-            print_info("Re-run the same command to resume (upload_large_folder is resumable)")
+        proc.wait()
     except KeyboardInterrupt:
-        print_warning("Upload interrupted. Re-run to resume automatically.")
+        print_warning("\nInterrupted — killing upload process...")
+        proc.kill()
+        proc.wait()
+        print_info("Re-run to resume automatically (upload_large_folder is resumable)")
+        return
+
+    if proc.returncode == 0:
+        print_success(f"Uploaded to https://huggingface.co/datasets/{repo_name}")
+    else:
+        print_error("Upload failed — check logs above")
+        print_info("Re-run the same command to resume (upload_large_folder is resumable)")
 
 
 # -------------------------
@@ -1245,7 +1251,15 @@ def run_tagging(input_dir: str, python: str, media_counts: dict):
             if hf_token:
                 test_env["HF_TOKEN"] = hf_token
 
-            test_result = subprocess.run(test_cmd, env=test_env)
+            test_proc = subprocess.Popen(test_cmd, env=test_env)
+            try:
+                test_proc.wait()
+            except KeyboardInterrupt:
+                print_warning("\nInterrupted — killing test process...")
+                test_proc.kill()
+                test_proc.wait()
+                return False
+            test_result = test_proc
 
             # For xAI batch: wait for the single request then collect
             if grok_provider == "xai-batch" and has_grok and test_result.returncode == 0:
@@ -1318,32 +1332,36 @@ def run_tagging(input_dir: str, python: str, media_counts: dict):
     if hf_token:
         env["HF_TOKEN"] = hf_token
 
+    proc = subprocess.Popen(cmd, env=env)
     try:
-        result = subprocess.run(cmd, env=env)
-        if result.returncode == 0:
-            if xai_batch_action == "collect":
-                print_success("COLLECT DONE! .txt files written next to your images.")
-            else:
-                print_success("DONE! Check your input directory for .txt files.")
-
-            if has_grok and grok_provider == "xai-batch" and monitor_xai and xai_batch_action in ("submit", "status"):
-                try:
-                    monitor_xai_batch(
-                        state_file=xai_batch_state_file,
-                        api_key=xai_api_key or env.get("XAI_API_KEY", ""),
-                        base_url=XAI_API_BASE_URL,
-                        poll_seconds=max(3, int(monitor_poll_seconds)),
-                    )
-                except KeyboardInterrupt:
-                    print_warning("Monitoring stopped by user. Batch keeps running on xAI.")
-                except Exception as e:
-                    print_error(f"Monitor error: {e}")
-            return True
-        else:
-            print_error(f"Process exited with code {result.returncode}")
-            return False
+        proc.wait()
     except KeyboardInterrupt:
-        print_warning("Interrupted by user")
+        print_warning("\nInterrupted — killing tagger process...")
+        proc.kill()
+        proc.wait()
+        return False
+
+    if proc.returncode == 0:
+        if xai_batch_action == "collect":
+            print_success("COLLECT DONE! .txt files written next to your images.")
+        else:
+            print_success("DONE! Check your input directory for .txt files.")
+
+        if has_grok and grok_provider == "xai-batch" and monitor_xai and xai_batch_action in ("submit", "status"):
+            try:
+                monitor_xai_batch(
+                    state_file=xai_batch_state_file,
+                    api_key=xai_api_key or env.get("XAI_API_KEY", ""),
+                    base_url=XAI_API_BASE_URL,
+                    poll_seconds=max(3, int(monitor_poll_seconds)),
+                )
+            except KeyboardInterrupt:
+                print_warning("Monitoring stopped by user. Batch keeps running on xAI.")
+            except Exception as e:
+                print_error(f"Monitor error: {e}")
+        return True
+    else:
+        print_error(f"Process exited with code {proc.returncode}")
         return False
 
 
@@ -1398,7 +1416,10 @@ def main():
         run_preprocessing(input_dir)
 
     if workflow in (2, 3):
-        run_tagging(input_dir, python, media_counts)
+        tag_ok = run_tagging(input_dir, python, media_counts)
+        if tag_ok is False and workflow == 3:
+            print_info("Pipeline stopped — tagging was aborted")
+            return
 
     if workflow in (3, 4):
         run_hf_upload(input_dir, python)
