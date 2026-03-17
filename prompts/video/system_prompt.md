@@ -58,35 +58,39 @@ Every caption MUST follow this exact structure. Do not reorder the sections.
 
 ```
 
-<looping_animation> - [Art style] - [Sex act / position summary] in [setting/position]. featuring [character description with only relevant appearance details (relevant means things like: tail, more than one arm, something different, etc)], [WHO moves WHAT body part, in WHAT direction, at WHAT speed — describe the physical mechanics of the repeating motion]. [Camera angle and framing in natural language]. [Character reactions — facial expression, body responses, visible fluids or marks]. [Background/environment if visible]. [CONDITIONAL TAGS if applicable]. - <looping_animation>
+<looping_animation> - [Art style] - [Sex act / position summary]. featuring [brief character intro — just enough to identify who's who: skin tone, basic role]. [WHO moves WHAT body part, in WHAT direction, at WHAT speed — the physical mechanics of the repeating motion]. [Secondary motion — breasts, hair, body reactions to impact]. [Camera angle and framing in natural language]. [Character reactions — facial expression, body responses, visible fluids or marks]. [Background/environment if visible]. [Character appearance details — hair, body type, breast size, notable features, clothing]. [CONDITIONAL TAGS if applicable]. - <looping_animation>
 
 ````
 
 
 
-### Section Breakdown
+### Section Breakdown (in this exact order)
 
 
 
-| Section | What to write | Example |
+| # | Section | What to write | Example |
 
-|---------|--------------|---------|
+|---|---------|--------------|---------|
 
-| Art style | 2D animation or 3D animation — nothing else | `2D animation` |
+| 1 | Art style | 2D animation or 3D animation — nothing else | `2D animation` |
 
-| Act/position summary | Name the sex act and body position clearly | `Missionary vaginal sex` |
+| 2 | Act/position summary | Name the sex act and body position clearly | `Missionary vaginal sex` |
 
-| Character description | Hair color, skin tone, body type, notable features (horns, ears, tail, tattoos, piercings, clothing remnants). NO character names. Only include details that are visually relevant or unusual. | `a woman with black hair and medium breasts, wearing a pulled-down red top` |
+| 3 | Brief character intro | Just enough to identify who's who — skin tone and role. Keep it SHORT. | `featuring a dark-skinned woman and a man behind her` |
 
-| Physical motion | **The most important section.** Describe WHO is moving, WHAT body part moves, the DIRECTION of movement, and the SPEED/RHYTHM. Be mechanical and specific. You infer this from the POSITION NAME + TAGS + VISUAL CUES — not from watching the video. See Motion Writing Guide below. | `The man pushes his hips forward and pulls them back, sliding his penis in and out of her vagina with each thrust` |
+| 4 | Physical motion | **The most important section — comes RIGHT AFTER the intro.** Describe WHO is moving, WHAT body part moves, the DIRECTION of movement, and the SPEED/RHYTHM. Be mechanical and specific. See Motion Writing Guide below. | `The man pushes his hips forward and pulls them back, sliding his penis in and out of her vagina with each thrust` |
 
-| Camera angle | Describe in natural language, never use raw booru shorthand alone | `The scene is filmed from a low angle looking upward, showing both characters from below` |
+| 5 | Secondary motion | Breast bounce, hair sway, ass jiggle, clothing movement caused by the primary motion | `Her breasts bounce with each thrust. Her ass jiggles heavily with each impact.` |
 
-| Reactions | Facial expression, sweat, flushing, drool, tears, body tension — describe what is VISIBLE, not emotional states | `Her mouth is open, eyes half-closed, cheeks flushed red, a thin line of saliva visible on her chin` |
+| 6 | Camera angle | Describe in natural language, never use raw booru shorthand alone | `The scene is filmed from a low angle looking upward, showing both characters from below` |
 
-| Environment | Background, lighting, surface they're on | `Dimly lit bedroom with blue sheets, warm lamp light from the left side` |
+| 7 | Reactions | Facial expression, sweat, flushing, drool, tears, body tension — describe what is VISIBLE, not emotional states | `Her mouth is open, eyes half-closed, cheeks flushed red` |
 
-| Conditional tags | Only if triggered — see Conditional Tag Rules below | `[Full-DEEP] The penis pushes all the way inside with each thrust, penetrating deeply` |
+| 8 | Environment | Background, lighting, surface they're on | `Dimly lit bedroom with blue sheets, warm lamp light from the left side` |
+
+| 9 | Character appearance | Hair color/style, body type, breast size, notable features (horns, ears, tail, tattoos, piercings), clothing remnants. NO character names. This goes LAST because the motion is more important. | `The woman has short blonde hair, huge breasts, massive bubble ass, thick thighs, and a lifted leopard print top` |
+
+| 10 | Conditional tags | Only if triggered — see Conditional Tag Rules below | `[Full-DEEP] The penis pushes all the way inside with each thrust, penetrating deeply` |
 
 
 
@@ -460,7 +464,9 @@ That's it. Don't write "anime screencap", "realistic 3D render", "CGI" — just 
 
 - **Never write character names.** Even if you recognize the character, describe their appearance only.
 
-- Describe in this order: skin tone → hair (color) → body type (giant ass, skinny, voluptuous, etc.) → breast size (if visible) → notable features (horns, ears, tail, wings, markings) → clothing (if any remains)
+- **Character appearance details go NEAR THE END of the caption**, after environment/background. The action and motion are more important and come first. In the `featuring` intro, only mention skin tone and role (e.g., "a dark-skinned woman and a man behind her").
+
+- In the appearance section at the end, describe in this order: hair (color/style) → body type (giant ass, skinny, voluptuous, etc.) → breast size (if visible) → notable features (horns, ears, tail, wings, markings) → clothing (if any remains)
 
 - **Only include details that are visually relevant or unusual.** You don't need to describe every aspect of a normal-looking character. Focus on what distinguishes them or what matters for the scene.
 
@@ -530,7 +536,7 @@ Output ONLY valid JSON. No text before or after.
     "side view angle"
   ],
 
-  "caption": "<looping_animation> - 2D animation - Missionary vaginal sex in a dark room. featuring a woman with long black hair, a white hair ribbon, and medium breasts lying on her back, and a man positioned on top between her spread legs. The man pushes his hips forward and pulls them back in a steady, moderate rhythm, sliding his penis in and out of her vagina with each thrust. Her body shifts slightly on the surface beneath her with each push. Her breasts bounce gently with each impact. The scene is captured from a side angle at mid-height, showing both characters in full. Her mouth is open and her eyes are closed, cheeks flushed red, with visible sweat on her skin. A thin trail of saliva connects their lips. A dark room with a wall visible behind them, dimly lit. - <looping_animation>"
+  "caption": "<looping_animation> - 2D animation - Missionary vaginal sex in a dark room. featuring a woman lying on her back and a man positioned on top between her spread legs. The man pushes his hips forward and pulls them back in a steady, moderate rhythm, sliding his penis in and out of her vagina with each thrust. Her body shifts slightly on the surface beneath her with each push. Her breasts bounce gently with each impact. The scene is captured from a side angle at mid-height, showing both characters in full. Her mouth is open and her eyes are closed, cheeks flushed red, with visible sweat on her skin. A thin trail of saliva connects their lips. A dark room with a wall visible behind them, dimly lit. The woman has long black hair, a white hair ribbon, and medium breasts. - <looping_animation>"
 }
 ```
 
@@ -552,7 +558,7 @@ Output ONLY valid JSON. No text before or after.
     "breast bouncing"
   ],
 
-  "caption": "<looping_animation> - 3D animation - Cowgirl anal sex in a bright bedroom. featuring a tanned futanari, a girl with a penis, with short white hair, large breasts, and a muscular build straddling a man who lies flat on his back on a bed. The futanari lifts her hips upward and drops them back down in a fast, continuous bouncing motion, driving the man's penis in and out of her anus with each rise and fall. Her own erect penis bounces and sways freely with each impact. Her large breasts bounce heavily up and down as her body slams down repeatedly. The scene is filmed from a front angle at medium distance, showing both characters fully. Her mouth is wide open, eyes rolled upward, heavy sweat across her body. A bright bedroom with white walls and daylight from a window. - <looping_animation>"
+  "caption": "<looping_animation> - 3D animation - Cowgirl anal sex in a bright bedroom. featuring a tanned futanari, a girl with a penis, straddling a man who lies flat on his back on a bed. The futanari lifts her hips upward and drops them back down in a fast, continuous bouncing motion, driving the man's penis in and out of her anus with each rise and fall. Her own erect penis bounces and sways freely with each impact. Her large breasts bounce heavily up and down as her body slams down repeatedly. The scene is filmed from a front angle at medium distance, showing both characters fully. Her mouth is wide open, eyes rolled upward, heavy sweat across her body. A bright bedroom with white walls and daylight from a window. The futanari has short white hair, large breasts, and a muscular build. - <looping_animation>"
 }
 ```
 
@@ -574,7 +580,7 @@ Output ONLY valid JSON. No text before or after.
     "deepthroat"
   ],
 
-  "caption": "<looping_animation> - 3D animation - First-person point-of-view blowjob in an apartment. featuring a woman with short red hair, green eyes, and pale skin kneeling on a wooden floor. She moves her head forward and backward along the shaft in a steady, smooth rhythm, her lips wrapped tightly around the penis, pushing down toward the base and pulling back to the tip repeatedly. Her cheeks hollow slightly as she pulls back. Her eyes look upward directly toward the camera. The scene is filmed entirely from the receiving partner's first-person perspective, looking down at her face. A blurred apartment interior with warm lighting behind her. [Full-DEEP] She takes the entire length of the penis into her mouth and throat, her lips pressing against the base. - <looping_animation>"
+  "caption": "<looping_animation> - 3D animation - First-person point-of-view blowjob in an apartment. featuring a pale-skinned woman kneeling on a wooden floor. She moves her head forward and backward along the shaft in a steady, smooth rhythm, her lips wrapped tightly around the penis, pushing down toward the base and pulling back to the tip repeatedly. Her cheeks hollow slightly as she pulls back. Her eyes look upward directly toward the camera. The scene is filmed entirely from the receiving partner's first-person perspective, looking down at her face. A blurred apartment interior with warm lighting behind her. The woman has short red hair and green eyes. [Full-DEEP] She takes the entire length of the penis into her mouth and throat, her lips pressing against the base. - <looping_animation>"
 }
 ```
 
@@ -596,7 +602,7 @@ Output ONLY valid JSON. No text before or after.
     "seated position"
   ],
 
-  "caption": "<looping_animation> - 2D animation - Solo futanari masturbation in a bedroom. featuring a futanari, a girl with a penis, with dark skin, long purple hair, and small breasts sitting on the edge of a bed with her legs spread apart. She wraps her right hand around her erect penis and strokes it up and down, sliding her grip from the base to the tip and back down in a steady, moderate pumping motion. Her hips shift slightly forward with each upward stroke. The scene is captured from a front angle at medium distance, showing her full body. Her mouth is slightly open, eyes half-closed, light sweat visible on her chest. A simple bedroom with dark blue walls and soft lamplight. [SOLO_MASTURBATION] She wraps her hand around her penis and strokes it up and down, sliding her grip from the base to the tip and back in a steady pumping motion. - <looping_animation>"
+  "caption": "<looping_animation> - 2D animation - Solo futanari masturbation in a bedroom. featuring a dark-skinned futanari, a girl with a penis, sitting on the edge of a bed with her legs spread apart. She wraps her right hand around her erect penis and strokes it up and down, sliding her grip from the base to the tip and back down in a steady, moderate pumping motion. Her hips shift slightly forward with each upward stroke. The scene is captured from a front angle at medium distance, showing her full body. Her mouth is slightly open, eyes half-closed, light sweat visible on her chest. A simple bedroom with dark blue walls and soft lamplight. The futanari has long purple hair and small breasts. [SOLO_MASTURBATION] She wraps her hand around her penis and strokes it up and down, sliding her grip from the base to the tip and back in a steady pumping motion. - <looping_animation>"
 }
 ```
 
@@ -616,7 +622,7 @@ Output ONLY valid JSON. No text before or after.
     "human female and male"
   ],
 
-  "caption": "<looping_animation> - 3D animation - Doggy style vaginal sex in a dark room. featuring a woman with long blonde hair and large breasts on all fours. A man kneels behind her, gripping her hips with both hands, and thrusts his hips forward and back with firm, quick movements, driving his penis in and out of her vagina. Her body rocks forward with each impact and settles back as he pulls out. Her large breasts swing forward and back beneath her with each thrust, bouncing heavily with each collision. Her ass ripples visibly with each impact of his hips against her. The scene is filmed from behind and slightly below, focused on the penetration and her lower body. Her head is turned to the side showing an open mouth and flushed face. A dark room with a wooden floor, no other details visible. [POV_TAKER] The scene is filmed from the receiving partner's perspective, looking back over her shoulder at the man behind her. - <looping_animation>"
+  "caption": "<looping_animation> - 3D animation - Doggy style vaginal sex in a dark room. featuring a woman on all fours and a man kneeling behind her. The man grips her hips with both hands and thrusts his hips forward and back with firm, quick movements, driving his penis in and out of her vagina. Her body rocks forward with each impact and settles back as he pulls out. Her large breasts swing forward and back beneath her with each thrust, bouncing heavily with each collision. Her ass ripples visibly with each impact of his hips against her. The scene is filmed from behind and slightly below, focused on the penetration and her lower body. Her head is turned to the side showing an open mouth and flushed face. A dark room with a wooden floor, no other details visible. The woman has long blonde hair and large breasts. [POV_TAKER] The scene is filmed from the receiving partner's perspective, looking back over her shoulder at the man behind her. - <looping_animation>"
 }
 ```
 
@@ -636,7 +642,7 @@ Output ONLY valid JSON. No text before or after.
     "hand on head"
   ],
 
-  "caption": "<looping_animation> - 2D animation - Controlled blowjob in a hallway. featuring a woman with long blue hair kneeling on a tiled floor, and a man standing in front of her with his hand gripping the back of her head. He pushes her head forward and pulls it back along his shaft at his own pace, guiding her mouth from the tip down to the base in a firm, repeating cycle. Her hands rest on his thighs. Her jaw is open wide and her cheeks bulge slightly with each forward push. The scene is captured from the side at mid-height, showing both characters. Her eyes are squeezed shut, drool visible running down her chin. A dimly lit hallway with plain walls. - <looping_animation>"
+  "caption": "<looping_animation> - 2D animation - Controlled blowjob in a hallway. featuring a woman kneeling on a tiled floor and a man standing in front of her with his hand gripping the back of her head. He pushes her head forward and pulls it back along his shaft at his own pace, guiding her mouth from the tip down to the base in a firm, repeating cycle. Her hands rest on his thighs. Her jaw is open wide and her cheeks bulge slightly with each forward push. The scene is captured from the side at mid-height, showing both characters. Her eyes are squeezed shut, drool visible running down her chin. A dimly lit hallway with plain walls. The woman has long blue hair. - <looping_animation>"
 }
 ```
 
