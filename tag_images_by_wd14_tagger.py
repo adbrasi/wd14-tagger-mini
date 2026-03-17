@@ -2511,34 +2511,48 @@ def main(args):
             return
         video_str_paths = [str(p) for p in video_paths_list]
 
-        # Skip already-processed videos unless --force
-        if not args.force:
-            video_str_paths, skipped = filter_already_processed(video_str_paths, processing_log, taggers)
-            if skipped:
-                logger.info(f"skipping {skipped} already-processed videos (use --force to reprocess)")
-            if not video_str_paths:
-                logger.info("all videos already processed. nothing to do.")
-                return
-
-        temp_dir_obj = tempfile.TemporaryDirectory(prefix="tagger_frames_")
-
-        frame_number = args.frame_number
-        pro_frames = (args.pro_frame_a, args.pro_frame_b)
-
-        logger.info(f"extracting frames from {len(video_str_paths)} videos (pro={pro_mode})...")
-        frame_to_video, extra_frames_map = extract_video_frames(
-            video_str_paths,
-            temp_dir_obj.name,
-            frame_number=frame_number,
-            pro_mode=pro_mode,
-            pro_frames=pro_frames,
+        # For xAI batch collect/status: no need to extract frames — just need
+        # the video paths so collect can write .txt next to them.
+        is_batch_collect = (
+            args.grok_provider == "xai-batch"
+            and "grok" in taggers
+            and args.xai_batch_action in ("collect", "status")
         )
-        if not frame_to_video:
-            logger.error("Could not extract frames from any video.")
-            temp_dir_obj.cleanup()
-            return
-        logger.info(f"extracted frames for {len(frame_to_video)} videos")
-        paths = list(frame_to_video.keys())
+
+        if is_batch_collect:
+            # Build a dummy frame_to_video mapping: video → video (identity)
+            # so the collect can resolve paths without extracting any frames.
+            frame_to_video = {vp: vp for vp in video_str_paths}
+            paths = video_str_paths
+        else:
+            # Skip already-processed videos unless --force
+            if not args.force:
+                video_str_paths, skipped = filter_already_processed(video_str_paths, processing_log, taggers)
+                if skipped:
+                    logger.info(f"skipping {skipped} already-processed videos (use --force to reprocess)")
+                if not video_str_paths:
+                    logger.info("all videos already processed. nothing to do.")
+                    return
+
+            temp_dir_obj = tempfile.TemporaryDirectory(prefix="tagger_frames_")
+
+            frame_number = args.frame_number
+            pro_frames = (args.pro_frame_a, args.pro_frame_b)
+
+            logger.info(f"extracting frames from {len(video_str_paths)} videos (pro={pro_mode})...")
+            frame_to_video, extra_frames_map = extract_video_frames(
+                video_str_paths,
+                temp_dir_obj.name,
+                frame_number=frame_number,
+                pro_mode=pro_mode,
+                pro_frames=pro_frames,
+            )
+            if not frame_to_video:
+                logger.error("Could not extract frames from any video.")
+                temp_dir_obj.cleanup()
+                return
+            logger.info(f"extracted frames for {len(frame_to_video)} videos")
+            paths = list(frame_to_video.keys())
 
         # In pro mode, collect extra frame paths so taggers process both frames
         if pro_mode:
