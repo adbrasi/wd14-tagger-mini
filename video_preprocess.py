@@ -219,7 +219,8 @@ def preprocess_videos(
     if not to_process:
         return stats
 
-    with ProcessPoolExecutor(max_workers=max_workers) as executor:
+    executor = ProcessPoolExecutor(max_workers=max_workers)
+    try:
         futures = {
             executor.submit(process_single_video, vp, mf, tw, th): vp
             for vp, mf, tw, th in to_process
@@ -233,5 +234,11 @@ def preprocess_videos(
                 stats["failed"] += 1
             if on_progress:
                 on_progress(stats["success"], stats["failed"], len(to_process))
+    except KeyboardInterrupt:
+        # Kill all running workers immediately
+        executor.shutdown(wait=False, cancel_futures=True)
+        raise
+    finally:
+        executor.shutdown(wait=False)
 
     return stats

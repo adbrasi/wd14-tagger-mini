@@ -805,18 +805,22 @@ def run_preprocessing(input_dir: str):
         nonlocal scan_done
         done = success + failed
         if done == 0 and scan_done < len(videos):
-            # Still in scan phase
             scan_done += 1
             progress.update(scan_task, completed=scan_done)
         else:
-            # Processing phase
             progress.update(scan_task, completed=len(videos))
             progress.update(proc_task, completed=done)
 
-    result = preprocess_videos(
-        videos, max_frames=max_frames, resize=do_resize, max_workers=workers,
-        on_progress=_on_progress,
-    )
+    try:
+        result = preprocess_videos(
+            videos, max_frames=max_frames, resize=do_resize, max_workers=workers,
+            on_progress=_on_progress,
+        )
+    except KeyboardInterrupt:
+        progress.stop()
+        print_warning("Preprocessing interrupted by user")
+        return
+
     progress.update(scan_task, completed=len(videos))
     progress.update(proc_task, completed=len(videos))
     progress.stop()

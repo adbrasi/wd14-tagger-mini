@@ -31,9 +31,9 @@ def print_banner():
 
 
 def print_section(title: str):
-    console.print(f"\n[bold yellow]{'─' * 60}[/]")
-    console.print(f"[bold yellow]  {title}[/]")
-    console.print(f"[bold yellow]{'─' * 60}[/]\n")
+    console.print(f"\n[bold cyan]{'─' * 60}[/]")
+    console.print(f"[bold white]  {title}[/]")
+    console.print(f"[bold cyan]{'─' * 60}[/]\n")
 
 
 def print_success(msg: str):
