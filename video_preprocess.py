@@ -144,7 +144,7 @@ def process_single_video(
             return result
 
         if proc.returncode != 0:
-            result["detail"] = (stderr or "")[:200]
+            result["detail"] = (stderr or "").strip().split("\n")[-1][:200]
             if os.path.exists(tmp_path):
                 os.remove(tmp_path)
             return result
