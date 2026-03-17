@@ -1388,8 +1388,8 @@ def run_grok_xai_batch(
     existing_tags: Dict[str, List[str]],
     extra_frames: Dict[str, List[str]],
 ) -> Dict:
-    if args.video:
-        raise ValueError("xai batch mode is currently supported only for image mode (no --video).")
+    # NOTE: In video mode, paths are already extracted frames (images),
+    # so xai batch works the same way as image mode.
 
     api_key = args.xai_api_key
     if not api_key:
