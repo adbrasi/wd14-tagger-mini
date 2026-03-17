@@ -903,8 +903,41 @@ def run_hf_upload(input_dir: str, python: str):
 
     private = ask_yes_no("Private repository?", default=True)
 
+    # Ask upload format
+    upload_format = ask_choice("Upload format", [
+        "WebDataset TAR shards (recommended — fewer files, xet fast, streaming)",
+        "Individual files (upload_large_folder — resumable, simple)",
+    ])
+    use_webdataset = upload_format == 1
+
+    upload_dir = input_dir
+
+    if use_webdataset:
+        print_section("BUILDING WEBDATASET TAR SHARDS")
+        tar_output = os.path.join(os.path.dirname(os.path.abspath(input_dir)),
+                                  os.path.basename(input_dir) + "_webdataset")
+        print_info(f"Packing video+txt pairs into TAR shards → {tar_output}")
+
+        from build_webdataset_tars import build_tars
+        from pathlib import Path
+
+        stats = build_tars(
+            root=Path(input_dir),
+            output_dir=Path(tar_output),
+            shard_size_gb=1.0,
+            split="train",
+        )
+        print_success(
+            f"{stats['shards_created']} shards created, "
+            f"{stats['total_pairs']} samples, "
+            f"{stats['total_bytes'] / (1024**3):.1f} GB"
+        )
+        if stats["missing_txt"]:
+            print_warning(f"{stats['missing_txt']} videos without .txt caption")
+        upload_dir = tar_output
+
     print_section("UPLOADING TO HUGGINGFACE")
-    print_info(f"Uploading {input_dir} → {repo_name} ({'private' if private else 'public'})")
+    print_info(f"Uploading {upload_dir} → {repo_name} ({'private' if private else 'public'})")
     print_info("Using upload_large_folder (multi-threaded, resumable, auto-retry)")
 
     # Install hf_xet for max speed
@@ -933,7 +966,7 @@ def run_hf_upload(input_dir: str, python: str):
     env["HF_XET_HIGH_PERFORMANCE"] = "1"
 
     proc = subprocess.Popen(
-        [python, "-c", upload_script, repo_name, input_dir,
+        [python, "-c", upload_script, repo_name, upload_dir,
          "true" if private else "false", str(num_workers)],
         env=env,
     )
