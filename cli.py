@@ -40,7 +40,7 @@ VENV_DIR = os.path.join(SCRIPT_DIR, ".venv")
 REQUIREMENTS = os.path.join(SCRIPT_DIR, "requirements.txt")
 TAGGER_SCRIPT = os.path.join(SCRIPT_DIR, "tag_images_by_wd14_tagger.py")
 XAI_API_BASE_URL = "https://api.x.ai"
-XAI_BATCH_DEFAULT_MODEL = "grok-4.20-beta-0309-reasoning"
+XAI_BATCH_DEFAULT_MODEL = "grok-4-1-fast-reasoning"
 
 IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".avif", ".jxl"}
 VIDEO_EXTS = {".mp4", ".avi", ".mov", ".mkv", ".webm", ".flv", ".wmv"}

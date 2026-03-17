@@ -804,7 +804,7 @@ def run_pixai(
 # -------------------------
 
 DEFAULT_GROK_MODEL = "google/gemini-3-flash-preview"
-DEFAULT_XAI_BATCH_MODEL = "grok-4.20-beta-0309-reasoning"
+DEFAULT_XAI_BATCH_MODEL = "grok-4-1-fast-reasoning"
 OPENROUTER_API_URL = "https://openrouter.ai/api/v1/chat/completions"
 
 # JSON Schema for structured caption output — guarantees parseable responses
