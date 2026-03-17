@@ -1386,9 +1386,11 @@ def run_grok_xai_batch(
     result_map: Dict[str, List[str]],
     existing_tags: Dict[str, List[str]],
     extra_frames: Dict[str, List[str]],
+    frame_to_video: Optional[Dict[str, str]] = None,
 ) -> Dict:
-    # NOTE: In video mode, paths are already extracted frames (images),
-    # so xai batch works the same way as image mode.
+    # In video mode, paths are extracted frames (images) but we need to
+    # save the original video path in the state so collect can find it.
+    _f2v = frame_to_video or {}
 
     api_key = args.xai_api_key
     if not api_key:
@@ -1520,13 +1522,16 @@ def run_grok_xai_batch(
         scan_pbar = tqdm(total=len(paths), desc="xai-batch scan", smoothing=0.0, unit="img") if use_pbar else None
         to_process: List[Tuple[str, str, Optional[str], str, str, Optional[List[str]]]] = []
         for image_path in paths:
-            image_abs = os.path.abspath(image_path)
+            # In video mode, resolve to original video path for state persistence
+            # (frame temp paths won't exist when collect runs later)
+            original_path = _f2v.get(image_path, image_path)
+            original_abs = os.path.abspath(original_path)
             rel_path = None
             try:
-                rel_path = os.path.relpath(image_abs, train_data_dir_abs)
+                rel_path = os.path.relpath(original_abs, train_data_dir_abs)
             except Exception:
                 rel_path = None
-            req_id_seed = rel_path if rel_path and not rel_path.startswith("..") else image_abs
+            req_id_seed = rel_path if rel_path and not rel_path.startswith("..") else original_abs
             req_id = "req_" + hashlib.sha1(req_id_seed.encode("utf-8")).hexdigest()
             if scan_pbar is not None:
                 scan_pbar.update(1)
@@ -1536,7 +1541,7 @@ def run_grok_xai_batch(
             prompt_tags = _format_grok_tags_with_categories(tags_list, tag_category_lookup)
             tags_str = args.caption_separator.join(prompt_tags) if prompt_tags else "(no prior tags)"
             extras = extra_frames.get(image_path)
-            to_process.append((image_path, image_abs, rel_path, req_id, tags_str, extras))
+            to_process.append((image_path, original_abs, rel_path, req_id, tags_str, extras))
         if scan_pbar is not None:
             scan_pbar.close()
 
@@ -2076,6 +2081,7 @@ def run_grok(
     existing_tags: Optional[Dict[str, List[str]]] = None,
     extra_frames: Optional[Dict[str, List[str]]] = None,
     progress=None,
+    frame_to_video: Optional[Dict[str, str]] = None,
 ) -> None:
     """Run grok tagger via OpenRouter API with concurrent batch processing.
 
@@ -2087,6 +2093,7 @@ def run_grok(
         existing_tags: tags from previous taggers (pixai/wd14/camie) per image
         extra_frames: additional frame paths per image (for pro mode)
         progress: tqdm progress bar
+        frame_to_video: mapping of frame path -> original video path (video mode)
     """
     if args.grok_provider == "xai-batch":
         return run_grok_xai_batch(
@@ -2096,6 +2103,7 @@ def run_grok(
             result_map=result_map,
             existing_tags=existing_tags or {},
             extra_frames=extra_frames or {},
+            frame_to_video=frame_to_video or {},
         )
 
     api_key = args.grok_api_key
@@ -2688,6 +2696,7 @@ def main(args):
             grok_combined,
             existing_tags=existing_tags_for_grok,
             extra_frames=extra_frames_map if pro_mode else None,
+            frame_to_video=frame_to_video if video_mode else None,
         )
         grok_completed_paths = (grok_result or {}).get("completed_paths", [])
         if args.grok_provider == "xai-batch" and args.xai_batch_action in ("submit", "status"):
