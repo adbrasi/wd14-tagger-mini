@@ -76,6 +76,19 @@ def get_video_info(video_path: str) -> Optional[dict]:
         return None
 
 
+def _has_audio_stream(video_path: str) -> bool:
+    """Check if video has an audio stream via ffprobe."""
+    try:
+        r = subprocess.run(
+            ["ffprobe", "-v", "error", "-select_streams", "a",
+             "-show_entries", "stream=index", "-of", "csv=p=0", video_path],
+            capture_output=True, text=True, timeout=10,
+        )
+        return bool(r.stdout.strip())
+    except Exception:
+        return False
+
+
 def process_single_video(
     video_path: str,
     max_frames: Optional[int],
@@ -93,7 +106,6 @@ def process_single_video(
 
     # Build ffmpeg filter chain
     if target_w and target_h:
-        # Scale to fit within target_w x target_h, then crop to exact dimensions
         filters.append(
             f"scale={target_w}:{target_h}:force_original_aspect_ratio=increase,"
             f"crop={target_w}:{target_h}"
@@ -107,11 +119,15 @@ def process_single_video(
     if filters:
         cmd.extend(["-vf", ",".join(filters)])
 
-    cmd.extend([
-        "-c:v", "libx264", "-preset", "fast", "-crf", "18",
-        "-an",  # Drop audio (dataset videos don't need audio)
-        tmp_path,
-    ])
+    cmd.extend(["-c:v", "libx264", "-preset", "fast", "-crf", "18"])
+
+    # Keep audio if present, skip if not
+    if _has_audio_stream(video_path):
+        cmd.extend(["-c:a", "copy"])
+    else:
+        cmd.append("-an")
+
+    cmd.append(tmp_path)
 
     try:
         proc = subprocess.Popen(
