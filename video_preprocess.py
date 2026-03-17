@@ -31,7 +31,8 @@ def snap_frames(n: int) -> int:
         return 1
     lower = ((n - 1) // 8) * 8 + 1
     upper = lower + 8
-    return lower if abs(n - lower) <= abs(n - upper) else upper
+    # On tie, prefer the larger value (keep more frames)
+    return lower if abs(n - lower) < abs(n - upper) else upper
 
 
 def get_video_info(video_path: str) -> Optional[dict]:
@@ -58,10 +59,11 @@ def get_video_info(video_path: str) -> Optional[dict]:
         stream = data.get("streams", [{}])[0]
         fmt = data.get("format", {})
 
-        # Prefer avg_frame_rate (reliable for VFR), fall back to r_frame_rate
-        fps = _parse_fps(stream.get("avg_frame_rate", ""))
+        # Prefer r_frame_rate (container clock used by -t in stream copy mode),
+        # fall back to avg_frame_rate for files missing r_frame_rate
+        fps = _parse_fps(stream.get("r_frame_rate", ""))
         if fps <= 0:
-            fps = _parse_fps(stream.get("r_frame_rate", ""))
+            fps = _parse_fps(stream.get("avg_frame_rate", ""))
 
         duration = float(fmt.get("duration", 0))
 
@@ -105,7 +107,7 @@ def _extract_ffmpeg_error(stderr: str) -> str:
         if stripped.startswith(skip_prefixes):
             continue
         return stripped[:200]
-    return lines[-1].strip()[:200] if lines else "unknown error"
+    return (lines[-1].strip()[:200] if lines else "") or "unknown error"
 
 
 def trim_video(video_path: str, cut_seconds: float) -> dict:
@@ -217,6 +219,7 @@ def preprocess_videos(
     # Phase 1: Parallel ffprobe to get fps + frame count
     infos = {}
     scan_done = 0
+    interrupted = False
     executor = ProcessPoolExecutor(max_workers=max_workers)
     try:
         futures = {executor.submit(get_video_info, vp): vp for vp in video_paths}
@@ -227,10 +230,10 @@ def preprocess_videos(
             if on_progress:
                 on_progress("scan", scan_done, len(video_paths))
     except KeyboardInterrupt:
-        executor.shutdown(wait=False, cancel_futures=True)
+        interrupted = True
         raise
-    else:
-        executor.shutdown(wait=True)
+    finally:
+        executor.shutdown(wait=not interrupted, cancel_futures=interrupted)
 
     # Phase 2: Decide which videos need trimming
     to_trim = []  # (video_path, cut_seconds)
@@ -244,7 +247,7 @@ def preprocess_videos(
         fps = info["fps"]
         frames = info["frames"]
 
-        if fps <= 0:
+        if fps <= 0 or frames <= 0:
             probe_failed += 1
             continue
 
@@ -275,6 +278,7 @@ def preprocess_videos(
         on_progress("trim", 0, 0, len(to_trim))
 
     # Phase 3: Parallel stream-copy trim
+    interrupted = False
     executor = ProcessPoolExecutor(max_workers=max_workers)
     try:
         futures = {
@@ -291,9 +295,9 @@ def preprocess_videos(
             if on_progress:
                 on_progress("trim", stats["trimmed"], stats["failed"], len(to_trim))
     except KeyboardInterrupt:
-        executor.shutdown(wait=False, cancel_futures=True)
+        interrupted = True
         raise
-    else:
-        executor.shutdown(wait=True)
+    finally:
+        executor.shutdown(wait=not interrupted, cancel_futures=interrupted)
 
     return stats

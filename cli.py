@@ -1443,11 +1443,11 @@ def main():
 
     if workflow in (2, 3):
         tag_ok = run_tagging(input_dir, python, media_counts)
-        if tag_ok is False and workflow == 3:
+        if not tag_ok and workflow == 3:
             print_info("Pipeline stopped — tagging was aborted")
             return
         # After tagging, offer upload if not already in full pipeline
-        if workflow == 2 and tag_ok is not False:
+        if workflow == 2 and tag_ok:
             if ask_yes_no("Upload dataset to HuggingFace?", default=False):
                 run_hf_upload(input_dir, python)
 
