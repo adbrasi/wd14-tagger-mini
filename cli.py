@@ -831,7 +831,13 @@ def run_preprocessing(input_dir: str):
     )
 
     if result["failed"] > 0:
-        print_warning("Some videos failed to process. Check ffmpeg and video integrity.")
+        print_warning(f"{result['failed']:,} videos failed to process")
+        # Show first few error details
+        errors = [d for d in result.get("details", []) if not d.get("ok")]
+        for e in errors[:5]:
+            print_info(f"  {os.path.basename(e['path'])}: {e.get('detail', 'unknown error')[:100]}")
+        if len(errors) > 5:
+            print_info(f"  ... and {len(errors) - 5:,} more")
 
 
 # -------------------------
@@ -1375,6 +1381,7 @@ def main():
         "Pre-process dataset (cut frames, resize)",
         "Tag dataset (wd14 / pixai / grok pipeline)",
         "Full pipeline (preprocess → tag → upload)",
+        "Upload dataset to HuggingFace",
     ], default=3)
 
     if workflow in (1, 3):
@@ -1383,8 +1390,7 @@ def main():
     if workflow in (2, 3):
         run_tagging(input_dir, python, media_counts)
 
-    # HuggingFace upload (always offer at end)
-    if workflow == 3 or ask_yes_no("Upload dataset to HuggingFace?", default=False):
+    if workflow in (3, 4):
         run_hf_upload(input_dir, python)
 
     print_section("ALL DONE")

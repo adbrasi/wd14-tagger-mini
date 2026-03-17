@@ -109,7 +109,7 @@ def process_single_video(
 
     cmd.extend([
         "-c:v", "libx264", "-preset", "fast", "-crf", "18",
-        "-c:a", "copy",
+        "-an",  # Drop audio (dataset videos don't need audio)
         tmp_path,
     ])
 
