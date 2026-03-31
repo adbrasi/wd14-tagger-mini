@@ -565,10 +565,18 @@ def main() -> None:
         args.chunk_payload,
     )
 
+    if args.hf_token:
+        import warnings
+        warnings.warn(
+            "Passing --hf_token via CLI is deprecated (visible in process list). "
+            "Use the HF_TOKEN environment variable instead.",
+            DeprecationWarning,
+            stacklevel=1,
+        )
     token = (args.hf_token or os.getenv(args.hf_token_env, "")).strip()
     if not token:
         raise SystemExit(
-            f"missing token: pass --hf_token or set {args.hf_token_env}"
+            f"missing token: set {args.hf_token_env} environment variable"
         )
 
     repo_id = upload_folder(
