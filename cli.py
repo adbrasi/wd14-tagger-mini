@@ -524,14 +524,28 @@ def _download_direct_url(url: str, dest_dir: str, python: str = "") -> str:
                         return full
         print_warning("HF xet download failed, falling back to wget...")
 
-    # Fallback: wget with HF token auth header
+    # Fallback: wget with HF token auth header (via temp file to avoid ps leaks)
+    import tempfile as _tmpmod
     print_info(f"Downloading {filename} via wget...")
     wget_cmd = ["wget", "-c", "-O", dest_file]
     hf_token = check_env_key("HF_TOKEN") or check_env_key("HUGGINGFACE_HUB_TOKEN")
-    if hf_token:
-        wget_cmd.extend(["--header", f"Authorization: Bearer {hf_token}"])
-    wget_cmd.append(url)
-    result = subprocess.run(wget_cmd)
+    _header_file = None
+    try:
+        if hf_token:
+            _header_file = _tmpmod.NamedTemporaryFile(
+                mode="w", prefix=".wget_hdr_", suffix=".txt", delete=False
+            )
+            _header_file.write(f"header = Authorization: Bearer {hf_token}\n")
+            _header_file.close()
+            wget_cmd.extend(["--config", _header_file.name])
+        wget_cmd.append(url)
+        result = subprocess.run(wget_cmd)
+    finally:
+        if _header_file is not None:
+            try:
+                os.unlink(_header_file.name)
+            except OSError:
+                pass
 
     if result.returncode != 0 or not os.path.exists(dest_file):
         print_error(f"Download failed: {url}")

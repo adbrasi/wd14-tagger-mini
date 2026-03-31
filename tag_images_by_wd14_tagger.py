@@ -252,6 +252,8 @@ def load_wd14_tags(model_location: str, args) -> Tuple[List[str], Dict[int, Tupl
     with open(os.path.join(model_location, WD14_CSV_FILE), "r", encoding="utf-8") as f:
         reader = csv.reader(f)
         rows = [row for row in reader]
+    if not rows:
+        raise ValueError(f"WD14 CSV is empty: {os.path.join(model_location, WD14_CSV_FILE)}")
     header = rows[0]
     data = rows[1:]
     assert header[0] == "tag_id" and header[1] == "name" and header[2] == "category"
@@ -333,6 +335,8 @@ def run_wd14(
     iterable = batches if progress is not None or args.no_progress else tqdm(batches, smoothing=0.0, desc="wd14", total=count_batches(len(paths), batch_size))
 
     for batch_paths, batch_imgs in iterable:
+        if not batch_paths:
+            continue
         probs = session.run(None, {input_name: batch_imgs})[0]
         probs = probs[: len(batch_paths)]
 
@@ -466,6 +470,8 @@ def run_camie(
     iterable = batches if progress is not None or args.no_progress else tqdm(batches, smoothing=0.0, desc="camie", total=count_batches(len(paths), batch_size))
 
     for batch_paths, batch_imgs in iterable:
+        if not batch_paths:
+            continue
         outputs = session.run(None, {input_name: batch_imgs})
         logits = outputs[1] if len(outputs) >= 2 else outputs[0]
         probs = sigmoid(logits)

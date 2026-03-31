@@ -270,7 +270,7 @@ def _fix_fps_single(args: tuple) -> dict:
         "-r", str(target_fps),
         "-c:v", "libx264", "-preset", "fast", "-crf", "18",
         "-c:a", "copy",
-        "-movflags", "+faststart",
+    ] + (["-movflags", "+faststart"] if ext.lower() == ".mp4" else []) + [
         tmp_path,
     ]
 

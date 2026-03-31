@@ -63,7 +63,7 @@ def main():
     p.add_argument("--shard_size_gb", type=float, default=1.0, help="target shard size in GB (default: 1.0)")
     p.add_argument("--split", default="train", help="shard prefix (default: train)")
     p.add_argument("--private", action="store_true", help="create private HF repo")
-    p.add_argument("--workers", type=int, default=min(os.cpu_count() * 2, 64), help="upload threads")
+    p.add_argument("--workers", type=int, default=min((os.cpu_count() or 4) * 2, 64), help="upload threads")
     p.add_argument("--skip-build", action="store_true", help="skip TAR creation, upload existing TARs only")
     p.add_argument("--tar-dir", default=None, help="custom output dir for TARs (default: <root>_tars)")
     p.add_argument("--hf_token", default=None, help="HF token (recommended)")

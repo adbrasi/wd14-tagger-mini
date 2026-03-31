@@ -32,25 +32,7 @@ def setup_logging(log_level: Optional[str] = None) -> None:
     logging.root.addHandler(handler)
 
 
-IMAGE_EXTENSIONS = {
-    ".png",
-    ".jpg",
-    ".jpeg",
-    ".webp",
-    ".bmp",
-    ".avif",
-    ".jxl",
-}
-
-VIDEO_EXTENSIONS = {
-    ".mp4",
-    ".avi",
-    ".mov",
-    ".mkv",
-    ".webm",
-    ".flv",
-    ".wmv",
-}
+from constants import IMAGE_EXTS as IMAGE_EXTENSIONS, VIDEO_EXTS as VIDEO_EXTENSIONS
 
 
 def glob_images_pathlib(base_dir: Path, recursive: bool) -> List[Path]:
