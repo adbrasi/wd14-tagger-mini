@@ -255,9 +255,10 @@ def _fix_fps_single(args: tuple) -> dict:
         return result
 
     video_dir = os.path.dirname(video_path) or "."
+    _, ext = os.path.splitext(video_path)
 
     try:
-        fd, tmp_path = tempfile.mkstemp(suffix=".mp4", dir=video_dir)
+        fd, tmp_path = tempfile.mkstemp(suffix=ext, dir=video_dir)
         os.close(fd)
     except OSError as e:
         result["ok"] = False
