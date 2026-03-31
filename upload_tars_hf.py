@@ -10,137 +10,27 @@ Usage:
         [--private] \
         [--workers 8] \
         [--skip-build]   # skip TAR creation, upload existing TARs only
+        [--hf_token TOKEN]
+        [--hf_token_env HF_TOKEN]
 
 Keys inside TARs are globally unique across shards (no overwrite on extract).
 """
 
 import argparse
-import json
 import os
 import re
 import sys
-import tarfile
 from pathlib import Path
-from typing import List, Optional, Tuple
 
-VIDEO_EXTS = {".mp4", ".avi", ".mov", ".mkv", ".webm", ".flv", ".wmv"}
-
-
-# ── TAR builder ──────────────────────────────────────────────────────────────
-
-
-def find_video_txt_pairs(root: Path) -> List[Tuple[Path, Optional[Path]]]:
-    pairs = []
-    for dirpath, _, filenames in os.walk(root):
-        base = Path(dirpath)
-        for name in filenames:
-            p = base / name
-            if p.suffix.lower() in VIDEO_EXTS:
-                txt = p.with_suffix(".txt")
-                pairs.append((p, txt if txt.exists() else None))
-    pairs.sort(key=lambda x: str(x[0]))
-    return pairs
-
-
-def build_tars(
-    root: Path,
-    output_dir: Path,
-    shard_size_gb: float = 1.0,
-    split: str = "train",
-) -> dict:
-    pairs = find_video_txt_pairs(root)
-    if not pairs:
-        raise RuntimeError(f"no video files found in {root}")
-
-    output_dir.mkdir(parents=True, exist_ok=True)
-    max_shard_bytes = int(shard_size_gb * (1024**3))
-
-    stats = {
-        "total_pairs": len(pairs),
-        "samples_written": 0,
-        "shards_created": 0,
-        "total_bytes": 0,
-        "missing_txt": 0,
-        "shard_paths": [],
-    }
-
-    shard_idx = 0
-    sample_idx = 0  # global — never resets per shard
-    current_bytes = 0
-    tar: Optional[tarfile.TarFile] = None
-    tar_path: Optional[Path] = None
-
-    def _close():
-        nonlocal tar, tar_path, current_bytes
-        if tar is not None:
-            tar.close()
-            tar = None
-            actual = tar_path.stat().st_size
-            stats["shard_paths"].append(str(tar_path))
-            stats["shards_created"] += 1
-            stats["total_bytes"] += actual
-            current_bytes = 0
-
-    def _open():
-        nonlocal tar, tar_path, shard_idx
-        tar_path = output_dir / f"{split}-{shard_idx:04d}.tar"
-        tar = tarfile.open(tar_path, "w")
-        shard_idx += 1
-
-    try:
-        _open()
-        for video_path, txt_path in pairs:
-            video_size = video_path.stat().st_size
-            txt_size = txt_path.stat().st_size if txt_path else 0
-            pair_size = video_size + txt_size
-
-            if current_bytes > 0 and current_bytes + pair_size > max_shard_bytes:
-                _close()
-                _open()
-
-            key = f"{sample_idx:06d}"
-            ext = video_path.suffix.lower()
-            tar.add(str(video_path), arcname=f"{key}{ext}")
-            if txt_path:
-                tar.add(str(txt_path), arcname=f"{key}.txt")
-            else:
-                stats["missing_txt"] += 1
-
-            current_bytes += pair_size
-            sample_idx += 1
-            stats["samples_written"] += 1
-
-        _close()
-    finally:
-        if tar is not None:
-            tar.close()
-            if tar_path and tar_path.exists() and tar_path.stat().st_size <= 1024:
-                try:
-                    tar_path.unlink()
-                except OSError:
-                    pass
-
-    info_path = output_dir / "dataset_info.json"
-    with open(info_path, "w") as f:
-        json.dump(
-            {
-                "split": split,
-                "total_samples": stats["samples_written"],
-                "total_shards": stats["shards_created"],
-                "total_bytes": stats["total_bytes"],
-                "missing_captions": stats["missing_txt"],
-            },
-            f,
-            indent=2,
-        )
-
-    return stats
+from build_webdataset_tars import build_tars
 
 
 # ── HuggingFace upload ───────────────────────────────────────────────────────
 
 
-def upload_to_hf(folder: Path, repo_id: str, private: bool, workers: int):
+def upload_to_hf(
+    folder: Path, repo_id: str, private: bool, workers: int, token: str
+):
     try:
         from huggingface_hub import HfApi
     except ImportError:
@@ -148,8 +38,10 @@ def upload_to_hf(folder: Path, repo_id: str, private: bool, workers: int):
 
     os.environ["HF_XET_HIGH_PERFORMANCE"] = "1"
 
-    api = HfApi()
-    api.create_repo(repo_id=repo_id, repo_type="dataset", private=private, exist_ok=True)
+    api = HfApi(token=token)
+    api.create_repo(
+        repo_id=repo_id, repo_type="dataset", private=private, exist_ok=True
+    )
 
     print(f"Uploading {folder} → hf://{repo_id} ({workers} workers)...")
     api.upload_large_folder(
@@ -174,7 +66,19 @@ def main():
     p.add_argument("--workers", type=int, default=min(os.cpu_count() * 2, 64), help="upload threads")
     p.add_argument("--skip-build", action="store_true", help="skip TAR creation, upload existing TARs only")
     p.add_argument("--tar-dir", default=None, help="custom output dir for TARs (default: <root>_tars)")
+    p.add_argument("--hf_token", default=None, help="HF token (recommended)")
+    p.add_argument("--hf_token_env", default="HF_TOKEN", help="fallback env var for HF token")
     args = p.parse_args()
+
+    # ── Validate token BEFORE any expensive work ──
+    token = (args.hf_token or os.getenv(args.hf_token_env, "")).strip()
+    if not token:
+        sys.exit(
+            f"missing token: pass --hf_token or set {args.hf_token_env}"
+        )
+
+    if args.shard_size_gb <= 0:
+        sys.exit("--shard_size_gb must be positive")
 
     if not re.match(r"^[A-Za-z0-9_-]+$", args.split):
         sys.exit(f"--split must match [A-Za-z0-9_-]+, got: {args.split!r}")
@@ -193,13 +97,13 @@ def main():
             f"{stats['total_bytes'] / (1024**3):.2f} GB"
         )
         if stats["missing_txt"]:
-            print(f"  ⚠ {stats['missing_txt']} videos without .txt caption")
+            print(f"  Warning: {stats['missing_txt']} videos without .txt caption")
     else:
         if not tar_dir.exists():
             sys.exit(f"tar dir not found: {tar_dir}")
         print(f"Skipping build, using existing TARs at {tar_dir}")
 
-    upload_to_hf(tar_dir, args.repo, args.private, args.workers)
+    upload_to_hf(tar_dir, args.repo, args.private, args.workers, token)
 
 
 if __name__ == "__main__":
