@@ -42,6 +42,7 @@ REQUIREMENTS = os.path.join(SCRIPT_DIR, "requirements.txt")
 TAGGER_SCRIPT = os.path.join(SCRIPT_DIR, "tag_images_by_wd14_tagger.py")
 XAI_API_BASE_URL = "https://api.x.ai"
 XAI_BATCH_DEFAULT_MODEL = "grok-4-1-fast-reasoning"
+PROMPTS_DIR = os.path.join(SCRIPT_DIR, "prompts")
 
 from constants import IMAGE_EXTS, VIDEO_EXTS
 
@@ -290,6 +291,38 @@ def download_hf_dataset(repo_id: str, subfolder, local_dir: str, token, python_p
         result_path = local_dir
     print_success(f"Download complete: {result_path}")
     return result_path
+
+
+# -------------------------
+# Prompt profiles
+# -------------------------
+
+def list_prompt_profiles(mode: str) -> list:
+    """List available prompt profiles for a mode (image/video).
+
+    Scans prompts/<mode>/ for subdirectories containing system_prompt.md.
+    Returns sorted list of profile names, with 'default' first if it exists.
+    """
+    mode_dir = os.path.join(PROMPTS_DIR, mode)
+    if not os.path.isdir(mode_dir):
+        return ["default"]
+
+    profiles = []
+    for entry in os.listdir(mode_dir):
+        profile_dir = os.path.join(mode_dir, entry)
+        if os.path.isdir(profile_dir) and os.path.exists(
+            os.path.join(profile_dir, "system_prompt.md")
+        ):
+            profiles.append(entry)
+
+    if not profiles:
+        return ["default"]
+
+    profiles.sort()
+    if "default" in profiles:
+        profiles.remove("default")
+        profiles.insert(0, "default")
+    return profiles
 
 
 # -------------------------
@@ -1001,7 +1034,7 @@ def run_preprocessing(input_dir: str):
 # HuggingFace upload
 # -------------------------
 
-def run_hf_upload(input_dir: str, python: str):
+def run_hf_upload(input_dir: str, python: str, project_name: str = ""):
     """Upload dataset to HuggingFace using upload_large_folder.
 
     Uses HuggingFace's native upload_large_folder which provides:
@@ -1030,8 +1063,8 @@ def run_hf_upload(input_dir: str, python: str):
             env={**os.environ, "HF_TOKEN": hf_token},
         )
         if r.returncode == 0 and r.stdout.strip():
-            folder_name = os.path.basename(os.path.abspath(input_dir))
-            default_repo = f"{r.stdout.strip()}/{folder_name}"
+            repo_suffix = project_name or os.path.basename(os.path.abspath(input_dir))
+            default_repo = f"{r.stdout.strip()}/{repo_suffix}"
     except Exception:
         pass
 
@@ -1188,6 +1221,22 @@ def run_tagging(input_dir: str, python: str, media_counts: dict):
     if is_video:
         pro_mode = ask_yes_no("Enable PRO mode? (2 frames per video, better quality)", default=False)
 
+    # Prompt profile selection
+    prompt_profile = "default"
+    if has_grok:
+        mode_name = "video" if is_video else "image"
+        profiles = list_prompt_profiles(mode_name)
+        if len(profiles) > 1:
+            profile_choice = ask_choice(
+                f"Prompt profile ({mode_name}):",
+                profiles,
+                default=1,
+            )
+            prompt_profile = profiles[profile_choice - 1]
+        else:
+            prompt_profile = profiles[0]
+            print_info(f"Using prompt profile: {prompt_profile}")
+
     # Grok provider selection
     if has_grok:
         default_provider = 2 if is_video else 1  # xAI Batch default for video
@@ -1336,6 +1385,7 @@ def run_tagging(input_dir: str, python: str, media_counts: dict):
 
     if has_grok:
         cmd.extend(["--grok_provider", grok_provider])
+        cmd.extend(["--prompt_profile", prompt_profile])
         if grok_provider == "xai-batch":
             if xai_batch_action in ("status", "collect"):
                 taggers = "grok"
@@ -1381,6 +1431,7 @@ def run_tagging(input_dir: str, python: str, media_counts: dict):
     if has_grok:
         summary_rows.append(("Grok provider", grok_provider))
         summary_rows.append(("Grok model", grok_model_display))
+        summary_rows.append(("Prompt profile", prompt_profile))
         if grok_provider == "openrouter":
             summary_rows.append(("Concurrency", grok_concurrency))
         else:
@@ -1608,6 +1659,10 @@ def main():
     # Validate media/txt pairs
     run_validation(input_dir)
 
+    # Project name (used as default HF repo name)
+    folder_name = os.path.basename(os.path.abspath(input_dir))
+    project_name = ask_input("Project name (used for HF repo)", default=folder_name)
+
     # What to do?
     workflow = ask_choice("What do you want to do?", [
         "Pre-process dataset (trim to max frames)",
@@ -1627,10 +1682,10 @@ def main():
         # After tagging, offer upload if not already in full pipeline
         if workflow == 2 and tag_ok:
             if ask_yes_no("Upload dataset to HuggingFace?", default=False):
-                run_hf_upload(input_dir, python)
+                run_hf_upload(input_dir, python, project_name)
 
     if workflow in (3, 4):
-        run_hf_upload(input_dir, python)
+        run_hf_upload(input_dir, python, project_name)
 
     print_section("ALL DONE")
     print_success(f"Dataset ready at: {input_dir}")

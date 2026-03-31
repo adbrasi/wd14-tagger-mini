@@ -908,9 +908,11 @@ def get_system_prompt(args) -> str:
         return load_prompt_file(args.grok_system_prompt_file)
 
     mode_dir = "video" if getattr(args, "video", False) else "image"
+    profile = getattr(args, "prompt_profile", None) or "default"
     candidates = [
-        os.path.join(PROMPTS_DIR, mode_dir, "system_prompt.md"),
-        os.path.join(PROMPTS_DIR, "system_prompt.md"),  # backward-compatible fallback
+        os.path.join(PROMPTS_DIR, mode_dir, profile, "system_prompt.md"),
+        os.path.join(PROMPTS_DIR, mode_dir, "system_prompt.md"),  # backward-compatible fallback
+        os.path.join(PROMPTS_DIR, "system_prompt.md"),
     ]
     for path in candidates:
         if os.path.exists(path):
@@ -925,9 +927,11 @@ def get_user_prompt_template(args) -> str:
         return load_prompt_file(args.grok_prompt_file)
 
     mode_dir = "video" if getattr(args, "video", False) else "image"
+    profile = getattr(args, "prompt_profile", None) or "default"
     candidates = [
-        os.path.join(PROMPTS_DIR, mode_dir, "user_prompt.md"),
-        os.path.join(PROMPTS_DIR, "user_prompt.md"),  # backward-compatible fallback
+        os.path.join(PROMPTS_DIR, mode_dir, profile, "user_prompt.md"),
+        os.path.join(PROMPTS_DIR, mode_dir, "user_prompt.md"),  # backward-compatible fallback
+        os.path.join(PROMPTS_DIR, "user_prompt.md"),
     ]
     for path in candidates:
         if os.path.exists(path):
@@ -2878,6 +2882,7 @@ def setup_parser() -> argparse.ArgumentParser:
     parser.add_argument("--grok_model", type=str, default=DEFAULT_GROK_MODEL, help="OpenRouter model ID")
     parser.add_argument("--grok_system_prompt_file", type=str, default=None, help="path to system prompt .md file")
     parser.add_argument("--grok_prompt_file", type=str, default=None, help="path to user prompt template .md file")
+    parser.add_argument("--prompt_profile", type=str, default="default", help="prompt profile name (subdirectory under prompts/<mode>/)")
     parser.add_argument(
         "--grok_tag_category_metadata_file",
         type=str,
