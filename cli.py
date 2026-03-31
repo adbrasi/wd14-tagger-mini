@@ -11,6 +11,7 @@ import re
 import subprocess
 import sys
 import time
+import pathlib
 import zipfile
 
 import requests
@@ -50,6 +51,19 @@ _HF_URL_RE = re.compile(
     r"(?:/tree/[^/]+/(.+))?"
 )
 _HF_ID_RE = re.compile(r"^[a-zA-Z0-9_.-]+/[a-zA-Z0-9_.-]+$")
+
+
+# -------------------------
+# Security helpers
+# -------------------------
+
+def _validate_zip_members(zf: zipfile.ZipFile, dest: str) -> None:
+    """Raise ValueError if any zip member would escape *dest* (Zip Slip)."""
+    dest_path = pathlib.Path(dest).resolve()
+    for member in zf.namelist():
+        target = (dest_path / member).resolve()
+        if target != dest_path and not str(target).startswith(str(dest_path) + os.sep):
+            raise ValueError(f"Unsafe zip member path (path traversal): {member}")
 
 
 # -------------------------
@@ -349,6 +363,7 @@ def extract_zip_archives(path: str, recursive: bool = True) -> dict:
                     continue
 
                 with zipfile.ZipFile(zpath, "r") as zf:
+                    _validate_zip_members(zf, os.path.dirname(zpath))
                     zf.extractall(os.path.dirname(zpath))
 
                 with open(marker, "w", encoding="utf-8") as f:
@@ -598,6 +613,7 @@ def _process_single_source(
             import zipfile as zf
             try:
                 with zf.ZipFile(dest_file, "r") as z:
+                    _validate_zip_members(z, tmp_dir)
                     z.extractall(tmp_dir)
                 os.remove(dest_file)
                 print_success("Zip extracted")
@@ -1228,7 +1244,7 @@ def run_tagging(input_dir: str, python: str, media_counts: dict):
         if grok_provider == "xai-batch":
             xai_api_key = check_env_key("XAI_API_KEY")
             if xai_api_key:
-                print_success(f"Found XAI_API_KEY in environment ({xai_api_key[:8]}...)")
+                print_success(f"Found XAI_API_KEY in environment ({xai_api_key[:4]}****)")
             else:
                 xai_api_key = ask_input("Enter xAI API key")
                 if not xai_api_key:
@@ -1238,7 +1254,7 @@ def run_tagging(input_dir: str, python: str, media_counts: dict):
         else:
             api_key = check_env_key("OPENROUTER_API_KEY")
             if api_key:
-                print_success(f"Found OPENROUTER_API_KEY in environment ({api_key[:8]}...)")
+                print_success(f"Found OPENROUTER_API_KEY in environment ({api_key[:4]}****)")
             else:
                 api_key = ask_input("Enter OpenRouter API key (sk-or-...)")
                 if not api_key:
@@ -1321,8 +1337,6 @@ def run_tagging(input_dir: str, python: str, media_counts: dict):
                     cmd.append("--force")
                 cmd.append("--remove_underscore")
 
-            if xai_api_key:
-                cmd.extend(["--xai_api_key", xai_api_key])
             cmd.extend(["--xai_batch_action", xai_batch_action])
             cmd.extend(["--xai_batch_state_file", xai_batch_state_file])
             cmd.extend(["--xai_api_base_url", XAI_API_BASE_URL])
@@ -1334,15 +1348,10 @@ def run_tagging(input_dir: str, python: str, media_counts: dict):
             if xai_batch_no_image:
                 cmd.append("--xai_batch_no_image")
         else:
-            if api_key:
-                cmd.extend(["--grok_api_key", api_key])
             cmd.extend(["--grok_concurrency", grok_concurrency])
 
     if grok_load_existing:
         cmd.append("--grok_context_from_existing")
-
-    if hf_token:
-        cmd.extend(["--hf_token", hf_token])
 
     cmd.extend(["--thresh", "0.30"])
 

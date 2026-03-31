@@ -498,9 +498,19 @@ def main() -> None:
     if not root.exists() or not root.is_dir():
         raise SystemExit(f"invalid --root: {root}")
 
+    if args.hf_token:
+        import warnings
+        warnings.warn(
+            "Passing --hf_token via CLI is deprecated (visible in process list). "
+            "Use the HF_TOKEN environment variable instead.",
+            DeprecationWarning,
+            stacklevel=1,
+        )
     token = (args.hf_token or os.getenv(args.hf_token_env, "")).strip()
     if not token:
-        raise SystemExit(f"missing token: pass --hf_token or set {args.hf_token_env}")
+        raise SystemExit(
+            f"missing token: set {args.hf_token_env} environment variable"
+        )
 
     excluded_dirs = {d.strip() for d in str(args.exclude_dirs).split(",") if d.strip()}
     zip_temp_dir = (
