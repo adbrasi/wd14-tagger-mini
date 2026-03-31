@@ -669,10 +669,14 @@ def batch_loader_torch(
     batches = [paths[i : i + batch_size] for i in range(0, len(paths), batch_size)]
 
     def _load(path: str):
-        with Image.open(path) as img:
-            img = pixai_pil_to_rgb(img)
-            tensor = transform(img)
-        return path, tensor
+        try:
+            with Image.open(path) as img:
+                img = pixai_pil_to_rgb(img)
+                tensor = transform(img)
+            return path, tensor
+        except Exception as e:
+            logger.warning(f"failed to load image, skipping: {path} ({e})")
+            return path, None
 
     for batch in batches:
         if max_workers and max_workers > 1:
@@ -680,6 +684,9 @@ def batch_loader_torch(
                 loaded = list(ex.map(_load, batch))
         else:
             loaded = [_load(p) for p in batch]
+
+        # Filter out images that failed to load
+        loaded = [(p, t) for p, t in loaded if t is not None]
 
         if not loaded:
             yield [], torch.zeros((0, 3, 448, 448), dtype=torch.float32)
@@ -2284,6 +2291,9 @@ def batch_loader(
         else:
             loaded = [load_image(p, preprocess_fn) for p in batch]
 
+        # Filter out images that failed to load
+        loaded = [(p, img) for p, img in loaded if img is not None]
+
         if not loaded:
             yield [], np.zeros((0, IMAGE_SIZE, IMAGE_SIZE, 3), dtype=np.float32)
             continue
@@ -2293,10 +2303,14 @@ def batch_loader(
         yield list(paths_b), images_np
 
 
-def load_image(path: str, preprocess_fn) -> Tuple[str, np.ndarray]:
-    with Image.open(path) as img:
-        arr = preprocess_fn(img)
-    return path, arr
+def load_image(path: str, preprocess_fn) -> Tuple[str, Optional[np.ndarray]]:
+    try:
+        with Image.open(path) as img:
+            arr = preprocess_fn(img)
+        return path, arr
+    except Exception as e:
+        logger.warning(f"failed to load image, skipping: {path} ({e})")
+        return path, None
 
 
 # -------------------------
