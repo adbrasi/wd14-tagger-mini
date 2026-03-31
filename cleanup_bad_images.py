@@ -17,13 +17,10 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 from PIL import Image, ImageFile
 
 from constants import IMAGE_EXTS
+from wd14_utils import setup_logging
+
 PROGRESS_EVERY = 1000
 DEFAULT_HF_CHUNK_GB = 5.0
-
-
-def setup_logging(verbose: bool) -> None:
-    level = logging.DEBUG if verbose else logging.INFO
-    logging.basicConfig(level=level, format="%(levelname)s %(message)s")
 
 
 def default_workers() -> int:
@@ -423,7 +420,7 @@ def main() -> None:
     parser.add_argument("--verbose", action="store_true")
     args = parser.parse_args()
 
-    setup_logging(args.verbose)
+    setup_logging("DEBUG" if args.verbose else "INFO")
     ImageFile.LOAD_TRUNCATED_IMAGES = False
 
     root = Path(args.root).resolve()

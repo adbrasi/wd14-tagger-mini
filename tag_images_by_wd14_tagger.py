@@ -35,7 +35,6 @@ from wd14_utils import (
     setup_logging,
 )
 
-setup_logging()
 logger = logging.getLogger(__name__)
 
 IMAGE_SIZE = 448
@@ -2857,6 +2856,7 @@ def setup_parser() -> argparse.ArgumentParser:
 
 
 if __name__ == "__main__":
+    setup_logging()
     parser = setup_parser()
     args = parser.parse_args()
     try:

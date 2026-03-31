@@ -23,10 +23,7 @@ DEFAULT_ZIP_PATH_PREFIX = "chunks"
 DEFAULT_START_CHUNK = 1
 DEFAULT_END_CHUNK = 0
 
-
-def setup_logging(verbose: bool) -> None:
-    level = logging.DEBUG if verbose else logging.INFO
-    logging.basicConfig(level=level, format="%(levelname)s %(message)s")
+from wd14_utils import setup_logging
 
 
 def default_workers() -> int:
@@ -537,7 +534,7 @@ def main() -> None:
     parser.add_argument("--verbose", action="store_true")
     args = parser.parse_args()
 
-    setup_logging(args.verbose)
+    setup_logging("DEBUG" if args.verbose else "INFO")
 
     root = Path(args.root).resolve()
     if not root.exists() or not root.is_dir():
