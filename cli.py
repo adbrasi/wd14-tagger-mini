@@ -1338,8 +1338,6 @@ def run_tagging(input_dir: str, python: str, media_counts: dict):
                     cmd.append("--force")
                 cmd.append("--remove_underscore")
 
-            if xai_api_key:
-                cmd.extend(["--xai_api_key", xai_api_key])
             cmd.extend(["--xai_batch_action", xai_batch_action])
             cmd.extend(["--xai_batch_state_file", xai_batch_state_file])
             cmd.extend(["--xai_api_base_url", XAI_API_BASE_URL])
@@ -1351,15 +1349,10 @@ def run_tagging(input_dir: str, python: str, media_counts: dict):
             if xai_batch_no_image:
                 cmd.append("--xai_batch_no_image")
         else:
-            if api_key:
-                cmd.extend(["--grok_api_key", api_key])
             cmd.extend(["--grok_concurrency", grok_concurrency])
 
     if grok_load_existing:
         cmd.append("--grok_context_from_existing")
-
-    if hf_token:
-        cmd.extend(["--hf_token", hf_token])
 
     cmd.extend(["--thresh", "0.30"])
 
