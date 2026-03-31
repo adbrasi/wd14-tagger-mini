@@ -17,7 +17,7 @@ from typing import Optional
 # NOTE: These functions run in subprocess workers — they must NOT import Rich
 # (Rich Console is not fork-safe). Logging is returned as results instead.
 
-VIDEO_EXTS = {".mp4", ".avi", ".mov", ".mkv", ".webm", ".flv", ".wmv"}
+from constants import VIDEO_EXTS
 
 _DEVNULL = subprocess.DEVNULL
 
@@ -150,18 +150,15 @@ def trim_video(video_path: str, cut_seconds: float) -> dict:
             proc.kill()
             proc.wait()
             result["detail"] = "timeout (300s)"
-            _remove_if_exists(tmp_path)
             return result
 
         if proc.returncode != 0:
             result["detail"] = _extract_ffmpeg_error(stderr)
-            _remove_if_exists(tmp_path)
             return result
 
         # Verify output is valid (non-zero size)
         if not os.path.exists(tmp_path) or os.path.getsize(tmp_path) == 0:
             result["detail"] = "output file empty or missing"
-            _remove_if_exists(tmp_path)
             return result
 
         os.replace(tmp_path, video_path)
@@ -170,8 +167,10 @@ def trim_video(video_path: str, cut_seconds: float) -> dict:
 
     except Exception as e:
         result["detail"] = str(e)
-        _remove_if_exists(tmp_path)
         return result
+    finally:
+        # Clean up temp file if it still exists (os.replace succeeded = file gone)
+        _remove_if_exists(tmp_path)
 
 
 def _remove_if_exists(path: str):

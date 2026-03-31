@@ -90,17 +90,14 @@ def convert_to_mp4(src_path: str) -> dict:
             proc.kill()
             proc.wait()
             result["detail"] = "timeout (600s)"
-            _remove(tmp_path)
             return result
 
         if proc.returncode != 0:
             result["detail"] = _last_error(stderr)
-            _remove(tmp_path)
             return result
 
         if not os.path.exists(tmp_path) or os.path.getsize(tmp_path) == 0:
             result["detail"] = "output empty"
-            _remove(tmp_path)
             return result
 
         os.replace(tmp_path, dst_path)
@@ -124,8 +121,10 @@ def convert_to_mp4(src_path: str) -> dict:
 
     except Exception as e:
         result["detail"] = str(e)
-        _remove(tmp_path)
         return result
+    finally:
+        # Clean up temp file if it still exists (os.replace succeeded = file gone)
+        _remove(tmp_path)
 
 
 def fix_mono_to_stereo(video_path: str) -> dict:
@@ -183,21 +182,18 @@ def fix_mono_to_stereo(video_path: str) -> dict:
             result["ok"] = False
             result["detail"] = "timeout (300s)"
             result["action"] = "error"
-            _remove(tmp_path)
             return result
 
         if proc.returncode != 0:
             result["ok"] = False
             result["detail"] = _last_error(stderr)
             result["action"] = "error"
-            _remove(tmp_path)
             return result
 
         if not os.path.exists(tmp_path) or os.path.getsize(tmp_path) == 0:
             result["ok"] = False
             result["detail"] = "output empty"
             result["action"] = "error"
-            _remove(tmp_path)
             return result
 
         os.replace(tmp_path, video_path)
@@ -208,8 +204,10 @@ def fix_mono_to_stereo(video_path: str) -> dict:
         result["ok"] = False
         result["detail"] = str(e)
         result["action"] = "error"
-        _remove(tmp_path)
         return result
+    finally:
+        # Clean up temp file if it still exists (os.replace succeeded = file gone)
+        _remove(tmp_path)
 
 
 def get_video_fps(video_path: str) -> Optional[float]:
@@ -289,21 +287,18 @@ def _fix_fps_single(args: tuple) -> dict:
             result["ok"] = False
             result["detail"] = "timeout (600s)"
             result["action"] = "error"
-            _remove(tmp_path)
             return result
 
         if proc.returncode != 0:
             result["ok"] = False
             result["detail"] = _last_error(stderr)
             result["action"] = "error"
-            _remove(tmp_path)
             return result
 
         if not os.path.exists(tmp_path) or os.path.getsize(tmp_path) == 0:
             result["ok"] = False
             result["detail"] = "output empty"
             result["action"] = "error"
-            _remove(tmp_path)
             return result
 
         os.replace(tmp_path, video_path)
@@ -314,8 +309,10 @@ def _fix_fps_single(args: tuple) -> dict:
         result["ok"] = False
         result["detail"] = str(e)
         result["action"] = "error"
-        _remove(tmp_path)
         return result
+    finally:
+        # Clean up temp file if it still exists (os.replace succeeded = file gone)
+        _remove(tmp_path)
 
 
 def normalize_videos(
