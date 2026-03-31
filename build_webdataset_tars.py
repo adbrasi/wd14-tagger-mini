@@ -187,6 +187,9 @@ def main():
     )
     args = parser.parse_args()
 
+    if args.shard_size_gb <= 0:
+        raise SystemExit("--shard_size_gb must be positive")
+
     if not re.match(r'^[A-Za-z0-9_-]+$', args.split):
         raise SystemExit(f"--split must match [A-Za-z0-9_-]+, got: {args.split!r}")
 
