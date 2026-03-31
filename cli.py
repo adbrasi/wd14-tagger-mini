@@ -11,6 +11,7 @@ import re
 import subprocess
 import sys
 import time
+import pathlib
 import zipfile
 
 import requests
@@ -51,6 +52,19 @@ _HF_URL_RE = re.compile(
     r"(?:/tree/[^/]+/(.+))?"
 )
 _HF_ID_RE = re.compile(r"^[a-zA-Z0-9_.-]+/[a-zA-Z0-9_.-]+$")
+
+
+# -------------------------
+# Security helpers
+# -------------------------
+
+def _validate_zip_members(zf: zipfile.ZipFile, dest: str) -> None:
+    """Raise ValueError if any zip member would escape *dest* (Zip Slip)."""
+    dest_path = pathlib.Path(dest).resolve()
+    for member in zf.namelist():
+        target = (dest_path / member).resolve()
+        if target != dest_path and not str(target).startswith(str(dest_path) + os.sep):
+            raise ValueError(f"Unsafe zip member path (path traversal): {member}")
 
 
 # -------------------------
@@ -350,6 +364,7 @@ def extract_zip_archives(path: str, recursive: bool = True) -> dict:
                     continue
 
                 with zipfile.ZipFile(zpath, "r") as zf:
+                    _validate_zip_members(zf, os.path.dirname(zpath))
                     zf.extractall(os.path.dirname(zpath))
 
                 with open(marker, "w", encoding="utf-8") as f:
@@ -599,6 +614,7 @@ def _process_single_source(
             import zipfile as zf
             try:
                 with zf.ZipFile(dest_file, "r") as z:
+                    _validate_zip_members(z, tmp_dir)
                     z.extractall(tmp_dir)
                 os.remove(dest_file)
                 print_success("Zip extracted")
