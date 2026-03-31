@@ -241,7 +241,15 @@ def add_tags_to_map(result_map: Dict[str, List[str]], image_path: str, tags: Lis
 # WD14 tagger
 # -------------------------
 
-def load_wd14_tags(model_location: str, args) -> Tuple[List[str], List[str], List[str]]:
+def load_wd14_tags(model_location: str, args) -> Tuple[List[str], Dict[int, Tuple[str, str]], List[str]]:
+    """Load WD14 tags from CSV and build a position-based index map.
+
+    Returns:
+        rating_tags: list of rating tag names (category "9")
+        tag_map: dict mapping output index (after 4 ratings) to (tag_name, category_id)
+                 for general ("0") and character ("4") tags only
+        character_tag_names: list of character tag names (for reference only)
+    """
     with open(os.path.join(model_location, WD14_CSV_FILE), "r", encoding="utf-8") as f:
         reader = csv.reader(f)
         rows = [row for row in reader]
@@ -250,23 +258,37 @@ def load_wd14_tags(model_location: str, args) -> Tuple[List[str], List[str], Lis
     assert header[0] == "tag_id" and header[1] == "name" and header[2] == "category"
 
     rating_tags = [row[1] for row in data if row[2] == "9"]
-    general_tags = [row[1] for row in data if row[2] == "0"]
-    character_tags = [row[1] for row in data if row[2] == "4"]
 
+    # Build index map: position in non-rating output -> (tag_name, category_id).
+    # The model output layout is [rating_0..3, rest_0..N] where "rest" includes
+    # general (cat 0), character (cat 4), and possibly other categories (e.g. cat 3).
+    # We only map general and character tags; other categories are skipped at inference.
+    tag_map: Dict[int, Tuple[str, str]] = {}
+    idx = 0
+    for row in data:
+        cat = row[2]
+        if cat == "9":
+            continue  # ratings are handled separately via prob[:4]
+        if cat in ("0", "4"):
+            tag_map[idx] = (row[1], cat)
+        idx += 1
+
+    # Apply transformations to tag_map entries
     if args.remove_underscore:
         rating_tags = apply_remove_underscore(rating_tags)
-        general_tags = apply_remove_underscore(general_tags)
-        character_tags = apply_remove_underscore(character_tags)
+        tag_map = {k: (apply_remove_underscore([name])[0], cat) for k, (name, cat) in tag_map.items()}
 
     if args.tag_replacement:
         rating_tags = apply_tag_replacement(rating_tags, args.tag_replacement)
-        general_tags = apply_tag_replacement(general_tags, args.tag_replacement)
-        character_tags = apply_tag_replacement(character_tags, args.tag_replacement)
+        tag_map = {k: (apply_tag_replacement([name], args.tag_replacement)[0], cat) for k, (name, cat) in tag_map.items()}
 
     if args.character_tag_expand:
-        character_tags = expand_character_tags(character_tags, args.caption_separator)
+        tag_map = {
+            k: (expand_character_tags([name], args.caption_separator)[0], cat) if cat == "4" else (name, cat)
+            for k, (name, cat) in tag_map.items()
+        }
 
-    return rating_tags, general_tags, character_tags
+    return rating_tags, tag_map, [name for name, cat in tag_map.values() if cat == "4"]
 
 
 def expand_character_tags(tags: List[str], sep: str) -> List[str]:
@@ -300,7 +322,7 @@ def run_wd14(
         hf_hub_download(repo_id=repo_id, filename=WD14_CSV_FILE, local_dir=model_location, force_download=True)
         hf_hub_download(repo_id=repo_id, filename=WD14_ONNX_NAME, local_dir=model_location, force_download=True)
 
-    rating_tags, general_tags, character_tags = load_wd14_tags(model_location, args)
+    rating_tags, tag_map, _char_names = load_wd14_tags(model_location, args)
 
     onnx_path = os.path.join(model_location, WD14_ONNX_NAME)
     session, input_name, fixed_batch = build_session(onnx_path)
@@ -318,10 +340,13 @@ def run_wd14(
         for image_path, prob in zip(batch_paths, probs):
             tags: List[str] = []
             for i, p in enumerate(prob[4:]):
-                if i < len(general_tags) and p >= general_threshold:
-                    tags.append(general_tags[i])
-                elif i >= len(general_tags) and p >= character_threshold:
-                    tag_name = character_tags[i - len(general_tags)]
+                entry = tag_map.get(i)
+                if entry is None:
+                    continue  # skip categories not in general/character
+                tag_name, cat = entry
+                if cat == "0" and p >= general_threshold:
+                    tags.append(tag_name)
+                elif cat == "4" and p >= character_threshold:
                     if args.character_tags_first:
                         tags.insert(0, tag_name)
                     else:
