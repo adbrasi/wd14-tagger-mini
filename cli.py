@@ -1229,7 +1229,7 @@ def run_tagging(input_dir: str, python: str, media_counts: dict):
         if grok_provider == "xai-batch":
             xai_api_key = check_env_key("XAI_API_KEY")
             if xai_api_key:
-                print_success(f"Found XAI_API_KEY in environment ({xai_api_key[:8]}...)")
+                print_success(f"Found XAI_API_KEY in environment ({xai_api_key[:4]}****)")
             else:
                 xai_api_key = ask_input("Enter xAI API key")
                 if not xai_api_key:
@@ -1239,7 +1239,7 @@ def run_tagging(input_dir: str, python: str, media_counts: dict):
         else:
             api_key = check_env_key("OPENROUTER_API_KEY")
             if api_key:
-                print_success(f"Found OPENROUTER_API_KEY in environment ({api_key[:8]}...)")
+                print_success(f"Found OPENROUTER_API_KEY in environment ({api_key[:4]}****)")
             else:
                 api_key = ask_input("Enter OpenRouter API key (sk-or-...)")
                 if not api_key:
