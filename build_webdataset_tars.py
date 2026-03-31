@@ -19,7 +19,7 @@ import tarfile
 from pathlib import Path
 from typing import List, Optional, Tuple
 
-VIDEO_EXTS = {".mp4", ".avi", ".mov", ".mkv", ".webm", ".flv", ".wmv"}
+from constants import VIDEO_EXTS
 DEFAULT_SHARD_SIZE_GB = 1.0
 DEFAULT_SPLIT = "train"
 

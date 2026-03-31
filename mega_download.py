@@ -11,9 +11,7 @@ from pathlib import Path
 
 from ui import console, make_progress, print_error, print_info, print_success, print_warning
 
-VIDEO_EXTS = {".mp4", ".avi", ".mov", ".mkv", ".webm", ".flv", ".wmv"}
-IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".avif", ".jxl"}
-MEDIA_EXTS = VIDEO_EXTS | IMAGE_EXTS
+from constants import IMAGE_EXTS, MEDIA_EXTS, VIDEO_EXTS
 PAIR_EXT = ".txt"
 
 

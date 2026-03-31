@@ -16,7 +16,7 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 from PIL import Image, ImageFile
 
-IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".avif", ".jxl"}
+from constants import IMAGE_EXTS
 PROGRESS_EVERY = 1000
 DEFAULT_HF_CHUNK_GB = 5.0
 

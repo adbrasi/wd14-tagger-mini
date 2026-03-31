@@ -10,9 +10,7 @@ import os
 from pathlib import Path
 from typing import Dict, List, Set
 
-VIDEO_EXTS = {".mp4", ".avi", ".mov", ".mkv", ".webm", ".flv", ".wmv"}
-IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".avif", ".jxl"}
-MEDIA_EXTS = VIDEO_EXTS | IMAGE_EXTS
+from constants import IMAGE_EXTS, MEDIA_EXTS, VIDEO_EXTS
 
 
 def scan_pairs(directory: str, recursive: bool = True) -> dict:

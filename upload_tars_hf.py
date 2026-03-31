@@ -23,7 +23,7 @@ import tarfile
 from pathlib import Path
 from typing import List, Optional, Tuple
 
-VIDEO_EXTS = {".mp4", ".avi", ".mov", ".mkv", ".webm", ".flv", ".wmv"}
+from constants import VIDEO_EXTS
 
 
 # ── TAR builder ──────────────────────────────────────────────────────────────

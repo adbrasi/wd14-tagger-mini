@@ -14,8 +14,8 @@ import zipfile
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
 
-IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".avif", ".jxl"}
-VIDEO_EXTS = {".mp4", ".avi", ".mov", ".mkv", ".webm", ".flv", ".wmv"}
+from constants import IMAGE_EXTS, VIDEO_EXTS
+
 TEXT_EXTS = {".txt"}
 ALLOWED_EXTS = IMAGE_EXTS | VIDEO_EXTS | TEXT_EXTS
 
