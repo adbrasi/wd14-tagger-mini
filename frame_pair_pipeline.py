@@ -304,59 +304,95 @@ def organize_pairs(
 # ---------------------------------------------------------------------------
 
 
+def _run_tagger_subprocess(
+    python: str,
+    tagger_script: str,
+    directory: str,
+    tagger_name: str,
+    batch_size: int,
+) -> int:
+    """Run a tagger subprocess on a directory. Returns exit code."""
+    import subprocess
+
+    cmd = [
+        python, tagger_script, directory,
+        "--taggers", tagger_name,
+        "--batch_size", str(batch_size),
+        "--remove_underscore",
+        "--thresh", "0.30",
+    ]
+    # Pass HF token explicitly for gated models (PixAI)
+    hf_token = (
+        os.environ.get("HF_TOKEN")
+        or os.environ.get("HUGGINGFACE_HUB_TOKEN")
+        or os.environ.get("HUGGINGFACE_TOKEN")
+        or ""
+    )
+    if hf_token:
+        cmd.extend(["--hf_token", hf_token])
+    env = os.environ.copy()
+    if hf_token:
+        env["HF_TOKEN"] = hf_token
+        env["HUGGINGFACE_HUB_TOKEN"] = hf_token
+
+    proc = subprocess.Popen(cmd, env=env)
+    try:
+        proc.wait()
+    except KeyboardInterrupt:
+        print_warning("Interrupted — killing tagger process...")
+        proc.kill()
+        proc.wait()
+        raise
+
+    return proc.returncode
+
+
 def run_wd_tagging(
     pairs: List[Tuple[str, str]],
     python: str,
     batch_size: int = 4,
-) -> None:
+) -> bool:
     """Run PixAI tagger (fallback to WD14) on all unique A and B images.
 
-    Uses the existing tagger script via subprocess, same as run_tagging in cli.py.
+    Tries PixAI first. If it fails (e.g. gated model), falls back to WD14.
+    Returns True if tagging succeeded, False otherwise.
     """
-    # Collect unique images
-    unique_images: set = set()
-    for path_a, path_b in pairs:
-        unique_images.add(path_a)
-        unique_images.add(path_b)
-
-    # Group by directory to run tagger per directory
+    # Collect unique directories
     dirs: set = set()
-    for img in unique_images:
-        dirs.add(os.path.dirname(img))
-
-    import subprocess
-    import sys
+    for path_a, path_b in pairs:
+        dirs.add(os.path.dirname(path_a))
+        dirs.add(os.path.dirname(path_b))
 
     tagger_script = os.path.join(SCRIPT_DIR, "tag_images_by_wd14_tagger.py")
-    venv_dir = os.path.join(SCRIPT_DIR, ".venv")
+    sorted_dirs = sorted(dirs)
+    total_dirs = len(sorted_dirs)
+    any_success = False
 
-    for d in sorted(dirs):
-        print_info(f"Tagging images in: {d}")
-        cmd = [
-            python, tagger_script, d,
-            "--taggers", "pixai",
-            "--batch_size", str(batch_size),
-            "--remove_underscore",
-            "--thresh", "0.30",
-        ]
-        env = os.environ.copy()
-        hf_token = os.environ.get("HF_TOKEN", "")
-        if hf_token:
-            env["HF_TOKEN"] = hf_token
+    for idx, d in enumerate(sorted_dirs, 1):
+        print_info(f"[{idx}/{total_dirs}] Tagging images in: {d}")
 
-        proc = subprocess.Popen(cmd, env=env)
-        try:
-            proc.wait()
-        except KeyboardInterrupt:
-            print_warning("Interrupted — killing tagger process...")
-            proc.kill()
-            proc.wait()
-            raise
+        # Try PixAI first
+        print_info("Trying PixAI tagger...")
+        rc = _run_tagger_subprocess(python, tagger_script, d, "pixai", batch_size)
 
-        if proc.returncode != 0:
-            print_warning(f"Tagger exited with code {proc.returncode} for {d}")
+        if rc != 0:
+            # Fallback to WD14
+            print_warning(f"PixAI failed (code {rc}), falling back to WD14...")
+            rc = _run_tagger_subprocess(python, tagger_script, d, "wd14", batch_size)
+
+            if rc != 0:
+                print_error(f"WD14 also failed (code {rc}) for {d}")
+            else:
+                print_success(f"WD14 tagging complete for {d}")
+                any_success = True
         else:
-            print_success(f"Tagging complete for {d}")
+            print_success(f"PixAI tagging complete for {d}")
+            any_success = True
+
+    if not any_success:
+        print_error("All taggers failed for all directories. Cannot proceed without tags.")
+
+    return any_success
 
 
 # ---------------------------------------------------------------------------

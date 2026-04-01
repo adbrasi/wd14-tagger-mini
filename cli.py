@@ -1773,19 +1773,32 @@ def run_frame_pair(input_dir: str, python: str, project_name: str = ""):
         print_info("Aborted")
         return
 
-    # Step 2: WD/PixAI tagging
+    # Step 2: WD/PixAI tagging (PixAI first, fallback to WD14)
     print_section("STEP 2: WD/PIXAI TAGGING")
-    print_info(f"Running PixAI tagger on {len(pairs) * 2} images...")
-    run_wd_tagging(pairs, python)
-    print_success("Tagging complete")
+    print_info(f"Tagging {len(pairs) * 2} images (PixAI → WD14 fallback)...")
+    tagging_ok = run_wd_tagging(pairs, python)
+    if not tagging_ok:
+        print_error("Tagging failed — cannot proceed without WD tags.")
+        if not ask_yes_no("Continue anyway (captions will lack tag context)?", default=False):
+            return
 
     # Step 3: Describe A images
-    run_describe_a(pairs, xai_api_key, xai_model, output_dir)
+    if not ask_yes_no("Proceed to describe A images via Grok xAI Batch?", default=True):
+        print_info("Skipped step 3")
+    else:
+        run_describe_a(pairs, xai_api_key, xai_model, output_dir)
 
     # Step 4: Similarity
-    similarities = run_similarity(pairs, device)
+    if not ask_yes_no("Proceed to compute similarity (CLIP + SSCD + SSIM)?", default=True):
+        print_info("Skipped step 4 — using 50% default similarity for all pairs")
+        similarities = [50.0] * len(pairs)
+    else:
+        similarities = run_similarity(pairs, device)
 
     # Step 5: Caption B images
+    if not ask_yes_no("Proceed to caption B images via Grok xAI Batch?", default=True):
+        print_info("Skipped step 5")
+        return
     run_caption_b(pairs, similarities, xai_api_key, xai_model, output_dir)
 
     print_section("PIPELINE COMPLETE")
