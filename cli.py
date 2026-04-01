@@ -1220,6 +1220,15 @@ def run_hf_upload(input_dir: str, python: str, project_name: str = ""):
 
     num_workers = max(4, min(64, (os.cpu_count() or 4) * 2))
 
+    # Build allow_patterns to ensure media + .txt are always uploaded
+    media_patterns = (
+        ["*.mp4", "*.avi", "*.mov", "*.mkv", "*.webm", "*.flv", "*.wmv"]
+        + ["*.png", "*.jpg", "*.jpeg", "*.webp", "*.bmp", "*.avif", "*.jxl"]
+        + ["*.txt"]
+        + ["*.tar", "*.zip"]  # for WebDataset/zip uploads
+    )
+    patterns_str = repr(media_patterns)
+
     upload_script = (
         "from huggingface_hub import HfApi\n"
         "import sys, os\n"
@@ -1231,6 +1240,7 @@ def run_hf_upload(input_dir: str, python: str, project_name: str = ""):
         "    repo_type='dataset',\n"
         "    folder_path=sys.argv[2],\n"
         "    num_workers=int(sys.argv[4]),\n"
+        f"    allow_patterns={patterns_str},\n"
         ")\n"
         "print('__done__')\n"
     )
