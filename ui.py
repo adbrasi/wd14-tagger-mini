@@ -52,9 +52,16 @@ def print_info(msg: str):
     console.print(f"[dim]→[/] {msg}")
 
 
+def _prompt(text: str):
+    """Print prompt text and flush immediately for terminal compatibility."""
+    import sys as _sys
+    _sys.stdout.write(text)
+    _sys.stdout.flush()
+
+
 def ask_input(prompt: str, default: str = "") -> str:
     suffix = f" ({default})" if default else ""
-    console.print(f"[bold]{prompt}[/]{suffix}: ", end="")
+    _prompt(f"{prompt}{suffix}: ")
     try:
         raw = input().strip()
     except (EOFError, KeyboardInterrupt):
@@ -70,7 +77,7 @@ def ask_choice(prompt: str, options: List[str], default: int = 1) -> int:
         marker = " [blue]*[/]" if i == default else ""
         console.print(f"  [bold]{i})[/] {opt}{marker}")
     while True:
-        console.print(f"Choice ({default}): ", end="")
+        _prompt(f"Choice ({default}): ")
         try:
             raw = input().strip()
         except (EOFError, KeyboardInterrupt):
@@ -89,7 +96,7 @@ def ask_choice(prompt: str, options: List[str], default: int = 1) -> int:
 def ask_yes_no(prompt: str, default: bool = True) -> bool:
     hint = "Y/n" if default else "y/N"
     while True:
-        console.print(f"[bold]{prompt}[/] [{hint}]: ", end="")
+        _prompt(f"{prompt} [{hint}]: ")
         try:
             raw = input().strip().lower()
         except (EOFError, KeyboardInterrupt):
@@ -105,7 +112,7 @@ def ask_yes_no(prompt: str, default: bool = True) -> bool:
 
 def ask_int(prompt: str, default: int = 1, minimum: int = 1) -> int:
     while True:
-        console.print(f"[bold]{prompt}[/] ({default}): ", end="")
+        _prompt(f"{prompt} ({default}): ")
         try:
             raw = input().strip()
         except (EOFError, KeyboardInterrupt):
