@@ -1103,14 +1103,75 @@ def run_hf_upload(input_dir: str, python: str, project_name: str = ""):
 
     # Ask upload format
     upload_format = ask_choice("Upload format", [
-        "WebDataset TAR shards (recommended — fewer files, xet fast, streaming)",
+        "Zip chunks (images+txt packed into zip shards — recommended)",
+        "WebDataset TAR shards (video+txt pairs, streaming format)",
         "Individual files (upload_large_folder — resumable, simple)",
     ])
-    use_webdataset = upload_format == 1
 
     upload_dir = input_dir
 
-    if use_webdataset:
+    if upload_format == 1:
+        # Zip chunks
+        print_section("BUILDING ZIP SHARDS")
+        zip_output = os.path.join(os.path.dirname(os.path.abspath(input_dir)),
+                                  os.path.basename(input_dir) + "_zips")
+        os.makedirs(zip_output, exist_ok=True)
+        shard_gb = 1.0
+        max_shard_bytes = int(shard_gb * (1024**3))
+
+        # Collect all media+txt pairs
+        all_files = []
+        for dirpath, _, filenames in os.walk(input_dir):
+            for fname in sorted(filenames):
+                fpath = os.path.join(dirpath, fname)
+                ext = os.path.splitext(fname)[1].lower()
+                if ext in IMAGE_EXTS or ext in VIDEO_EXTS or ext == ".txt":
+                    all_files.append(fpath)
+
+        if not all_files:
+            print_error(f"No media files found in {input_dir}")
+            return
+
+        print_info(f"Packing {len(all_files):,} files into zip shards (~{shard_gb}GB each) → {zip_output}")
+
+        shard_idx = 0
+        current_bytes = 0
+        current_zip = None
+        shards_created = 0
+        files_packed = 0
+
+        try:
+            for fpath in all_files:
+                fsize = os.path.getsize(fpath)
+                rel_path = os.path.relpath(fpath, input_dir)
+
+                if current_zip is None or (current_bytes > 0 and current_bytes + fsize > max_shard_bytes):
+                    if current_zip is not None:
+                        current_zip.close()
+                        shards_created += 1
+                    shard_path = os.path.join(zip_output, f"shard-{shard_idx:04d}.zip")
+                    current_zip = zipfile.ZipFile(shard_path, "w", zipfile.ZIP_STORED)
+                    shard_idx += 1
+                    current_bytes = 0
+
+                current_zip.write(fpath, rel_path)
+                current_bytes += fsize
+                files_packed += 1
+
+            if current_zip is not None:
+                current_zip.close()
+                shards_created += 1
+        except KeyboardInterrupt:
+            if current_zip is not None:
+                current_zip.close()
+            print_warning("\nZip building interrupted")
+            return
+
+        print_success(f"{shards_created} zip shards created, {files_packed:,} files packed")
+        upload_dir = zip_output
+
+    elif upload_format == 2:
+        # WebDataset TAR
         print_section("BUILDING WEBDATASET TAR SHARDS")
         tar_output = os.path.join(os.path.dirname(os.path.abspath(input_dir)),
                                   os.path.basename(input_dir) + "_webdataset")
@@ -1121,6 +1182,9 @@ def run_hf_upload(input_dir: str, python: str, project_name: str = ""):
             "build_webdataset_tars",
             os.path.join(SCRIPT_DIR, "build_webdataset_tars.py"),
         )
+        if _spec is None or _spec.loader is None:
+            print_error("build_webdataset_tars.py not found")
+            return
         _mod = importlib.util.module_from_spec(_spec)
         _spec.loader.exec_module(_mod)
 
@@ -1142,7 +1206,7 @@ def run_hf_upload(input_dir: str, python: str, project_name: str = ""):
             f"{stats['total_bytes'] / (1024**3):.1f} GB"
         )
         if stats["missing_txt"]:
-            print_warning(f"{stats['missing_txt']} videos without .txt caption")
+            print_warning(f"{stats['missing_txt']} files without .txt caption")
         upload_dir = tar_output
 
     print_section("UPLOADING TO HUGGINGFACE")
