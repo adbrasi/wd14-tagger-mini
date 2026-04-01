@@ -1603,6 +1603,7 @@ def run_tagging(input_dir: str, python: str, media_counts: dict):
                     test_cmd.remove("--recursive")
                 if "--force" not in test_cmd:
                     test_cmd.append("--force")
+                test_cmd.append("--save_intermediate_tags")
                 # xAI batch: use a separate state file for the test
                 if grok_provider == "xai-batch" and has_grok:
                     test_state = os.path.join(test_dir, ".xai_test_state.json")
@@ -1686,77 +1687,31 @@ def run_tagging(input_dir: str, python: str, media_counts: dict):
                         print_info("Aborted")
                         return False
                 else:
-                    # Show pixai/wd14 tags from the test run log
-                    test_log = os.path.join(test_dir, ".tagger_log.json")
-                    if os.path.exists(test_log):
-                        try:
-                            with open(test_log, "r", encoding="utf-8") as lf:
-                                log_data = json.load(lf)
-                            for entry in log_data.values():
-                                tags_list = entry.get("tags", [])
-                                if tags_list:
-                                    print_info("Tagger tags (pixai/wd14):")
-                                    console.print(f"[dim]{'─' * 50}[/]")
-                                    console.print(f"[yellow]{', '.join(tags_list[:50])}[/]")
-                                    if len(tags_list) > 50:
-                                        console.print(f"[dim]... ({len(tags_list)} tags total)[/]")
-                                    console.print(f"[dim]{'─' * 50}[/]\n")
-                                    break
-                        except Exception:
-                            pass
-
-                    # Show the prompt that was sent to grok
-                    _prompt_mode = "video" if is_video else "image"
-                    _prompt_candidates = [
-                        os.path.join(SCRIPT_DIR, "prompts", _prompt_mode, prompt_profile, "system_prompt.md"),
-                        os.path.join(SCRIPT_DIR, "prompts", _prompt_mode, "system_prompt.md"),
-                    ]
-                    _sys_prompt_path = None
-                    for _cp in _prompt_candidates:
-                        if os.path.exists(_cp):
-                            _sys_prompt_path = _cp
-                            break
-                    _user_prompt_candidates = [
-                        os.path.join(SCRIPT_DIR, "prompts", _prompt_mode, prompt_profile, "user_prompt.md"),
-                        os.path.join(SCRIPT_DIR, "prompts", _prompt_mode, "user_prompt.md"),
-                    ]
-                    _user_prompt_path = None
-                    for _cp in _user_prompt_candidates:
-                        if os.path.exists(_cp):
-                            _user_prompt_path = _cp
-                            break
-
-                    if _sys_prompt_path:
-                        with open(_sys_prompt_path, "r", encoding="utf-8") as pf:
-                            _sys_content = pf.read().strip()
-                        print_info(f"System prompt ({os.path.relpath(_sys_prompt_path, SCRIPT_DIR)}):")
-                        console.print(f"[dim]{'─' * 50}[/]")
-                        console.print(f"[cyan]{_sys_content[:300]}[/]")
-                        if len(_sys_content) > 300:
-                            console.print(f"[dim]... ({len(_sys_content)} chars total)[/]")
-                        console.print(f"[dim]{'─' * 50}[/]\n")
-
-                    if _user_prompt_path:
-                        with open(_user_prompt_path, "r", encoding="utf-8") as pf:
-                            _user_content = pf.read().strip()
-                        print_info(f"User prompt template ({os.path.relpath(_user_prompt_path, SCRIPT_DIR)}):")
-                        console.print(f"[dim]{'─' * 50}[/]")
-                        console.print(f"[cyan]{_user_content[:300]}[/]")
-                        if len(_user_content) > 300:
-                            console.print(f"[dim]... ({len(_user_content)} chars total)[/]")
-                        console.print(f"[dim]{'─' * 50}[/]\n")
+                    # Show pixai/wd14 tags from the intermediate .txt
+                    # Before grok runs, the .txt has only booru tags from pixai/wd14
+                    # After grok runs, it's overwritten with the caption
+                    # So we read the debug tags file if the tagger saved one
+                    test_tags_file = os.path.join(test_dir, ".test_tags.txt")
+                    if os.path.exists(test_tags_file):
+                        with open(test_tags_file, "r", encoding="utf-8") as tf:
+                            tags_content = tf.read().strip()
+                        if tags_content:
+                            print_info("Pixai/wd14 tags:")
+                            console.print(f"[dim]{'─' * 60}[/]")
+                            console.print(f"[yellow]{tags_content}[/]")
+                            console.print(f"[dim]{'─' * 60}[/]\n")
 
                     # Show the generated caption
                     test_txt = os.path.splitext(test_link)[0] + ".txt"
                     if os.path.exists(test_txt):
                         with open(test_txt, "r", encoding="utf-8") as f:
                             caption = f.read().strip()
-                        print_success("Grok output (.txt):")
-                        console.print(f"\n[dim]{'─' * 50}[/]")
-                        console.print(f"[italic green]{caption[:500]}[/]")
-                        if len(caption) > 500:
+                        print_success("Grok caption:")
+                        console.print(f"\n[dim]{'─' * 60}[/]")
+                        console.print(f"[green]{caption[:800]}[/]")
+                        if len(caption) > 800:
                             console.print(f"[dim]... ({len(caption)} chars total)[/]")
-                        console.print(f"[dim]{'─' * 50}[/]\n")
+                        console.print(f"[dim]{'─' * 60}[/]\n")
                     else:
                         print_success("Test run completed (no caption file — may be tags-only mode)")
 

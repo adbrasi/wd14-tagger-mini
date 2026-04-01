@@ -2748,6 +2748,16 @@ def main(args):
                 # Remove extra frame entry from combined
                 combined.pop(ep, None)
 
+    # Save intermediate tags for test run preview (before grok overwrites)
+    if getattr(args, "save_intermediate_tags", False):
+        for p in paths:
+            tags = combined.get(p, [])
+            if tags:
+                tags_file = os.path.join(base_dir, ".test_tags.txt")
+                with open(tags_file, "w", encoding="utf-8") as tf:
+                    tf.write(args.caption_separator.join(tags))
+                break
+
     # Run grok AFTER booru taggers so it has access to their tags
     grok_completed_paths: Optional[List[str]] = None
     if has_grok:
@@ -2873,6 +2883,7 @@ def setup_parser() -> argparse.ArgumentParser:
     parser.add_argument("--undesired_tags", type=str, default="")
 
     parser.add_argument("--force", action="store_true", help="reprocess all files even if already in the processing log")
+    parser.add_argument("--save_intermediate_tags", action="store_true", help="save pixai/wd14 tags to .test_tags.txt before grok runs")
     parser.add_argument("--no_dedupe", action="store_true", help="disable de-duplication (not recommended)")
     parser.add_argument("--pixai_mode", type=str, choices=["threshold", "topk"], default="threshold")
     parser.add_argument("--pixai_topk_general", type=int, default=25)
