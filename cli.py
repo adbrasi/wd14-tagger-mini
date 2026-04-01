@@ -1721,8 +1721,26 @@ def main():
     python = ensure_venv()
     install_deps(python)
 
-    # Project name first — drives target dir default and HF repo name
-    project_name = ask_input("Project name")
+    # Project name — detect existing projects or create new
+    datasets_root = os.path.join(os.path.expanduser("~"), "datasets")
+    existing_projects = []
+    if os.path.isdir(datasets_root):
+        existing_projects = sorted(
+            d for d in os.listdir(datasets_root)
+            if os.path.isdir(os.path.join(datasets_root, d))
+            and not d.startswith(".")
+        )
+
+    if existing_projects:
+        options = existing_projects + ["+ New project"]
+        choice = ask_choice("Select project", options)
+        if choice == len(options):
+            project_name = ask_input("New project name")
+        else:
+            project_name = existing_projects[choice - 1]
+    else:
+        project_name = ask_input("Project name")
+
     if not project_name:
         print_error("Project name is required")
         sys.exit(1)
