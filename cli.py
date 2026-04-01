@@ -1686,14 +1686,74 @@ def run_tagging(input_dir: str, python: str, media_counts: dict):
                         print_info("Aborted")
                         return False
                 else:
+                    # Show pixai/wd14 tags from the test run log
+                    test_log = os.path.join(test_dir, ".tagger_log.json")
+                    if os.path.exists(test_log):
+                        try:
+                            with open(test_log, "r", encoding="utf-8") as lf:
+                                log_data = json.load(lf)
+                            for entry in log_data.values():
+                                tags_list = entry.get("tags", [])
+                                if tags_list:
+                                    print_info("Tagger tags (pixai/wd14):")
+                                    console.print(f"[dim]{'─' * 50}[/]")
+                                    console.print(f"[yellow]{', '.join(tags_list[:50])}[/]")
+                                    if len(tags_list) > 50:
+                                        console.print(f"[dim]... ({len(tags_list)} tags total)[/]")
+                                    console.print(f"[dim]{'─' * 50}[/]\n")
+                                    break
+                        except Exception:
+                            pass
+
+                    # Show the prompt that was sent to grok
+                    _prompt_mode = "video" if is_video else "image"
+                    _prompt_candidates = [
+                        os.path.join(SCRIPT_DIR, "prompts", _prompt_mode, prompt_profile, "system_prompt.md"),
+                        os.path.join(SCRIPT_DIR, "prompts", _prompt_mode, "system_prompt.md"),
+                    ]
+                    _sys_prompt_path = None
+                    for _cp in _prompt_candidates:
+                        if os.path.exists(_cp):
+                            _sys_prompt_path = _cp
+                            break
+                    _user_prompt_candidates = [
+                        os.path.join(SCRIPT_DIR, "prompts", _prompt_mode, prompt_profile, "user_prompt.md"),
+                        os.path.join(SCRIPT_DIR, "prompts", _prompt_mode, "user_prompt.md"),
+                    ]
+                    _user_prompt_path = None
+                    for _cp in _user_prompt_candidates:
+                        if os.path.exists(_cp):
+                            _user_prompt_path = _cp
+                            break
+
+                    if _sys_prompt_path:
+                        with open(_sys_prompt_path, "r", encoding="utf-8") as pf:
+                            _sys_content = pf.read().strip()
+                        print_info(f"System prompt ({os.path.relpath(_sys_prompt_path, SCRIPT_DIR)}):")
+                        console.print(f"[dim]{'─' * 50}[/]")
+                        console.print(f"[cyan]{_sys_content[:300]}[/]")
+                        if len(_sys_content) > 300:
+                            console.print(f"[dim]... ({len(_sys_content)} chars total)[/]")
+                        console.print(f"[dim]{'─' * 50}[/]\n")
+
+                    if _user_prompt_path:
+                        with open(_user_prompt_path, "r", encoding="utf-8") as pf:
+                            _user_content = pf.read().strip()
+                        print_info(f"User prompt template ({os.path.relpath(_user_prompt_path, SCRIPT_DIR)}):")
+                        console.print(f"[dim]{'─' * 50}[/]")
+                        console.print(f"[cyan]{_user_content[:300]}[/]")
+                        if len(_user_content) > 300:
+                            console.print(f"[dim]... ({len(_user_content)} chars total)[/]")
+                        console.print(f"[dim]{'─' * 50}[/]\n")
+
                     # Show the generated caption
                     test_txt = os.path.splitext(test_link)[0] + ".txt"
                     if os.path.exists(test_txt):
                         with open(test_txt, "r", encoding="utf-8") as f:
                             caption = f.read().strip()
-                        print_success("Test caption generated:")
+                        print_success("Grok output (.txt):")
                         console.print(f"\n[dim]{'─' * 50}[/]")
-                        console.print(f"[italic]{caption[:500]}[/]")
+                        console.print(f"[italic green]{caption[:500]}[/]")
                         if len(caption) > 500:
                             console.print(f"[dim]... ({len(caption)} chars total)[/]")
                         console.print(f"[dim]{'─' * 50}[/]\n")
