@@ -143,7 +143,7 @@ def compute_clip_similarity(
         batch_a = torch.stack(tensors_a).to(dev)
         batch_b = torch.stack(tensors_b).to(dev)
 
-        with torch.no_grad(), torch.amp.autocast(dev.type):
+        with torch.no_grad(), torch.amp.autocast(dev.type, enabled=(dev.type == "cuda")):
             feat_a = model.encode_image(batch_a)
             feat_b = model.encode_image(batch_b)
             feat_a = F.normalize(feat_a, dim=-1)
@@ -157,6 +157,11 @@ def compute_clip_similarity(
         logger.info(
             "CLIP: processed %d/%d pairs", min(end, n), n
         )
+
+    # Free GPU memory before next method
+    del model
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
 
     return scores
 
@@ -214,7 +219,7 @@ def compute_sscd_similarity(
         batch_a = torch.stack(tensors_a).to(dev)
         batch_b = torch.stack(tensors_b).to(dev)
 
-        with torch.no_grad(), torch.amp.autocast(dev.type):
+        with torch.no_grad(), torch.amp.autocast(dev.type, enabled=(dev.type == "cuda")):
             feat_a = F.normalize(model(batch_a), dim=-1)
             feat_b = F.normalize(model(batch_b), dim=-1)
             sims = (feat_a * feat_b).sum(dim=-1)
@@ -226,6 +231,11 @@ def compute_sscd_similarity(
         logger.info(
             "SSCD: processed %d/%d pairs", min(end, n), n
         )
+
+    # Free GPU memory before next method
+    del model
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
 
     return scores
 

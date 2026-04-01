@@ -459,8 +459,23 @@ def _xai_batch_submit(
     batch_id = state["batch_id"]
     request_map = state.setdefault("request_map", {})
 
-    # Build and submit requests
+    # Build and submit requests (payload-size-aware flushing)
+    _MAX_PAYLOAD_BYTES = 4 * 1024 * 1024  # 4 MB safe limit for image payloads
     batch_requests: List[Dict] = []
+    current_payload_bytes = 0
+
+    def _flush_batch(batch_reqs: List[Dict]) -> None:
+        """Submit a chunk of requests to xAI and mark as submitted."""
+        _xai_request(
+            "POST",
+            f"{XAI_API_BASE_URL}/v1/batches/{batch_id}/requests",
+            headers,
+            payload={"batch_requests": batch_reqs},
+            timeout=120,
+        )
+        for br in batch_reqs:
+            request_map[br["batch_request_id"]]["state"] = "submitted"
+        _save_state(state_file, state)
 
     with make_progress() as progress:
         task = progress.add_task(f"Submitting {step_name}", total=len(items))
@@ -483,43 +498,30 @@ def _xai_batch_submit(
                 }
             }
 
-            batch_requests.append({
+            batch_req_item = {
                 "batch_request_id": req_id,
                 "batch_request": request_body,
-            })
+            }
+            item_bytes = len(json.dumps(batch_req_item).encode("utf-8"))
 
             request_map[req_id] = {
                 "state": "queued",
                 "meta": item.get("meta", {}),
             }
 
-            # Flush in chunks of 50 to avoid oversized payloads
-            if len(batch_requests) >= 50:
-                _xai_request(
-                    "POST",
-                    f"{XAI_API_BASE_URL}/v1/batches/{batch_id}/requests",
-                    headers,
-                    payload={"batch_requests": batch_requests},
-                    timeout=60,
-                )
-                for br in batch_requests:
-                    request_map[br["batch_request_id"]]["state"] = "submitted"
-                _save_state(state_file, state)
+            # Flush if adding this item would exceed payload limit
+            if batch_requests and (current_payload_bytes + item_bytes) > _MAX_PAYLOAD_BYTES:
+                _flush_batch(batch_requests)
                 progress.advance(task, len(batch_requests))
                 batch_requests = []
+                current_payload_bytes = 0
+
+            batch_requests.append(batch_req_item)
+            current_payload_bytes += item_bytes
 
         # Flush remaining
         if batch_requests:
-            _xai_request(
-                "POST",
-                f"{XAI_API_BASE_URL}/v1/batches/{batch_id}/requests",
-                headers,
-                payload={"batch_requests": batch_requests},
-                timeout=60,
-            )
-            for br in batch_requests:
-                request_map[br["batch_request_id"]]["state"] = "submitted"
-            _save_state(state_file, state)
+            _flush_batch(batch_requests)
             progress.advance(task, len(batch_requests))
 
     state["submitted_at"] = time.time()
@@ -531,13 +533,22 @@ def _xai_batch_poll(
     batch_id: str,
     api_key: str,
     poll_seconds: int = 20,
+    timeout_minutes: int = 360,
 ) -> Dict:
     """Poll xAI batch until completion. Returns final status dict."""
     headers = _xai_headers(api_key)
     first_ts = None
     first_done = 0
+    start_time = time.time()
+    zero_total_polls = 0
 
     while True:
+        elapsed_total = time.time() - start_time
+        if elapsed_total > timeout_minutes * 60:
+            raise TimeoutError(
+                f"Batch {batch_id} did not complete within {timeout_minutes} minutes"
+            )
+
         data = _xai_request(
             "GET",
             f"{XAI_API_BASE_URL}/v1/batches/{batch_id}",
@@ -576,8 +587,12 @@ def _xai_batch_poll(
             return data
 
         if total == 0:
-            # Batch may still be initializing
-            pass
+            zero_total_polls += 1
+            if zero_total_polls >= 30:
+                raise RuntimeError(
+                    f"Batch {batch_id} has 0 requests after {zero_total_polls} polls. "
+                    "Requests may not have been submitted successfully."
+                )
 
         time.sleep(poll_seconds)
 
@@ -662,9 +677,14 @@ def run_describe_a(
 
     state_file = _resolve_state_file(output_dir, "describe_a")
 
-    # Build batch items
+    # Build batch items (skip images that already have descriptions)
     items: List[Dict[str, Any]] = []
+    skipped_existing = 0
     for path_a, req_id in unique_a.items():
+        desc_file = os.path.splitext(path_a)[0] + "_description.txt"
+        if os.path.exists(desc_file):
+            skipped_existing += 1
+            continue
         try:
             b64_uri = _image_to_base64(path_a)
         except Exception as e:
@@ -683,6 +703,13 @@ def run_describe_a(
             "reasoning_effort": "low",
             "meta": {"image_path": path_a},
         })
+
+    if skipped_existing:
+        print_info(f"Skipped {skipped_existing} images (already have descriptions)")
+
+    if not items:
+        print_success("All A images already have descriptions — nothing to submit")
+        return
 
     # Submit
     batch_id = _xai_batch_submit(items, xai_api_key, model, state_file, "describe_a")
@@ -802,8 +829,15 @@ def run_caption_b(
 
     items: List[Dict[str, Any]] = []
     skipped = 0
+    skipped_existing = 0
 
     for i, (path_a, path_b) in enumerate(pairs):
+        # Skip if caption already exists
+        caption_file = os.path.splitext(path_b)[0] + "_caption.txt"
+        if os.path.exists(caption_file):
+            skipped_existing += 1
+            continue
+
         req_id = "cap_" + hashlib.sha1(path_b.encode("utf-8")).hexdigest()[:16]
 
         # Read WD tags for A
@@ -858,8 +892,14 @@ def run_caption_b(
             "meta": {"image_path_b": path_b},
         })
 
+    if skipped_existing:
+        print_info(f"Skipped {skipped_existing} images (already have captions)")
     if skipped:
         print_warning(f"Skipped {skipped} images due to encoding errors")
+
+    if not items:
+        print_success("All B images already have captions — nothing to submit")
+        return
 
     # Submit
     batch_id = _xai_batch_submit(items, xai_api_key, model, state_file, "caption_b")
