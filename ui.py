@@ -52,9 +52,21 @@ def print_info(msg: str):
     console.print(f"[dim]→[/] {msg}")
 
 
+def _fix_terminal():
+    """Fix backspace (^?) on broken terminals like RunPod/VastAI."""
+    import os as _os
+    if not getattr(_fix_terminal, "_done", False):
+        try:
+            _os.system("stty erase ^? 2>/dev/null")
+        except Exception:
+            pass
+        _fix_terminal._done = True
+
+
 def _prompt(text: str):
     """Print prompt text and flush immediately for terminal compatibility."""
     import sys as _sys
+    _fix_terminal()
     _sys.stdout.write(text)
     _sys.stdout.flush()
 
