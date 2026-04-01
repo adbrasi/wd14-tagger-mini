@@ -28,7 +28,22 @@ This is the LoRA trigger word. It is always the first thing in the caption, foll
 
 These add no training value. Do not mention them:
 
-`highres`, `absurdres`, `absurd_res`, `hi_res`, `high_res`, `4k`, `8k`, `best_quality`, `masterpiece`, `ultra_detailed`, `edited`, `edit`, `commission`, `commissioned_art`, `cropped`, `jpeg_artifacts`, `low_quality`, `bad_anatomy`, `bad_hands`, `error`, `watermark`, `signature`, `username`, `bad_twitter_id`, `bad_pixiv_id`, `patreon_logo`, `patreon_username`, `web_address`, `2020s`, `2021`, `2022`, `2023`, `2024`, `poll_winner`, `artist_name`, and **any artist name tags**
+`highres`, `absurdres`, `absurd_res`, `hi_res`, `high_res`, `4k`, `8k`, `best_quality`, `masterpiece`, `ultra_detailed`, `edited`, `edit`, `commission`, `commissioned_art`, `cropped`, `jpeg_artifacts`, `low_quality`, `bad_anatomy`, `bad_hands`, `error`, `bad_twitter_id`, `bad_pixiv_id`, `2020s`, `2021`, `2022`, `2023`, `2024`, `poll_winner`, `artist_name`, and **any artist name tags**
+
+---
+
+## Watermarks, Signatures, and Overlays
+
+If any of these tags are present: `watermark`, `signature`, `username`, `patreon_logo`, `patreon_username`, `web_address`, `text`, `copyright_notice`
+
+You MUST mention them in the caption so the model learns these are overlays, NOT part of the art style. Describe them briefly at the end of the caption:
+
+- `watermark` → *"a watermark is visible on the image"*
+- `signature` → *"the artist's signature is present"*
+- `patreon_username` / `patreon_logo` → *"a Patreon watermark/username overlay is visible"*
+- `username` / `web_address` → *"a username/URL text overlay is visible"*
+
+Keep it short — just acknowledge the overlay exists so the model doesn't bake it into the style.
 
 ---
 
@@ -129,8 +144,8 @@ Scale to visual complexity. Simple scene → ~80-100 words. Complex scene → ~1
 {"caption": "an loven 3d render, a cartoon 3D scene with bright, clean colors and soft diffused lighting. A full-body shot of Mercy standing against a cloudy sky backdrop. She has light, fair skin, blonde hair pulled into a high ponytail, and soft blue eyes. She wears a form-fitting white bodysuit with golden accents and armored plating, paired with mechanical wings extending from her back and a glowing halo above her head. She holds her staff at her side with a gentle, warm smile. The background is an open sky filled with soft white clouds and bright daylight."}
 ```
 
-**Tags:** `cutesexyrobutts, artist_name, 1girls, original, dark_skin, white_hair, short_hair, red_eyes, sports_bra, black_sports_bra, bike_shorts, abs, muscular_female, sweat, gym, towel, around_neck, looking_at_viewer, smirk, from_below`
+**Tags:** `cutesexyrobutts, artist_name, 1girls, original, dark_skin, white_hair, short_hair, red_eyes, sports_bra, black_sports_bra, bike_shorts, abs, muscular_female, sweat, gym, towel, around_neck, looking_at_viewer, smirk, from_below, watermark, patreon_username`
 
 ```json
-{"caption": "an loven 3d render, a scene with bold colors and strong contrast. A low-angle shot looking up at the character in a gym setting. She has deep brown skin, short messy white hair, and striking red eyes. Her body is athletic and muscular with defined abs and toned arms, glistening with sweat. She wears a tight black sports bra and dark bike shorts, with a white towel draped around her neck. Her expression is a confident, cocky smirk as she looks down at the viewer. The gym interior is visible behind her with warm overhead lighting."}
+{"caption": "an loven 3d render, a scene with bold colors and strong contrast. A low-angle shot looking up at the character in a gym setting. She has deep brown skin, short messy white hair, and striking red eyes. Her body is athletic and muscular with defined abs and toned arms, glistening with sweat. She wears a tight black sports bra and dark bike shorts, with a white towel draped around her neck. Her expression is a confident, cocky smirk as she looks down at the viewer. The gym interior is visible behind her with warm overhead lighting. A watermark and Patreon username overlay are visible on the image."}
 ```
