@@ -1744,6 +1744,9 @@ def run_frame_pair(input_dir: str, python: str, project_name: str = ""):
     # GPU device
     device = ask_input("Device for similarity computation", "cuda")
 
+    # Force re-tag existing images?
+    force_retag = ask_yes_no("Force re-tag images (overwrite existing .txt tags)?", default=False)
+
     # Output directory
     default_output = os.path.join(
         os.path.dirname(os.path.abspath(input_dir)),
@@ -1753,10 +1756,14 @@ def run_frame_pair(input_dir: str, python: str, project_name: str = ""):
     os.makedirs(output_dir, exist_ok=True)
 
     # Step 1: Organize
-    print_section("STEP 1: ORGANIZE PAIRS")
-    result = organize_pairs(input_dir, output_dir)
-    pairs = result["pairs"]
-    counts = result["counts"]
+    try:
+        print_section("STEP 1: ORGANIZE PAIRS")
+        result = organize_pairs(input_dir, output_dir)
+        pairs = result["pairs"]
+        counts = result["counts"]
+    except KeyboardInterrupt:
+        print_warning("\nInterrupted during organization.")
+        return
 
     print_summary_table("Pair Organization", [
         ("Dataset 1 (A+B+C)", str(counts.get("dataset_1", 0))),
@@ -1774,32 +1781,50 @@ def run_frame_pair(input_dir: str, python: str, project_name: str = ""):
         return
 
     # Step 2: WD/PixAI tagging (PixAI first, fallback to WD14)
-    print_section("STEP 2: WD/PIXAI TAGGING")
-    print_info(f"Tagging {len(pairs) * 2} images (PixAI → WD14 fallback)...")
-    tagging_ok = run_wd_tagging(pairs, python)
-    if not tagging_ok:
-        print_error("Tagging failed — cannot proceed without WD tags.")
-        if not ask_yes_no("Continue anyway (captions will lack tag context)?", default=False):
-            return
+    try:
+        print_section("STEP 2: WD/PIXAI TAGGING")
+        print_info(f"Tagging {len(pairs) * 2} images (PixAI → WD14 fallback)...")
+        if force_retag:
+            print_info("Force mode: will overwrite existing tags")
+        tagging_ok = run_wd_tagging(pairs, python, force=force_retag)
+        if not tagging_ok:
+            print_error("Tagging failed — cannot proceed without WD tags.")
+            if not ask_yes_no("Continue anyway (captions will lack tag context)?", default=False):
+                return
+    except KeyboardInterrupt:
+        print_warning("\nInterrupted during tagging. Progress saved — you can re-run to resume.")
+        return
 
     # Step 3: Describe A images
-    if not ask_yes_no("Proceed to describe A images via Grok xAI Batch?", default=True):
-        print_info("Skipped step 3")
-    else:
-        run_describe_a(pairs, xai_api_key, xai_model, output_dir)
+    try:
+        if not ask_yes_no("Proceed to describe A images via Grok xAI Batch?", default=True):
+            print_info("Skipped step 3")
+        else:
+            run_describe_a(pairs, xai_api_key, xai_model, output_dir)
+    except KeyboardInterrupt:
+        print_warning("\nInterrupted during A descriptions. State saved — re-run to resume batch.")
+        return
 
     # Step 4: Similarity
-    if not ask_yes_no("Proceed to compute similarity (CLIP + SSCD + SSIM)?", default=True):
-        print_info("Skipped step 4 — using 50% default similarity for all pairs")
-        similarities = [50.0] * len(pairs)
-    else:
-        similarities = run_similarity(pairs, device)
+    try:
+        if not ask_yes_no("Proceed to compute similarity (CLIP + SSCD + SSIM)?", default=True):
+            print_info("Skipped step 4 — using 50% default similarity for all pairs")
+            similarities = [50.0] * len(pairs)
+        else:
+            similarities = run_similarity(pairs, device)
+    except KeyboardInterrupt:
+        print_warning("\nInterrupted during similarity computation.")
+        return
 
     # Step 5: Caption B images
-    if not ask_yes_no("Proceed to caption B images via Grok xAI Batch?", default=True):
-        print_info("Skipped step 5")
+    try:
+        if not ask_yes_no("Proceed to caption B images via Grok xAI Batch?", default=True):
+            print_info("Skipped step 5")
+            return
+        run_caption_b(pairs, similarities, xai_api_key, xai_model, output_dir)
+    except KeyboardInterrupt:
+        print_warning("\nInterrupted during B captioning. State saved — re-run to resume batch.")
         return
-    run_caption_b(pairs, similarities, xai_api_key, xai_model, output_dir)
 
     print_section("PIPELINE COMPLETE")
     print_success(f"Processed {len(pairs)} frame pairs")

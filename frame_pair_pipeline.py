@@ -310,6 +310,7 @@ def _run_tagger_subprocess(
     directory: str,
     tagger_name: str,
     batch_size: int,
+    force: bool = False,
 ) -> int:
     """Run a tagger subprocess on a directory. Returns exit code."""
     import subprocess
@@ -321,6 +322,8 @@ def _run_tagger_subprocess(
         "--remove_underscore",
         "--thresh", "0.30",
     ]
+    if force:
+        cmd.append("--force")
     # Pass HF token explicitly for gated models (PixAI)
     hf_token = (
         os.environ.get("HF_TOKEN")
@@ -351,6 +354,7 @@ def run_wd_tagging(
     pairs: List[Tuple[str, str]],
     python: str,
     batch_size: int = 4,
+    force: bool = False,
 ) -> bool:
     """Run PixAI tagger (fallback to WD14) on all unique A and B images.
 
@@ -373,12 +377,12 @@ def run_wd_tagging(
 
         # Try PixAI first
         print_info("Trying PixAI tagger...")
-        rc = _run_tagger_subprocess(python, tagger_script, d, "pixai", batch_size)
+        rc = _run_tagger_subprocess(python, tagger_script, d, "pixai", batch_size, force=force)
 
         if rc != 0:
             # Fallback to WD14
             print_warning(f"PixAI failed (code {rc}), falling back to WD14...")
-            rc = _run_tagger_subprocess(python, tagger_script, d, "wd14", batch_size)
+            rc = _run_tagger_subprocess(python, tagger_script, d, "wd14", batch_size, force=force)
 
             if rc != 0:
                 print_error(f"WD14 also failed (code {rc}) for {d}")
@@ -594,7 +598,14 @@ def _xai_batch_poll(
                     "Requests may not have been submitted successfully."
                 )
 
-        time.sleep(poll_seconds)
+        try:
+            time.sleep(poll_seconds)
+        except KeyboardInterrupt:
+            print_warning(
+                f"\nInterrupted. Batch {batch_id} is still running on xAI servers. "
+                "Re-run the pipeline to resume polling and collect results."
+            )
+            raise
 
 
 def _xai_batch_collect(
