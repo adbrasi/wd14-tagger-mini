@@ -172,60 +172,64 @@ def monitor_xai_batch(state_file: str, api_key: str, base_url: str, poll_seconds
     first_done = None
     zero_total_streak = 0
 
-    while True:
-        try:
-            data = fetch_xai_batch_status(batch_id, api_key, base_url)
-        except requests.exceptions.RequestException as e:
-            status = e.response.status_code if getattr(e, "response", None) is not None else None
-            if status in (401, 403, 404):
-                print_error(f"Monitor stopped: HTTP {status}")
-                raise
-            print_warning(f"Transient error: {e}")
-            time.sleep(poll_seconds)
-            continue
+    try:
+        while True:
+            try:
+                data = fetch_xai_batch_status(batch_id, api_key, base_url)
+            except requests.exceptions.RequestException as e:
+                status = e.response.status_code if getattr(e, "response", None) is not None else None
+                if status in (401, 403, 404):
+                    print_error(f"Monitor stopped: HTTP {status}")
+                    raise
+                print_warning(f"Transient error: {e}")
+                time.sleep(poll_seconds)
+                continue
 
-        counters = data.get("state", {})
-        total = int(counters.get("num_requests", 0) or 0)
-        pending = int(counters.get("num_pending", 0) or 0)
-        success = int(counters.get("num_success", 0) or 0)
-        errors = int(counters.get("num_error", 0) or 0)
-        cancelled = int(counters.get("num_cancelled", 0) or 0)
-        done = success + errors + cancelled
-        pct = (done / total * 100.0) if total else 0.0
+            counters = data.get("state", {})
+            total = int(counters.get("num_requests", 0) or 0)
+            pending = int(counters.get("num_pending", 0) or 0)
+            success = int(counters.get("num_success", 0) or 0)
+            errors = int(counters.get("num_error", 0) or 0)
+            cancelled = int(counters.get("num_cancelled", 0) or 0)
+            done = success + errors + cancelled
+            pct = (done / total * 100.0) if total else 0.0
 
-        now = time.time()
-        eta_text = "estimating..."
-        if first_ts is None:
-            first_ts = now
-            first_done = done
-        else:
-            elapsed = max(now - first_ts, 1e-6)
-            rate = max((done - (first_done or 0)) / elapsed, 0.0)
-            remaining = max(total - done, 0)
-            if rate > 0:
-                eta_sec = int(remaining / rate)
-                eta_text = f"{eta_sec // 60}m {eta_sec % 60}s"
+            now = time.time()
+            eta_text = "estimating..."
+            if first_ts is None:
+                first_ts = now
+                first_done = done
+            else:
+                elapsed = max(now - first_ts, 1e-6)
+                rate = max((done - (first_done or 0)) / elapsed, 0.0)
+                remaining = max(total - done, 0)
+                if rate > 0:
+                    eta_sec = int(remaining / rate)
+                    eta_text = f"{eta_sec // 60}m {eta_sec % 60}s"
 
-        timestamp = time.strftime("%H:%M:%S")
-        console.print(
-            f"[dim]{timestamp}[/] total={total} done=[bold]{done}[/] ({pct:.1f}%) "
-            f"pending={pending} success=[green]{success}[/] error=[red]{errors}[/] "
-            f"eta={eta_text}"
-        )
+            timestamp = time.strftime("%H:%M:%S")
+            console.print(
+                f"[dim]{timestamp}[/] total={total} done=[bold]{done}[/] ({pct:.1f}%) "
+                f"pending={pending} success=[green]{success}[/] error=[red]{errors}[/] "
+                f"eta={eta_text}"
+            )
 
-        if total == 0:
-            zero_total_streak += 1
-            if zero_total_streak >= 5:
-                print_warning("Batch reports 0 requests for 5 consecutive polls — check batch ID")
+            if total == 0:
+                zero_total_streak += 1
+                if zero_total_streak >= 5:
+                    print_warning("Batch reports 0 requests for 5 consecutive polls — check batch ID")
+                    return
+            else:
+                zero_total_streak = 0
+
+            if pending <= 0 and total > 0:
+                print_success("Batch completed (no pending requests)")
                 return
-        else:
-            zero_total_streak = 0
 
-        if pending <= 0 and total > 0:
-            print_success("Batch completed (no pending requests)")
-            return
-
-        time.sleep(poll_seconds)
+            time.sleep(poll_seconds)
+    except KeyboardInterrupt:
+        print_warning("\nMonitoring stopped. Batch continues on xAI servers.")
+        print_info(f"Run collect later with state file: {state_file}")
 
 
 # -------------------------
@@ -1627,31 +1631,49 @@ def run_tagging(input_dir: str, python: str, media_counts: dict):
                             test_state = test_cmd[i + 1]
                             break
                     if test_state and os.path.exists(test_state):
-                        print_info("Waiting for xAI batch to process 1 test request...")
+                        print_info("Waiting for xAI batch to process 1 test request (max 60s)...")
                         with open(test_state, "r", encoding="utf-8") as sf:
                             st = json.load(sf)
                         bid = st.get("batch_id", "")
                         xkey = xai_api_key or check_env_key("XAI_API_KEY")
+                        test_batch_ok = False
                         if bid and xkey:
                             last_total = 0
-                            for _ in range(60):  # max 5 min
-                                time.sleep(5)
-                                try:
-                                    data = fetch_xai_batch_status(bid, xkey)
-                                    last_total = int(data.get("state", {}).get("num_requests", 0) or 0)
-                                    pending = int(data.get("state", {}).get("num_pending", 0) or 0)
-                                    if pending <= 0 and last_total > 0:
-                                        break
-                                except Exception:
-                                    pass
-                            if last_total == 0:
-                                print_warning("xAI batch returned 0 requests — test submission may have failed")
-                            else:
+                            try:
+                                for _ in range(12):  # max 60s (12 × 5s)
+                                    time.sleep(5)
+                                    try:
+                                        data = fetch_xai_batch_status(bid, xkey)
+                                        last_total = int(data.get("state", {}).get("num_requests", 0) or 0)
+                                        pending = int(data.get("state", {}).get("num_pending", 0) or 0)
+                                        if pending <= 0 and last_total > 0:
+                                            test_batch_ok = True
+                                            break
+                                    except Exception:
+                                        pass
+                            except KeyboardInterrupt:
+                                print_warning("\nTest wait interrupted")
+
+                            if test_batch_ok:
                                 collect_cmd = list(test_cmd)
                                 for i, arg in enumerate(collect_cmd):
                                     if arg == "--xai_batch_action":
                                         collect_cmd[i + 1] = "collect"
                                 subprocess.run(collect_cmd, env=test_env)
+                            elif last_total == 0:
+                                print_warning("xAI batch returned 0 requests — test submission may have failed")
+                            else:
+                                print_warning("xAI batch test timed out (60s) — batch is slow right now")
+                                print_info("The batch was submitted and will process in background.")
+                                choice = ask_choice("How to proceed?", [
+                                    "Continue with xAI batch anyway (collect results later)",
+                                    "Skip test and start full pipeline with xAI batch",
+                                    "Abort",
+                                ])
+                                if choice == 3:
+                                    print_info("Aborted")
+                                    return False
+                                # choice 1 or 2: continue normally
 
                 if test_result.returncode != 0:
                     print_error("Test run FAILED")
