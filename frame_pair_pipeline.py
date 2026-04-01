@@ -218,10 +218,11 @@ def organize_pairs(
     source = Path(source_dir)
     out = Path(output_dir)
 
-    # Scan all image files and group by base name
-    groups: Dict[str, Dict[str, str]] = {}  # base_name -> {suffix -> full_path}
+    # Scan all image files and group by relative path + base name
+    groups: Dict[str, Dict[str, str]] = {}  # group_key -> {suffix -> full_path}
     all_files = []
     for root, _, files in os.walk(source):
+        rel_root = os.path.relpath(root, source)
         for f in files:
             ext = os.path.splitext(f)[1].lower()
             if ext not in IMAGE_EXTS:
@@ -232,7 +233,8 @@ def organize_pairs(
                 continue
             base_name, suffix = parsed
             full_path = os.path.join(root, f)
-            groups.setdefault(base_name, {})[suffix] = full_path
+            group_key = os.path.join(rel_root, base_name) if rel_root != "." else base_name
+            groups.setdefault(group_key, {})[suffix] = full_path
             all_files.append(full_path)
 
     # Classify groups into datasets
@@ -240,7 +242,7 @@ def organize_pairs(
     ds2_groups: List[Tuple[str, Dict[str, str]]] = []  # A + B + image_base
     ds3_groups: List[Tuple[str, Dict[str, str]]] = []  # A + B only
 
-    for base_name, files_map in sorted(groups.items()):
+    for group_key, files_map in sorted(groups.items()):
         has_a = "_A" in files_map
         has_b = "_B" in files_map
         has_c = "_C" in files_map
@@ -249,12 +251,14 @@ def organize_pairs(
         if not (has_a and has_b):
             continue  # Must have at least A and B
 
+        # Use a flat safe name for destination files (replace path separators)
+        safe_name = group_key.replace(os.sep, "__")
         if has_c:
-            ds1_groups.append((base_name, files_map))
+            ds1_groups.append((safe_name, files_map))
         elif has_ib:
-            ds2_groups.append((base_name, files_map))
+            ds2_groups.append((safe_name, files_map))
         else:
-            ds3_groups.append((base_name, files_map))
+            ds3_groups.append((safe_name, files_map))
 
     # Create output directories and copy files
     datasets = {
@@ -850,8 +854,8 @@ def run_caption_b(
         except (json.JSONDecodeError, ValueError):
             pass
 
-        # Save as .txt next to B image
-        txt_file = os.path.splitext(path_b)[0] + ".txt"
+        # Save caption next to B image (use _caption.txt to avoid overwriting WD tags)
+        txt_file = os.path.splitext(path_b)[0] + "_caption.txt"
         with open(txt_file, "w", encoding="utf-8") as f:
             f.write(caption)
         written += 1
@@ -885,10 +889,10 @@ def run_upload(
                 ext = os.path.splitext(f)[1].lower()
                 if ext in IMAGE_EXTS:
                     upload_files.append(full_path)
-                    # Also include its .txt caption
-                    txt_path = os.path.splitext(full_path)[0] + ".txt"
-                    if os.path.exists(txt_path):
-                        upload_files.append(txt_path)
+                    # Include its _caption.txt file
+                    caption_path = os.path.splitext(full_path)[0] + "_caption.txt"
+                    if os.path.exists(caption_path):
+                        upload_files.append(caption_path)
 
     if not upload_files:
         print_warning("No B images found to upload")

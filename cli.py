@@ -1721,7 +1721,6 @@ def run_frame_pair(input_dir: str, python: str, project_name: str = ""):
         organize_pairs,
         run_caption_b,
         run_describe_a,
-        run_frame_pair_pipeline,
         run_similarity,
         run_upload,
         run_wd_tagging,
