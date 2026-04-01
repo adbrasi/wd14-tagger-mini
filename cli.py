@@ -1420,15 +1420,20 @@ def run_tagging(input_dir: str, python: str, media_counts: dict):
                     if not ask_yes_no("Continue anyway?", default=False):
                         sys.exit(1)
         else:
-            api_key = check_env_key("OPENROUTER_API_KEY")
-            if api_key:
-                print_success(f"Found OPENROUTER_API_KEY in environment ({api_key[:4]}****)")
+            env_key = check_env_key("OPENROUTER_API_KEY")
+            if env_key:
+                masked = f"{env_key[:4]}****{env_key[-4:]}" if len(env_key) > 8 else f"{env_key[:4]}****"
+                use_env = ask_yes_no(f"Use OPENROUTER_API_KEY from environment ({masked})?", default=True)
+                if use_env:
+                    api_key = env_key
+                else:
+                    api_key = ask_input("Enter OpenRouter API key (sk-or-...)")
             else:
                 api_key = ask_input("Enter OpenRouter API key (sk-or-...)")
-                if not api_key:
-                    print_error("No API key provided. Grok tagger will fail.")
-                    if not ask_yes_no("Continue anyway?", default=False):
-                        sys.exit(1)
+            if not api_key:
+                print_error("No API key provided. Grok tagger will fail.")
+                if not ask_yes_no("Continue anyway?", default=False):
+                    sys.exit(1)
 
     # HF token (for pixai gated repo)
     hf_token = check_env_key("HF_TOKEN") or check_env_key("HUGGINGFACE_HUB_TOKEN")
