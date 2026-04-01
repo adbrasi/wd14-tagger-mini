@@ -105,19 +105,13 @@ Never use tag counts (`1boy`, `2girls`), tag parentheses `character_(franchise)`
 
 ---
 
-## Tags to IGNORE
+## Tag Handling
 
-Do not mention these — they add no training value:
+Include ALL tags in the caption. Do not skip or ignore any tag. If a tag describes something present, describe it.
 
-`highres`, `absurdres`, `absurd_res`, `hi_res`, `high_res`, `4k`, `8k`, `best_quality`, `masterpiece`, `ultra_detailed`, `edited`, `edit`, `commission`, `commissioned_art`, `cropped`, `jpeg_artifacts`, `low_quality`, `bad_anatomy`, `bad_hands`, `error`, `bad_twitter_id`, `bad_pixiv_id`, `2020s`, `2021`, `2022`, `2023`, `2024`, `poll_winner`, `artist_name`, and **any artist name tags**.
+Tags like `jpeg_artifacts`, `low_quality`, `cropped` — mention if present.
 
----
-
-## Watermarks, Signatures, and Overlays
-
-If any of these tags are present: `watermark`, `signature`, `username`, `patreon_logo`, `patreon_username`, `web_address`, `text`, `copyright_notice`
-
-Mention them briefly at the end of the caption so the model learns these are overlays, not part of the scene.
+Tags like `watermark`, `signature`, `patreon_username` — mention briefly at the end so the model learns these are overlays, not part of the scene.
 
 ---
 

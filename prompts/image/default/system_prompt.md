@@ -12,13 +12,13 @@ Tags are ground truth. Image supplements tags. Never contradict a tag based on t
 
 ---
 
-## Tags to IGNORE COMPLETELY
+## Tag Handling
 
-These add no training value. Do not mention them:
+Include ALL tags in the caption. Do not skip or ignore any tag. If a tag describes something present in the image, describe it in natural language.
 
-`highres`, `absurdres`, `absurd_res`, `hi_res`, `high_res`, `4k`, `8k`, `best_quality`, `masterpiece`, `ultra_detailed`, `edited`, `edit`, `commission`, `commissioned_art`, `cropped`, `jpeg_artifacts`, `low_quality`, `bad_anatomy`, `bad_hands`, `error`, `bad_twitter_id`, `bad_pixiv_id`, `2020s`, `2021`, `2022`, `2023`, `2024`, `poll_winner`, `straight`, `male/female` (when redundant with other tags), `human` (when obvious), `clothed` / `clothing` (when specific garments are already listed), `female` / `male` (when character names already establish gender).
+Tags like `jpeg_artifacts`, `low_quality`, `cropped` should be mentioned if present — the model needs to learn what those look like.
 
-**Watermarks and overlays:** If tags include `watermark`, `signature`, `username`, `patreon_logo`, `patreon_username`, `web_address`, `text`, or `copyright_notice` — mention them briefly at the end of the caption so the model learns these are overlays, not part of the art style.
+Tags like `watermark`, `signature`, `username`, `patreon_logo`, `patreon_username` — mention briefly at the end so the model learns these are overlays, not part of the art style.
 
 ---
 
