@@ -13,20 +13,12 @@ paired images (A → B).  Steps:
 
 from __future__ import annotations
 
-import base64
-import hashlib
-import io
 import json
 import logging
 import os
-import re
 import shutil
-import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
-
-import requests
-from PIL import Image
 
 from constants import IMAGE_EXTS
 from ui import (
@@ -45,7 +37,6 @@ logger = logging.getLogger(__name__)
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 PROMPTS_DIR = os.path.join(SCRIPT_DIR, "prompts")
-XAI_API_BASE_URL = "https://api.x.ai"
 
 # Suffixes that identify each role in a pair group
 _SUFFIXES = ("_A", "_B", "_C", "_image_base")
@@ -61,143 +52,6 @@ def _strip_suffix(stem: str) -> Optional[Tuple[str, str]]:
         if stem.endswith(suf):
             return stem[: -len(suf)], suf
     return None
-
-
-def _xai_headers(api_key: str) -> Dict[str, str]:
-    return {
-        "Authorization": f"Bearer {api_key}",
-        "Content-Type": "application/json",
-    }
-
-
-def _xai_request(
-    method: str,
-    url: str,
-    headers: Dict[str, str],
-    payload: Optional[Dict] = None,
-    params: Optional[Dict] = None,
-    max_retries: int = 5,
-    timeout: int = 120,
-) -> Dict:
-    for attempt in range(max_retries + 1):
-        try:
-            resp = requests.request(
-                method=method,
-                url=url,
-                headers=headers,
-                json=payload,
-                params=params,
-                timeout=timeout,
-            )
-            if resp.status_code == 429 or resp.status_code >= 500:
-                wait = min(2 ** attempt, 30)
-                logger.warning(
-                    "xAI API %s on %s (attempt %d), retrying in %ds...",
-                    resp.status_code, url, attempt + 1, wait,
-                )
-                time.sleep(wait)
-                continue
-            if resp.status_code >= 400:
-                body_preview = (resp.text or "").strip().replace("\n", " ")
-                if len(body_preview) > 800:
-                    body_preview = body_preview[:800] + "..."
-                logger.error(
-                    "xAI API %s on %s: %s", resp.status_code, url,
-                    body_preview or "<empty body>",
-                )
-            resp.raise_for_status()
-            if not resp.text:
-                return {}
-            return resp.json()
-        except requests.exceptions.RequestException as e:
-            if isinstance(e, requests.exceptions.HTTPError):
-                status = e.response.status_code if e.response is not None else None
-                if status is not None and 400 <= status < 500 and status != 429:
-                    raise
-            if attempt >= max_retries:
-                raise
-            wait = min(2 ** attempt, 30)
-            logger.warning(
-                "xAI API request error on %s (attempt %d): %s; retrying in %ds...",
-                url, attempt + 1, e, wait,
-            )
-            time.sleep(wait)
-    return {}
-
-
-def _image_to_base64(image_path: str, max_size: int = 768, quality: int = 85) -> str:
-    """Convert image file to base64 data URI."""
-    with Image.open(image_path) as img:
-        img = img.convert("RGB")
-        w, h = img.size
-        if max(w, h) > max_size:
-            ratio = max_size / max(w, h)
-            img = img.resize((int(w * ratio), int(h * ratio)), Image.Resampling.LANCZOS)
-        buf = io.BytesIO()
-        img.save(buf, format="JPEG", quality=max(30, min(quality, 95)))
-        b64 = base64.b64encode(buf.getvalue()).decode("utf-8")
-    return f"data:image/jpeg;base64,{b64}"
-
-
-def _xai_extract_text_from_result(result_obj: Dict) -> Optional[str]:
-    """Extract text content from an xAI batch result item."""
-
-    def _find_choices(obj: Any, depth: int = 0) -> List[Dict]:
-        found: List[Dict] = []
-        if depth > 5 or not isinstance(obj, dict):
-            return found
-        if "choices" in obj:
-            found.append(obj)
-        for v in obj.values():
-            if isinstance(v, dict):
-                found.extend(_find_choices(v, depth + 1))
-        return found
-
-    for candidate in _find_choices(result_obj):
-        choices = candidate.get("choices")
-        if not isinstance(choices, list) or not choices:
-            continue
-        first = choices[0]
-        if not isinstance(first, dict):
-            continue
-        message = first.get("message")
-        if isinstance(message, dict):
-            content = message.get("content")
-            if isinstance(content, str) and content.strip():
-                return content.strip()
-            if isinstance(content, list):
-                chunks = []
-                for part in content:
-                    if isinstance(part, dict) and part.get("type") in ("text", "output_text"):
-                        chunks.append(part.get("text", ""))
-                text = "\n".join(chunks).strip()
-                if text:
-                    return text
-    return None
-
-
-def _resolve_state_file(output_dir: str, step_name: str) -> str:
-    """Build a state file path for a pipeline step."""
-    base_dir = os.path.abspath(output_dir)
-    key = hashlib.md5(base_dir.encode("utf-8")).hexdigest()[:10]
-    return os.path.join(base_dir, f".xai_fp_{step_name}_{key}.json")
-
-
-def _load_state(path: str) -> Dict:
-    if not os.path.exists(path):
-        return {}
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except Exception as e:
-        logger.warning("could not read state from %s: %s", path, e)
-        return {}
-
-
-def _save_state(path: str, state: Dict) -> None:
-    os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(state, f, ensure_ascii=False, indent=2)
 
 
 # ---------------------------------------------------------------------------
@@ -400,272 +254,61 @@ def run_wd_tagging(
 
 
 # ---------------------------------------------------------------------------
-# Step 3: Describe A images via xAI Batch
+# Step 3: Describe A images via xAI Batch (reuses tagger subprocess)
 # ---------------------------------------------------------------------------
 
-_DESCRIBE_SYSTEM_PROMPT = (
-    "You are an image describer. Describe this image in complete detail (~150+ words). "
-    "Describe everything you see: characters, their appearance (skin tone, hair, eyes, "
-    "body type, expression, clothing), pose, action, background, lighting, colors, mood. "
-    'Output valid JSON: {"description": "..."}'
-)
-_DESCRIBE_USER_PROMPT = (
-    "Describe this image in complete detail. "
-    "Be thorough — describe every visual element you can identify."
-)
 
-
-def _xai_batch_submit(
-    items: List[Dict[str, Any]],
-    api_key: str,
+def _run_grok_batch_subprocess(
+    python: str,
+    directory: str,
+    action: str,
+    xai_api_key: str,
     model: str,
-    state_file: str,
-    step_name: str,
-) -> str:
-    """Submit items to xAI Batch API and return batch_id.
+    system_prompt_file: Optional[str] = None,
+    user_prompt_file: Optional[str] = None,
+    prompt_profile: Optional[str] = None,
+    batch_state_file: Optional[str] = None,
+    caption_extension: str = ".txt",
+) -> int:
+    """Run grok xAI batch via the existing tagger subprocess.
 
-    Each item in items should have:
-        custom_id: str
-        system_prompt: str
-        user_content: str | list  (text or multimodal content)
-        reasoning_effort: str (default "low")
+    This reuses 100% of the battle-tested batch API implementation in
+    tag_images_by_wd14_tagger.py (state JSON, resume, progress bars,
+    payload size management, 413 fallback, rate limiting, etc.).
     """
-    headers = _xai_headers(api_key)
+    import subprocess
 
-    # Load or create state
-    state = _load_state(state_file)
-    if not state:
-        state = {
-            "version": 1,
-            "step": step_name,
-            "batch_id": None,
-            "request_map": {},
-            "created_at": time.time(),
-        }
+    tagger_script = os.path.join(SCRIPT_DIR, "tag_images_by_wd14_tagger.py")
+    cmd = [
+        python, tagger_script, directory,
+        "--taggers", "grok",
+        "--grok_provider", "xai-batch",
+        "--xai_batch_action", action,
+        "--xai_batch_model", model,
+        "--caption_extension", caption_extension,
+    ]
+    if system_prompt_file:
+        cmd.extend(["--grok_system_prompt_file", system_prompt_file])
+    if user_prompt_file:
+        cmd.extend(["--grok_user_prompt_file", user_prompt_file])
+    if prompt_profile:
+        cmd.extend(["--prompt_profile", prompt_profile])
+    if batch_state_file:
+        cmd.extend(["--xai_batch_state_file", batch_state_file])
 
-    # Create batch if needed
-    if not state.get("batch_id"):
-        batch_name = f"fp_{step_name}_{int(time.time())}"
-        created = _xai_request(
-            "POST",
-            f"{XAI_API_BASE_URL}/v1/batches",
-            headers,
-            payload={"name": batch_name},
-        )
-        batch_id = created.get("batch_id")
-        if not batch_id:
-            raise RuntimeError(f"Failed to create xAI batch: {created}")
-        state["batch_id"] = batch_id
-        state["batch_name"] = created.get("name", batch_name)
-        _save_state(state_file, state)
-        logger.info("Created xAI batch: %s", batch_id)
+    env = os.environ.copy()
+    env["XAI_API_KEY"] = xai_api_key
 
-    batch_id = state["batch_id"]
-    request_map = state.setdefault("request_map", {})
+    proc = subprocess.Popen(cmd, env=env)
+    try:
+        proc.wait()
+    except KeyboardInterrupt:
+        print_warning("Interrupted — killing grok batch process...")
+        proc.kill()
+        proc.wait()
+        raise
 
-    # Build and submit requests (payload-size-aware flushing)
-    _MAX_PAYLOAD_BYTES = 4 * 1024 * 1024  # 4 MB safe limit for image payloads
-    batch_requests: List[Dict] = []
-    current_payload_bytes = 0
-
-    def _flush_batch(batch_reqs: List[Dict]) -> None:
-        """Submit a chunk of requests to xAI and mark as submitted."""
-        _xai_request(
-            "POST",
-            f"{XAI_API_BASE_URL}/v1/batches/{batch_id}/requests",
-            headers,
-            payload={"batch_requests": batch_reqs},
-            timeout=120,
-        )
-        for br in batch_reqs:
-            request_map[br["batch_request_id"]]["state"] = "submitted"
-        _save_state(state_file, state)
-
-    with make_progress() as progress:
-        task = progress.add_task(f"Submitting {step_name}", total=len(items))
-
-        for item in items:
-            req_id = item["custom_id"]
-            if request_map.get(req_id, {}).get("state") in ("submitted", "succeeded"):
-                progress.advance(task)
-                continue
-
-            request_body = {
-                "chat_get_completion": {
-                    "model": model,
-                    "messages": [
-                        {"role": "system", "content": item["system_prompt"]},
-                        {"role": "user", "content": item["user_content"]},
-                    ],
-                    "response_format": {"type": "json_object"},
-                    "reasoning": {"effort": item.get("reasoning_effort", "low")},
-                }
-            }
-
-            batch_req_item = {
-                "batch_request_id": req_id,
-                "batch_request": request_body,
-            }
-            item_bytes = len(json.dumps(batch_req_item).encode("utf-8"))
-
-            request_map[req_id] = {
-                "state": "queued",
-                "meta": item.get("meta", {}),
-            }
-
-            # Flush if adding this item would exceed payload limit
-            if batch_requests and (current_payload_bytes + item_bytes) > _MAX_PAYLOAD_BYTES:
-                _flush_batch(batch_requests)
-                progress.advance(task, len(batch_requests))
-                batch_requests = []
-                current_payload_bytes = 0
-
-            batch_requests.append(batch_req_item)
-            current_payload_bytes += item_bytes
-
-        # Flush remaining
-        if batch_requests:
-            _flush_batch(batch_requests)
-            progress.advance(task, len(batch_requests))
-
-    state["submitted_at"] = time.time()
-    _save_state(state_file, state)
-    return batch_id
-
-
-def _xai_batch_poll(
-    batch_id: str,
-    api_key: str,
-    poll_seconds: int = 20,
-    timeout_minutes: int = 360,
-) -> Dict:
-    """Poll xAI batch until completion. Returns final status dict."""
-    headers = _xai_headers(api_key)
-    first_ts = None
-    first_done = 0
-    start_time = time.time()
-    zero_total_polls = 0
-
-    while True:
-        elapsed_total = time.time() - start_time
-        if elapsed_total > timeout_minutes * 60:
-            raise TimeoutError(
-                f"Batch {batch_id} did not complete within {timeout_minutes} minutes"
-            )
-
-        data = _xai_request(
-            "GET",
-            f"{XAI_API_BASE_URL}/v1/batches/{batch_id}",
-            headers,
-        )
-        counters = data.get("state", {})
-        total = int(counters.get("num_requests", 0) or 0)
-        pending = int(counters.get("num_pending", 0) or 0)
-        success = int(counters.get("num_success", 0) or 0)
-        errors = int(counters.get("num_error", 0) or 0)
-        done = success + errors
-        pct = (done / total * 100.0) if total else 0.0
-
-        now = time.time()
-        eta_text = "estimating..."
-        if first_ts is None:
-            first_ts = now
-            first_done = done
-        else:
-            elapsed = max(now - first_ts, 1e-6)
-            rate = max((done - first_done) / elapsed, 0.0)
-            remaining = max(total - done, 0)
-            if rate > 0:
-                eta_sec = int(remaining / rate)
-                eta_text = f"{eta_sec // 60}m {eta_sec % 60}s"
-
-        timestamp = time.strftime("%H:%M:%S")
-        console.print(
-            f"[dim]{timestamp}[/] total={total} done=[bold]{done}[/] ({pct:.1f}%) "
-            f"pending={pending} success=[green]{success}[/] error=[red]{errors}[/] "
-            f"eta={eta_text}"
-        )
-
-        if pending <= 0 and total > 0:
-            print_success("Batch completed")
-            return data
-
-        if total == 0:
-            zero_total_polls += 1
-            if zero_total_polls >= 30:
-                raise RuntimeError(
-                    f"Batch {batch_id} has 0 requests after {zero_total_polls} polls. "
-                    "Requests may not have been submitted successfully."
-                )
-
-        try:
-            time.sleep(poll_seconds)
-        except KeyboardInterrupt:
-            print_warning(
-                f"\nInterrupted. Batch {batch_id} is still running on xAI servers. "
-                "Re-run the pipeline to resume polling and collect results."
-            )
-            raise
-
-
-def _xai_batch_collect(
-    batch_id: str,
-    api_key: str,
-    state_file: str,
-) -> Dict[str, str]:
-    """Collect results from xAI batch. Returns {custom_id: text_content}."""
-    headers = _xai_headers(api_key)
-    state = _load_state(state_file)
-    request_map = state.get("request_map", {})
-
-    results: Dict[str, str] = {}
-    pagination_token = None
-    success_count = 0
-    error_count = 0
-
-    while True:
-        params: Dict[str, Any] = {"page_size": 100}
-        if pagination_token:
-            params["pagination_token"] = pagination_token
-
-        page = _xai_request(
-            "GET",
-            f"{XAI_API_BASE_URL}/v1/batches/{batch_id}/results",
-            headers,
-            params=params,
-            timeout=180,
-        )
-        page_results = page.get("results", [])
-        if not page_results:
-            break
-
-        for item in page_results:
-            req_id = item.get("batch_request_id")
-            if not req_id:
-                continue
-
-            text = _xai_extract_text_from_result(item)
-            if text:
-                results[req_id] = text
-                if req_id in request_map:
-                    request_map[req_id]["state"] = "succeeded"
-                success_count += 1
-            else:
-                if req_id in request_map:
-                    request_map[req_id]["state"] = "failed"
-                error_count += 1
-
-        pagination_token = page.get("pagination_token")
-        _save_state(state_file, state)
-
-        if not pagination_token:
-            break
-
-    logger.info(
-        "Batch collect: success=%d errors=%d batch_id=%s",
-        success_count, error_count, batch_id,
-    )
-    return results
+    return proc.returncode
 
 
 def run_describe_a(
@@ -673,91 +316,75 @@ def run_describe_a(
     xai_api_key: str,
     model: str,
     output_dir: str,
+    python: str,
 ) -> None:
-    """Submit xAI Batch job to describe all A images in detail."""
+    """Describe all A images via xAI Batch using the existing tagger infrastructure.
+
+    Creates a temporary system prompt for image description, then calls the
+    tagger with --taggers grok --grok_provider xai-batch for each dataset dir.
+    Uses submit → status → collect flow with full resume support.
+    """
     print_section("STEP 3: DESCRIBE A IMAGES")
 
-    # Collect unique A images
-    unique_a: Dict[str, str] = {}  # path -> custom_id
+    # Create temporary describe prompt files
+    import tempfile
+    describe_system = (
+        "You are an image describer for an AI dataset. Describe this image in complete "
+        "detail (~150+ words). Describe everything you see: characters and their appearance "
+        "(skin tone, hair color/length/style, eye color, body type, expression, clothing), "
+        "pose, action, interaction with others, background, setting, lighting, colors, mood, "
+        "and atmosphere. Output only valid JSON: {\"description\": \"...\"}. No other text."
+    )
+    describe_user = (
+        "Describe this image in complete detail. Be thorough — describe every visual "
+        "element you can identify.\n\n"
+        "Booru tags for reference (verify against image):\n{tags}\n\n"
+        "Produce the JSON output."
+    )
+
+    sys_prompt_file = os.path.join(output_dir, "_describe_system_prompt.md")
+    usr_prompt_file = os.path.join(output_dir, "_describe_user_prompt.md")
+    with open(sys_prompt_file, "w", encoding="utf-8") as f:
+        f.write(describe_system)
+    with open(usr_prompt_file, "w", encoding="utf-8") as f:
+        f.write(describe_user)
+
+    # Collect unique directories containing A images
+    a_dirs: set = set()
     for path_a, _ in pairs:
-        if path_a not in unique_a:
-            req_id = "desc_" + hashlib.sha1(path_a.encode("utf-8")).hexdigest()[:16]
-            unique_a[path_a] = req_id
+        a_dirs.add(os.path.dirname(path_a))
 
-    print_info(f"Describing {len(unique_a)} unique A images via xAI Batch...")
+    sorted_dirs = sorted(a_dirs)
+    total_dirs = len(sorted_dirs)
 
-    state_file = _resolve_state_file(output_dir, "describe_a")
+    for idx, d in enumerate(sorted_dirs, 1):
+        state_file = os.path.join(output_dir, f".xai_batch_state_describe_a_{idx}.json")
 
-    # Build batch items (skip images that already have descriptions)
-    items: List[Dict[str, Any]] = []
-    skipped_existing = 0
-    for path_a, req_id in unique_a.items():
-        desc_file = os.path.splitext(path_a)[0] + "_description.txt"
-        if os.path.exists(desc_file):
-            skipped_existing += 1
-            continue
-        try:
-            b64_uri = _image_to_base64(path_a)
-        except Exception as e:
-            logger.warning("Failed to encode image %s: %s", path_a, e)
-            continue
+        # Submit
+        print_info(f"[{idx}/{total_dirs}] Submitting A descriptions for: {d}")
+        rc = _run_grok_batch_subprocess(
+            python, d, "submit", xai_api_key, model,
+            system_prompt_file=sys_prompt_file,
+            user_prompt_file=usr_prompt_file,
+            batch_state_file=state_file,
+            caption_extension="_description.txt",
+        )
+        if rc != 0:
+            print_warning(f"Submit returned code {rc} for {d}")
 
-        user_content = [
-            {"type": "text", "text": _DESCRIBE_USER_PROMPT},
-            {"type": "image_url", "image_url": {"url": b64_uri}},
-        ]
-
-        items.append({
-            "custom_id": req_id,
-            "system_prompt": _DESCRIBE_SYSTEM_PROMPT,
-            "user_content": user_content,
-            "reasoning_effort": "low",
-            "meta": {"image_path": path_a},
-        })
-
-    if skipped_existing:
-        print_info(f"Skipped {skipped_existing} images (already have descriptions)")
-
-    if not items:
-        print_success("All A images already have descriptions — nothing to submit")
-        return
-
-    # Submit
-    batch_id = _xai_batch_submit(items, xai_api_key, model, state_file, "describe_a")
-    print_success(f"Submitted {len(items)} description requests (batch: {batch_id})")
-
-    # Poll
-    print_info("Waiting for descriptions to complete...")
-    _xai_batch_poll(batch_id, xai_api_key)
-
-    # Collect
-    print_info("Collecting description results...")
-    results = _xai_batch_collect(batch_id, xai_api_key, state_file)
-
-    # Write description files
-    written = 0
-    for path_a, req_id in unique_a.items():
-        text = results.get(req_id)
-        if not text:
-            continue
-
-        # Try to parse JSON description
-        description = text
-        try:
-            parsed = json.loads(text)
-            if isinstance(parsed, dict) and "description" in parsed:
-                description = parsed["description"]
-        except (json.JSONDecodeError, ValueError):
-            pass
-
-        # Save as *_A_description.txt
-        stem = os.path.splitext(path_a)[0]
-        desc_file = stem + "_description.txt"
-        with open(desc_file, "w", encoding="utf-8") as f:
-            f.write(description)
-        written += 1
-
-    print_success(f"Wrote {written} description files")
+        # Collect (in separate call — batch processes on xAI servers)
+        print_info(f"[{idx}/{total_dirs}] Collecting A descriptions for: {d}")
+        rc = _run_grok_batch_subprocess(
+            python, d, "collect", xai_api_key, model,
+            system_prompt_file=sys_prompt_file,
+            user_prompt_file=usr_prompt_file,
+            batch_state_file=state_file,
+            caption_extension="_description.txt",
+        )
+        if rc != 0:
+            print_warning(f"Collect returned code {rc} for {d}")
+        else:
+            print_success(f"Descriptions complete for {d}")
 
 
 # ---------------------------------------------------------------------------
@@ -816,138 +443,133 @@ def run_caption_b(
     xai_api_key: str,
     model: str,
     output_dir: str,
+    python: str,
 ) -> None:
-    """Submit xAI Batch job to caption all B images."""
+    """Caption B images via xAI Batch using the existing tagger infrastructure.
+
+    Pre-generates context .txt files for each B image (containing A tags, A description,
+    similarity, B tags) so the tagger's {tags} placeholder receives the full context.
+    Then calls the tagger with --prompt_profile frame-pair for submit + collect.
+    """
     print_section("STEP 5: CAPTION B IMAGES")
 
-    # Load prompts
-    system_prompt_path = os.path.join(PROMPTS_DIR, "image", "frame-pair", "system_prompt.md")
     user_prompt_path = os.path.join(PROMPTS_DIR, "image", "frame-pair", "user_prompt.md")
-
-    if not os.path.exists(system_prompt_path):
-        raise FileNotFoundError(f"System prompt not found: {system_prompt_path}")
     if not os.path.exists(user_prompt_path):
         raise FileNotFoundError(f"User prompt not found: {user_prompt_path}")
-
-    with open(system_prompt_path, "r", encoding="utf-8") as f:
-        system_prompt = f.read().strip()
     with open(user_prompt_path, "r", encoding="utf-8") as f:
         user_prompt_template = f.read().strip()
 
-    state_file = _resolve_state_file(output_dir, "caption_b")
-
-    print_info(f"Captioning {len(pairs)} B images via xAI Batch...")
-
-    items: List[Dict[str, Any]] = []
-    skipped = 0
+    # Pre-generate context files for B images that the tagger will use as "tags"
+    print_info("Preparing context files for B images...")
+    prepared = 0
     skipped_existing = 0
 
-    for i, (path_a, path_b) in enumerate(pairs):
-        # Skip if caption already exists
-        caption_file = os.path.splitext(path_b)[0] + "_caption.txt"
-        if os.path.exists(caption_file):
-            skipped_existing += 1
-            continue
+    with make_progress() as progress:
+        task = progress.add_task("Preparing B context", total=len(pairs))
 
-        req_id = "cap_" + hashlib.sha1(path_b.encode("utf-8")).hexdigest()[:16]
+        for i, (path_a, path_b) in enumerate(pairs):
+            # The tagger will read .txt as "existing tags" for the image.
+            # We write the full context (A tags, A desc, similarity, B tags)
+            # into a temporary .txt next to B that the user_prompt template uses.
+            caption_file = os.path.splitext(path_b)[0] + "_caption.txt"
+            if os.path.exists(caption_file):
+                skipped_existing += 1
+                progress.advance(task)
+                continue
 
-        # Read WD tags for A
-        tags_a_file = os.path.splitext(path_a)[0] + ".txt"
-        wd_tags_a = "(no tags)"
-        if os.path.exists(tags_a_file):
-            with open(tags_a_file, "r", encoding="utf-8") as f:
-                wd_tags_a = f.read().strip() or "(no tags)"
+            # Read WD tags for A
+            tags_a_file = os.path.splitext(path_a)[0] + ".txt"
+            wd_tags_a = "(no tags)"
+            if os.path.exists(tags_a_file):
+                with open(tags_a_file, "r", encoding="utf-8") as f:
+                    wd_tags_a = f.read().strip() or "(no tags)"
 
-        # Read description for A
-        desc_a_file = os.path.splitext(path_a)[0] + "_description.txt"
-        description_a = "(no description)"
-        if os.path.exists(desc_a_file):
-            with open(desc_a_file, "r", encoding="utf-8") as f:
-                description_a = f.read().strip() or "(no description)"
+            # Read description for A
+            desc_a_file = os.path.splitext(path_a)[0] + "_description.txt"
+            description_a = "(no description)"
+            if os.path.exists(desc_a_file):
+                with open(desc_a_file, "r", encoding="utf-8") as f:
+                    description_a = f.read().strip() or "(no description)"
 
-        # Read WD tags for B
-        tags_b_file = os.path.splitext(path_b)[0] + ".txt"
-        wd_tags_b = "(no tags)"
-        if os.path.exists(tags_b_file):
-            with open(tags_b_file, "r", encoding="utf-8") as f:
-                wd_tags_b = f.read().strip() or "(no tags)"
+            # Read WD tags for B
+            tags_b_file = os.path.splitext(path_b)[0] + ".txt"
+            wd_tags_b = "(no tags)"
+            if os.path.exists(tags_b_file):
+                with open(tags_b_file, "r", encoding="utf-8") as f:
+                    wd_tags_b = f.read().strip() or "(no tags)"
 
-        # Similarity
-        similarity_percent = round(similarities[i], 1)
+            similarity_percent = round(similarities[i], 1)
 
-        # Build user prompt from template
-        user_prompt = user_prompt_template
-        user_prompt = user_prompt.replace("{wd_tags_a}", wd_tags_a)
-        user_prompt = user_prompt.replace("{description_a}", description_a)
-        user_prompt = user_prompt.replace("{similarity_percent}", str(similarity_percent))
-        user_prompt = user_prompt.replace("{wd_tags_b}", wd_tags_b)
+            # Build the full context that replaces {tags} in the user prompt
+            context = user_prompt_template
+            context = context.replace("{wd_tags_a}", wd_tags_a)
+            context = context.replace("{description_a}", description_a)
+            context = context.replace("{similarity_percent}", str(similarity_percent))
+            context = context.replace("{wd_tags_b}", wd_tags_b)
 
-        # Encode B image
-        try:
-            b64_uri = _image_to_base64(path_b)
-        except Exception as e:
-            logger.warning("Failed to encode image %s: %s", path_b, e)
-            skipped += 1
-            continue
-
-        user_content = [
-            {"type": "text", "text": user_prompt},
-            {"type": "image_url", "image_url": {"url": b64_uri}},
-        ]
-
-        items.append({
-            "custom_id": req_id,
-            "system_prompt": system_prompt,
-            "user_content": user_content,
-            "reasoning_effort": "low",
-            "meta": {"image_path_b": path_b},
-        })
+            # Write context as _context.txt (the tagger reads .txt as tags)
+            context_file = os.path.splitext(path_b)[0] + "_context.txt"
+            with open(context_file, "w", encoding="utf-8") as f:
+                f.write(context)
+            prepared += 1
+            progress.advance(task)
 
     if skipped_existing:
-        print_info(f"Skipped {skipped_existing} images (already have captions)")
-    if skipped:
-        print_warning(f"Skipped {skipped} images due to encoding errors")
+        print_info(f"Skipped {skipped_existing} B images (already have captions)")
 
-    if not items:
+    if prepared == 0:
         print_success("All B images already have captions — nothing to submit")
         return
 
-    # Submit
-    batch_id = _xai_batch_submit(items, xai_api_key, model, state_file, "caption_b")
-    print_success(f"Submitted {len(items)} caption requests (batch: {batch_id})")
+    print_success(f"Prepared context for {prepared} B images")
 
-    # Poll
-    print_info("Waiting for captions to complete...")
-    _xai_batch_poll(batch_id, xai_api_key)
+    # Now call the tagger with grok xai-batch on each dataset directory.
+    # The tagger will read existing .txt tags and pass them via {tags} to grok.
+    # We use --caption_extension _caption.txt so it doesn't overwrite WD tags.
+    b_dirs: set = set()
+    for _, path_b in pairs:
+        b_dirs.add(os.path.dirname(path_b))
 
-    # Collect
-    print_info("Collecting caption results...")
-    results = _xai_batch_collect(batch_id, xai_api_key, state_file)
+    sorted_dirs = sorted(b_dirs)
+    total_dirs = len(sorted_dirs)
 
-    # Write caption files next to B images
-    written = 0
-    for i, (path_a, path_b) in enumerate(pairs):
-        req_id = "cap_" + hashlib.sha1(path_b.encode("utf-8")).hexdigest()[:16]
-        text = results.get(req_id)
-        if not text:
-            continue
+    # Create a user prompt that just passes the pre-built context through
+    # (the context file already has everything, tagger passes it as {tags})
+    passthrough_user_prompt = "{tags}"
+    passthrough_file = os.path.join(output_dir, "_caption_user_prompt.md")
+    with open(passthrough_file, "w", encoding="utf-8") as f:
+        f.write(passthrough_user_prompt)
 
-        # Try to parse JSON caption
-        caption = text
-        try:
-            parsed = json.loads(text)
-            if isinstance(parsed, dict) and "caption" in parsed:
-                caption = parsed["caption"]
-        except (json.JSONDecodeError, ValueError):
-            pass
+    system_prompt_path = os.path.join(PROMPTS_DIR, "image", "frame-pair", "system_prompt.md")
 
-        # Save caption next to B image (use _caption.txt to avoid overwriting WD tags)
-        txt_file = os.path.splitext(path_b)[0] + "_caption.txt"
-        with open(txt_file, "w", encoding="utf-8") as f:
-            f.write(caption)
-        written += 1
+    for idx, d in enumerate(sorted_dirs, 1):
+        state_file = os.path.join(output_dir, f".xai_batch_state_caption_b_{idx}.json")
 
-    print_success(f"Wrote {written} caption files for B images")
+        # Submit
+        print_info(f"[{idx}/{total_dirs}] Submitting B captions for: {d}")
+        rc = _run_grok_batch_subprocess(
+            python, d, "submit", xai_api_key, model,
+            system_prompt_file=system_prompt_path,
+            user_prompt_file=passthrough_file,
+            batch_state_file=state_file,
+            caption_extension="_caption.txt",
+        )
+        if rc != 0:
+            print_warning(f"Submit returned code {rc} for {d}")
+
+        # Collect
+        print_info(f"[{idx}/{total_dirs}] Collecting B captions for: {d}")
+        rc = _run_grok_batch_subprocess(
+            python, d, "collect", xai_api_key, model,
+            system_prompt_file=system_prompt_path,
+            user_prompt_file=passthrough_file,
+            batch_state_file=state_file,
+            caption_extension="_caption.txt",
+        )
+        if rc != 0:
+            print_warning(f"Collect returned code {rc} for {d}")
+        else:
+            print_success(f"Captions complete for {d}")
 
 
 # ---------------------------------------------------------------------------

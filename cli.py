@@ -1800,7 +1800,7 @@ def run_frame_pair(input_dir: str, python: str, project_name: str = ""):
         if not ask_yes_no("Proceed to describe A images via Grok xAI Batch?", default=True):
             print_info("Skipped step 3")
         else:
-            run_describe_a(pairs, xai_api_key, xai_model, output_dir)
+            run_describe_a(pairs, xai_api_key, xai_model, output_dir, python)
     except KeyboardInterrupt:
         print_warning("\nInterrupted during A descriptions. State saved — re-run to resume batch.")
         return
@@ -1821,7 +1821,7 @@ def run_frame_pair(input_dir: str, python: str, project_name: str = ""):
         if not ask_yes_no("Proceed to caption B images via Grok xAI Batch?", default=True):
             print_info("Skipped step 5")
             return
-        run_caption_b(pairs, similarities, xai_api_key, xai_model, output_dir)
+        run_caption_b(pairs, similarities, xai_api_key, xai_model, output_dir, python)
     except KeyboardInterrupt:
         print_warning("\nInterrupted during B captioning. State saved — re-run to resume batch.")
         return
