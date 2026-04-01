@@ -1324,7 +1324,7 @@ def run_tagging(input_dir: str, python: str, media_counts: dict):
         else:
             grok_load_existing = ask_yes_no(
                 "Also load existing .txt tags as additional context for grok?",
-                default=False,
+                default=True,
             )
 
     # API keys
