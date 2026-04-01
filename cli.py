@@ -1112,14 +1112,14 @@ def run_hf_upload(input_dir: str, python: str, project_name: str = ""):
 
     if upload_format == 1:
         # Zip chunks
-        print_section("BUILDING ZIP SHARDS")
+        print_section("PACKING INTO ZIP FILES")
         zip_output = os.path.join(os.path.dirname(os.path.abspath(input_dir)),
                                   os.path.basename(input_dir) + "_zips")
         os.makedirs(zip_output, exist_ok=True)
-        shard_gb = 1.0
-        max_shard_bytes = int(shard_gb * (1024**3))
+        chunk_gb = 5.0
+        max_chunk_bytes = int(chunk_gb * (1024**3))
 
-        # Collect all media+txt pairs
+        # Collect all media+txt files
         all_files = []
         for dirpath, _, filenames in os.walk(input_dir):
             for fname in sorted(filenames):
@@ -1132,12 +1132,13 @@ def run_hf_upload(input_dir: str, python: str, project_name: str = ""):
             print_error(f"No media files found in {input_dir}")
             return
 
-        print_info(f"Packing {len(all_files):,} files into zip shards (~{shard_gb}GB each) → {zip_output}")
+        dataset_name = os.path.basename(os.path.abspath(input_dir))
+        print_info(f"Packing {len(all_files):,} files into ~{chunk_gb}GB zips → {zip_output}")
 
-        shard_idx = 0
+        part_idx = 1
         current_bytes = 0
         current_zip = None
-        shards_created = 0
+        parts_created = 0
         files_packed = 0
 
         try:
@@ -1145,13 +1146,13 @@ def run_hf_upload(input_dir: str, python: str, project_name: str = ""):
                 fsize = os.path.getsize(fpath)
                 rel_path = os.path.relpath(fpath, input_dir)
 
-                if current_zip is None or (current_bytes > 0 and current_bytes + fsize > max_shard_bytes):
+                if current_zip is None or (current_bytes > 0 and current_bytes + fsize > max_chunk_bytes):
                     if current_zip is not None:
                         current_zip.close()
-                        shards_created += 1
-                    shard_path = os.path.join(zip_output, f"shard-{shard_idx:04d}.zip")
-                    current_zip = zipfile.ZipFile(shard_path, "w", zipfile.ZIP_STORED)
-                    shard_idx += 1
+                        parts_created += 1
+                    zip_path = os.path.join(zip_output, f"{dataset_name}-part{part_idx:03d}.zip")
+                    current_zip = zipfile.ZipFile(zip_path, "w", zipfile.ZIP_STORED)
+                    part_idx += 1
                     current_bytes = 0
 
                 current_zip.write(fpath, rel_path)
@@ -1160,14 +1161,14 @@ def run_hf_upload(input_dir: str, python: str, project_name: str = ""):
 
             if current_zip is not None:
                 current_zip.close()
-                shards_created += 1
+                parts_created += 1
         except KeyboardInterrupt:
             if current_zip is not None:
                 current_zip.close()
             print_warning("\nZip building interrupted")
             return
 
-        print_success(f"{shards_created} zip shards created, {files_packed:,} files packed")
+        print_success(f"{parts_created} zip files created, {files_packed:,} files packed")
         upload_dir = zip_output
 
     elif upload_format == 2:
