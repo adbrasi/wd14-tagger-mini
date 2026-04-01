@@ -1712,6 +1712,123 @@ def run_tagging(input_dir: str, python: str, media_counts: dict):
 
 
 # -------------------------
+# Frame Pair Pipeline
+# -------------------------
+
+def run_frame_pair(input_dir: str, python: str, project_name: str = ""):
+    """Run the frame-pair captioning pipeline (A→B scene transitions)."""
+    from frame_pair_pipeline import (
+        organize_pairs,
+        run_caption_b,
+        run_describe_a,
+        run_frame_pair_pipeline,
+        run_similarity,
+        run_upload,
+        run_wd_tagging,
+    )
+
+    print_section("FRAME PAIR CAPTION PIPELINE")
+
+    # xAI API key
+    xai_api_key = check_env_key("XAI_API_KEY")
+    if xai_api_key:
+        print_success(f"Found XAI_API_KEY in environment ({xai_api_key[:4]}****)")
+    else:
+        xai_api_key = ask_input("Enter xAI API key")
+        if not xai_api_key:
+            print_error("No xAI API key provided. Pipeline requires xAI for captioning.")
+            return
+
+    # xAI model
+    xai_model = ask_input("xAI model", XAI_BATCH_DEFAULT_MODEL)
+
+    # GPU device
+    device = ask_input("Device for similarity computation", "cuda")
+
+    # Output directory
+    default_output = os.path.join(
+        os.path.dirname(os.path.abspath(input_dir)),
+        os.path.basename(os.path.abspath(input_dir)) + "_frame_pairs",
+    )
+    output_dir = ask_input("Output directory for organized pairs", default_output)
+    os.makedirs(output_dir, exist_ok=True)
+
+    # Step 1: Organize
+    print_section("STEP 1: ORGANIZE PAIRS")
+    result = organize_pairs(input_dir, output_dir)
+    pairs = result["pairs"]
+    counts = result["counts"]
+
+    print_summary_table("Pair Organization", [
+        ("Dataset 1 (A+B+C)", str(counts.get("dataset_1", 0))),
+        ("Dataset 2 (A+B+base)", str(counts.get("dataset_2", 0))),
+        ("Dataset 3 (A+B only)", str(counts.get("dataset_3", 0))),
+        ("Total pairs", str(len(pairs))),
+    ])
+
+    if not pairs:
+        print_error("No valid pairs found. Check that your files follow the naming convention: *_A.ext, *_B.ext")
+        return
+
+    if not ask_yes_no(f"Found {len(pairs)} pairs. Proceed with pipeline?", default=True):
+        print_info("Aborted")
+        return
+
+    # Step 2: WD/PixAI tagging
+    print_section("STEP 2: WD/PIXAI TAGGING")
+    print_info(f"Running PixAI tagger on {len(pairs) * 2} images...")
+    run_wd_tagging(pairs, python)
+    print_success("Tagging complete")
+
+    # Step 3: Describe A images
+    run_describe_a(pairs, xai_api_key, xai_model, output_dir)
+
+    # Step 4: Similarity
+    similarities = run_similarity(pairs, device)
+
+    # Step 5: Caption B images
+    run_caption_b(pairs, similarities, xai_api_key, xai_model, output_dir)
+
+    print_section("PIPELINE COMPLETE")
+    print_success(f"Processed {len(pairs)} frame pairs")
+    print_success(f"Output directory: {output_dir}")
+
+    # Offer HuggingFace upload
+    if ask_yes_no("Upload B images + captions to HuggingFace?", default=False):
+        hf_token = check_env_key("HF_TOKEN") or check_env_key("HUGGINGFACE_HUB_TOKEN")
+        if not hf_token:
+            hf_token = ask_input("HuggingFace token")
+            if not hf_token:
+                print_error("No HF token provided")
+                return
+
+        # Try to get username for default repo name
+        default_repo = ""
+        try:
+            import subprocess as _sp
+            r = _sp.run(
+                [python, "-c",
+                 "from huggingface_hub import HfApi; import os; "
+                 "api = HfApi(token=os.environ.get('HF_TOKEN','')); "
+                 "print(api.whoami()['name'])"],
+                capture_output=True, text=True, timeout=10,
+                env={**os.environ, "HF_TOKEN": hf_token},
+            )
+            if r.returncode == 0 and r.stdout.strip():
+                repo_suffix = project_name or os.path.basename(os.path.abspath(output_dir))
+                default_repo = f"{r.stdout.strip()}/{repo_suffix}"
+        except Exception:
+            pass
+
+        hf_repo = ask_input("Repository name (user/dataset)", default=default_repo)
+        if not hf_repo or "/" not in hf_repo:
+            print_error("Repository name must be in format user/dataset")
+            return
+
+        run_upload(output_dir, hf_token, hf_repo, python)
+
+
+# -------------------------
 # Main
 # -------------------------
 
@@ -1778,6 +1895,7 @@ def main():
         "Tag dataset (wd14 / pixai / grok pipeline)",
         "Full pipeline (preprocess → tag → upload)",
         "Upload dataset to HuggingFace",
+        "Frame Pair Caption (A→B scene-transition pipeline)",
     ], default=3)
 
     if workflow in (1, 3):
@@ -1795,6 +1913,9 @@ def main():
 
     if workflow in (3, 4):
         run_hf_upload(input_dir, python, project_name)
+
+    if workflow == 5:
+        run_frame_pair(input_dir, python, project_name)
 
     print_section("ALL DONE")
     print_success(f"Dataset ready at: {input_dir}")
