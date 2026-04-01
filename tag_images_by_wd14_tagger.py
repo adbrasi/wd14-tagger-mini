@@ -840,7 +840,7 @@ def run_pixai(
 # Grok tagger (OpenRouter API)
 # -------------------------
 
-DEFAULT_GROK_MODEL = "x-ai/grok-4-1-fast-reasoning"
+DEFAULT_GROK_MODEL = "x-ai/grok-4.1-fast"
 DEFAULT_XAI_BATCH_MODEL = "grok-4-1-fast-reasoning"
 OPENROUTER_API_URL = "https://openrouter.ai/api/v1/chat/completions"
 
