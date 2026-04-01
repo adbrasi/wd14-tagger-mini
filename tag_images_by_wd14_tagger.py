@@ -1079,6 +1079,11 @@ def call_openrouter(
                 time.sleep(wait)
                 continue
 
+            # Fail immediately on non-transient client errors (401, 400, 403)
+            if 400 <= resp.status_code < 500 and resp.status_code != 429:
+                logger.error(f"OpenRouter client error {resp.status_code}: {resp.text[:300]}")
+                return None
+
             resp.raise_for_status()
             data = resp.json()
             return data["choices"][0]["message"]["content"].strip()
