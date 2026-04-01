@@ -726,8 +726,9 @@ def resolve_input_source(python: str, default_target: str = "") -> str:
     """
     if not default_target:
         default_target = os.path.join(os.path.expanduser("~"), "datasets", "araknideo_dataset")
-    target_dir = ask_input("Target dataset directory", default_target)
+    target_dir = default_target
     os.makedirs(target_dir, exist_ok=True)
+    print_info(f"Dataset directory: {target_dir}")
 
     # If target dir already has files, data source is optional
     existing_files = any(
@@ -739,11 +740,18 @@ def resolve_input_source(python: str, default_target: str = "") -> str:
         is_first = source_num == 0
         if is_first:
             if existing_files:
-                raw = ask_input("Data source (Enter to skip — files already in target dir)")
+                print_info(f"Files already found in {target_dir}")
+                raw = ask_input(
+                    "Data source (Enter to skip)\n"
+                    "  Accepts: local path, MEGA link/folder, HuggingFace URL, HF dataset ID"
+                )
             else:
-                raw = ask_input("Data source (local path, MEGA link, or HuggingFace URL/ID)")
+                raw = ask_input(
+                    "Data source\n"
+                    "  Accepts: local path, MEGA link/folder, HuggingFace URL, HF dataset ID"
+                )
         else:
-            raw = ask_input("Another data source (or press Enter to continue)")
+            raw = ask_input("Another data source (or Enter to continue)")
 
         if not raw:
             if is_first and not existing_files:
