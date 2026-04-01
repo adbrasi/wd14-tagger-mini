@@ -638,6 +638,23 @@ def _process_single_source(
         if not mega_download(raw, tmp_dir):
             print_error("MEGA download failed")
             return False
+
+        # Auto-extract any zip files downloaded from MEGA
+        import zipfile as _zf
+        for dirpath, _, filenames in os.walk(tmp_dir):
+            for fname in filenames:
+                fpath = os.path.join(dirpath, fname)
+                if fname.lower().endswith(".zip") and _zf.is_zipfile(fpath):
+                    print_info(f"Extracting zip: {fname}")
+                    try:
+                        with _zf.ZipFile(fpath, "r") as z:
+                            _validate_zip_members(z, tmp_dir)
+                            z.extractall(tmp_dir)
+                        os.remove(fpath)
+                        print_success(f"Extracted: {fname}")
+                    except Exception as e:
+                        print_warning(f"Failed to extract {fname}: {e}")
+
         stats = flatten_directory(tmp_dir, target_dir)
         print_success(
             f"MEGA: {stats['moved']:,} files "
@@ -701,14 +718,15 @@ def _process_single_source(
         return False
 
 
-def resolve_input_source(python: str) -> str:
+def resolve_input_source(python: str, default_target: str = "") -> str:
     """Ask user for data sources (supports multiple) and merge into one directory.
 
     Accepts any mix of: local dirs, MEGA links, HF URLs, HF dataset IDs.
     All files are flattened into a single target directory with conflict resolution.
     """
-    default_target = os.path.join(os.path.expanduser("~"), "datasets", "araknideo_dataset")
-    target_dir = ask_input("Target dataset directory (all files will be merged here)", default_target)
+    if not default_target:
+        default_target = os.path.join(os.path.expanduser("~"), "datasets", "araknideo_dataset")
+    target_dir = ask_input("Target dataset directory", default_target)
     os.makedirs(target_dir, exist_ok=True)
 
     # If target dir already has files, data source is optional
@@ -1631,8 +1649,15 @@ def main():
     python = ensure_venv()
     install_deps(python)
 
+    # Project name first — drives target dir default and HF repo name
+    project_name = ask_input("Project name")
+    if not project_name:
+        print_error("Project name is required")
+        sys.exit(1)
+
     # Resolve input source (local / HuggingFace / MEGA)
-    input_dir = resolve_input_source(python)
+    default_target = os.path.join(os.path.expanduser("~"), "datasets", project_name)
+    input_dir = resolve_input_source(python, default_target=default_target)
 
     # Handle zip archives
     zip_count = len(list_zip_archives(input_dir, recursive=True))
@@ -1655,13 +1680,6 @@ def main():
         print_info(f"Found ~{media_counts['images']:,} images, ~{media_counts['videos']:,} videos in {input_dir}")
     else:
         print_warning(f"No media found in {input_dir} (subdirs will be scanned during processing)")
-
-    # Validate media/txt pairs
-    run_validation(input_dir)
-
-    # Project name (used as default HF repo name)
-    folder_name = os.path.basename(os.path.abspath(input_dir))
-    project_name = ask_input("Project name (used for HF repo)", default=folder_name)
 
     # What to do?
     workflow = ask_choice("What do you want to do?", [
