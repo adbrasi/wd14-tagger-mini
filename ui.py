@@ -53,7 +53,13 @@ def print_info(msg: str):
 
 
 def ask_input(prompt: str, default: str = "") -> str:
-    return Prompt.ask(f"[bold]{prompt}[/]", default=default)
+    suffix = f" ({default})" if default else ""
+    console.print(f"[bold]{prompt}[/]{suffix}: ", end="")
+    try:
+        raw = input().strip()
+    except (EOFError, KeyboardInterrupt):
+        raise KeyboardInterrupt
+    return raw if raw else default
 
 
 def ask_choice(prompt: str, options: List[str], default: int = 1) -> int:
@@ -64,7 +70,13 @@ def ask_choice(prompt: str, options: List[str], default: int = 1) -> int:
         marker = " [blue]*[/]" if i == default else ""
         console.print(f"  [bold]{i})[/] {opt}{marker}")
     while True:
-        raw = Prompt.ask("Choice", default=str(default))
+        console.print(f"Choice ({default}): ", end="")
+        try:
+            raw = input().strip()
+        except (EOFError, KeyboardInterrupt):
+            raise KeyboardInterrupt
+        if not raw:
+            return default
         try:
             choice = int(raw)
             if 1 <= choice <= len(options):
@@ -75,15 +87,38 @@ def ask_choice(prompt: str, options: List[str], default: int = 1) -> int:
 
 
 def ask_yes_no(prompt: str, default: bool = True) -> bool:
-    return Confirm.ask(f"[bold]{prompt}[/]", default=default)
+    hint = "Y/n" if default else "y/N"
+    while True:
+        console.print(f"[bold]{prompt}[/] [{hint}]: ", end="")
+        try:
+            raw = input().strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            raise KeyboardInterrupt
+        if not raw:
+            return default
+        if raw in ("y", "yes", "s", "sim"):
+            return True
+        if raw in ("n", "no", "nao", "não"):
+            return False
+        console.print("  [red]Enter y or n[/]")
 
 
 def ask_int(prompt: str, default: int = 1, minimum: int = 1) -> int:
     while True:
-        val = IntPrompt.ask(f"[bold]{prompt}[/]", default=default)
-        if val >= minimum:
-            return val
-        console.print(f"  [red]Must be >= {minimum}[/]")
+        console.print(f"[bold]{prompt}[/] ({default}): ", end="")
+        try:
+            raw = input().strip()
+        except (EOFError, KeyboardInterrupt):
+            raise KeyboardInterrupt
+        if not raw:
+            return default
+        try:
+            val = int(raw)
+            if val >= minimum:
+                return val
+            console.print(f"  [red]Must be >= {minimum}[/]")
+        except ValueError:
+            console.print(f"  [red]Enter a number[/]")
 
 
 def make_progress(**kwargs) -> Progress:
