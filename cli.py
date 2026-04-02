@@ -1508,6 +1508,7 @@ def run_tagging(input_dir: str, python: str, media_counts: dict):
                 taggers = "grok"
                 cmd = [python, TAGGER_SCRIPT, input_dir, "--taggers", taggers, "--batch_size", batch_size]
                 cmd.extend(["--grok_provider", caption_provider])
+                cmd.extend(["--prompt_profile", prompt_profile])
                 if is_video:
                     cmd.append("--video")
                 if pro_mode:
@@ -1529,7 +1530,7 @@ def run_tagging(input_dir: str, python: str, media_counts: dict):
             if xai_batch_no_image:
                 cmd.append("--xai_batch_no_image")
         else:
-            cmd.extend(["--llm_concurrency", llm_concurrency])
+            cmd.extend(["--grok_concurrency", llm_concurrency])
 
     if llm_load_existing:
         cmd.append("--grok_context_from_existing")
