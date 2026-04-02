@@ -1349,7 +1349,7 @@ def run_tagging(input_dir: str, python: str, media_counts: dict):
             "Caption backend:",
             [
                 "OpenRouter (real-time, concurrent requests, any model)",
-                "xAI Batch API (background jobs, 50% cheaper, grok only)",
+                "xAI Batch API (background jobs, 50% cheaper, xAI models only)",
             ],
             default=default_provider,
         )
@@ -1392,7 +1392,7 @@ def run_tagging(input_dir: str, python: str, media_counts: dict):
             if monitor_xai:
                 monitor_poll_seconds = str(ask_int("Monitor poll interval (seconds)", default=20, minimum=3))
 
-    # Load existing .txt as grok context
+    # Load existing .txt as LLM context
     is_collect_or_status = caption_provider == "xai-batch" and xai_batch_action in ("status", "collect")
     if has_llm and not is_video and not is_collect_or_status:
         if not has_local_taggers:
@@ -1542,7 +1542,7 @@ def run_tagging(input_dir: str, python: str, media_counts: dict):
     summary_rows = [
         ("Input", input_dir),
         ("Mode", f"{'video' if is_video else 'images'}{' (PRO)' if pro_mode else ''}"),
-        ("Taggers", taggers),
+        ("Taggers", taggers.replace("grok", "llm-caption")),
     ]
     if has_local_taggers:
         summary_rows.append(("Batch size", batch_size))
@@ -1696,8 +1696,8 @@ def run_tagging(input_dir: str, python: str, media_counts: dict):
                         return False
                 else:
                     # Show pixai/wd14 tags from the intermediate .txt
-                    # Before grok runs, the .txt has only booru tags from pixai/wd14
-                    # After grok runs, it's overwritten with the caption
+                    # Before LLM runs, the .txt has only booru tags from pixai/wd14
+                    # After LLM runs, it's overwritten with the caption
                     # So we read the debug tags file if the tagger saved one
                     test_tags_file = os.path.join(test_dir, ".test_tags.txt")
                     if os.path.exists(test_tags_file):
@@ -1714,7 +1714,7 @@ def run_tagging(input_dir: str, python: str, media_counts: dict):
                     if os.path.exists(test_txt):
                         with open(test_txt, "r", encoding="utf-8") as f:
                             caption = f.read().strip()
-                        print_success("Grok caption:")
+                        print_success("LLM caption:")
                         console.print(f"\n[dim]{'─' * 60}[/]")
                         console.print(f"[green]{caption[:800]}[/]")
                         if len(caption) > 800:
@@ -1857,7 +1857,7 @@ def run_frame_pair(input_dir: str, python: str, project_name: str = ""):
 
     # Step 3: Describe A images
     try:
-        if not ask_yes_no("Proceed to describe A images via Grok xAI Batch?", default=True):
+        if not ask_yes_no("Proceed to describe A images via xAI Batch?", default=True):
             print_info("Skipped step 3")
         else:
             run_describe_a(pairs, xai_api_key, xai_model, output_dir, python)
@@ -1878,7 +1878,7 @@ def run_frame_pair(input_dir: str, python: str, project_name: str = ""):
 
     # Step 5: Caption B images
     try:
-        if not ask_yes_no("Proceed to caption B images via Grok xAI Batch?", default=True):
+        if not ask_yes_no("Proceed to caption B images via xAI Batch?", default=True):
             print_info("Skipped step 5")
             return
         run_caption_b(pairs, similarities, xai_api_key, xai_model, output_dir, python)
@@ -1989,7 +1989,7 @@ def main():
     # What to do?
     workflow = ask_choice("What do you want to do?", [
         "Pre-process dataset (trim to max frames)",
-        "Tag dataset (wd14 / pixai / grok pipeline)",
+        "Tag dataset (wd14 / pixai / LLM caption pipeline)",
         "Full pipeline (preprocess → tag → upload)",
         "Upload dataset to HuggingFace",
         "Frame Pair Caption (A→B scene-transition pipeline)",
