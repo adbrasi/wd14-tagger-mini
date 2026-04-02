@@ -63,6 +63,19 @@ def _fix_terminal():
         _fix_terminal._done = True
 
 
+def _clean_input(raw: str) -> str:
+    """Strip control characters (backspace/delete) that broken terminals leave in input."""
+    # Simulate backspace: each \x7f or \x08 deletes the previous char
+    result = []
+    for ch in raw:
+        if ch in ("\x7f", "\x08"):  # DEL and BS
+            if result:
+                result.pop()
+        elif ord(ch) >= 32 or ch in ("\t",):  # printable + tab
+            result.append(ch)
+    return "".join(result).strip()
+
+
 def _prompt(text: str):
     """Print prompt text and flush immediately for terminal compatibility."""
     import sys as _sys
@@ -75,7 +88,7 @@ def ask_input(prompt: str, default: str = "") -> str:
     suffix = f" ({default})" if default else ""
     _prompt(f"{prompt}{suffix}: ")
     try:
-        raw = input().strip()
+        raw = _clean_input(input())
     except (EOFError, KeyboardInterrupt):
         raise KeyboardInterrupt
     return raw if raw else default
@@ -91,7 +104,7 @@ def ask_choice(prompt: str, options: List[str], default: int = 1) -> int:
     while True:
         _prompt(f"Choice ({default}): ")
         try:
-            raw = input().strip()
+            raw = _clean_input(input())
         except (EOFError, KeyboardInterrupt):
             raise KeyboardInterrupt
         if not raw:
@@ -110,7 +123,7 @@ def ask_yes_no(prompt: str, default: bool = True) -> bool:
     while True:
         _prompt(f"{prompt} [{hint}]: ")
         try:
-            raw = input().strip().lower()
+            raw = _clean_input(input()).lower()
         except (EOFError, KeyboardInterrupt):
             raise KeyboardInterrupt
         if not raw:
@@ -126,7 +139,7 @@ def ask_int(prompt: str, default: int = 1, minimum: int = 1) -> int:
     while True:
         _prompt(f"{prompt} ({default}): ")
         try:
-            raw = input().strip()
+            raw = _clean_input(input())
         except (EOFError, KeyboardInterrupt):
             raise KeyboardInterrupt
         if not raw:
