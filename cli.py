@@ -1292,11 +1292,11 @@ def run_tagging(input_dir: str, python: str, media_counts: dict):
 
     # Tagger selection
     tagger_options = [
-        "pixai + grok (recommended for video LoRA)",
-        "wd14 + pixai + grok (full pipeline)",
+        "pixai + LLM caption (recommended)",
+        "wd14 + pixai + LLM caption (full pipeline)",
         "pixai only (fast, tags only)",
         "wd14 only",
-        "grok only (needs API key)",
+        "LLM caption only (needs API key)",
         "Custom (enter manually)",
     ]
     tagger_choice = ask_choice("Select tagger combination:", tagger_options, default=1)
@@ -1346,10 +1346,10 @@ def run_tagging(input_dir: str, python: str, media_counts: dict):
     if has_grok:
         default_provider = 2 if is_video else 1  # xAI Batch default for video
         provider_choice = ask_choice(
-            "Grok backend:",
+            "Caption backend:",
             [
-                "OpenRouter (real-time, concurrent requests)",
-                "xAI Batch API (background jobs, 50% cheaper, no rate limits)",
+                "OpenRouter (real-time, concurrent requests, any model)",
+                "xAI Batch API (background jobs, 50% cheaper, grok only)",
             ],
             default=default_provider,
         )
@@ -1461,10 +1461,15 @@ def run_tagging(input_dir: str, python: str, media_counts: dict):
                 batch_size = "4"
                 print_warning("Could not detect VRAM, using batch_size=4")
 
-    # Grok concurrency
+    # OpenRouter model selection + concurrency
+    grok_model = "x-ai/grok-4.1-fast"
     grok_concurrency = "32"
     if has_grok and grok_provider == "openrouter":
-        grok_concurrency = ask_input("Grok API concurrency (parallel requests)", "32")
+        grok_model = ask_input(
+            "OpenRouter model ID",
+            "x-ai/grok-4.1-fast",
+        )
+        grok_concurrency = ask_input("API concurrency (parallel requests)", "32")
 
     # Recursive
     recursive = ask_yes_no("Search subdirectories recursively?", default=True)
@@ -1496,6 +1501,8 @@ def run_tagging(input_dir: str, python: str, media_counts: dict):
     if has_grok:
         cmd.extend(["--grok_provider", grok_provider])
         cmd.extend(["--prompt_profile", prompt_profile])
+        if grok_provider == "openrouter":
+            cmd.extend(["--grok_model", grok_model])
         if grok_provider == "xai-batch":
             if xai_batch_action in ("status", "collect"):
                 taggers = "grok"
@@ -1530,7 +1537,7 @@ def run_tagging(input_dir: str, python: str, media_counts: dict):
     cmd.extend(["--thresh", "0.30"])
 
     # Summary
-    grok_model_display = XAI_BATCH_DEFAULT_MODEL if grok_provider == "xai-batch" else "x-ai/grok-4.1-fast"
+    grok_model_display = XAI_BATCH_DEFAULT_MODEL if grok_provider == "xai-batch" else grok_model
     summary_rows = [
         ("Input", input_dir),
         ("Mode", f"{'video' if is_video else 'images'}{' (PRO)' if pro_mode else ''}"),
@@ -1539,8 +1546,8 @@ def run_tagging(input_dir: str, python: str, media_counts: dict):
     if has_local_taggers:
         summary_rows.append(("Batch size", batch_size))
     if has_grok:
-        summary_rows.append(("Grok provider", grok_provider))
-        summary_rows.append(("Grok model", grok_model_display))
+        summary_rows.append(("Caption backend", grok_provider))
+        summary_rows.append(("Model", grok_model_display))
         summary_rows.append(("Prompt profile", prompt_profile))
         if grok_provider == "openrouter":
             summary_rows.append(("Concurrency", grok_concurrency))
