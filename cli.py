@@ -1397,12 +1397,12 @@ def run_tagging(input_dir: str, python: str, media_counts: dict):
     if has_llm and not is_video and not is_collect_or_status:
         if not has_local_taggers:
             llm_load_existing = ask_yes_no(
-                "Load existing .txt tags as context for grok?",
+                "Load existing .txt tags as context for LLM captioner?",
                 default=True,
             )
         else:
             llm_load_existing = ask_yes_no(
-                "Also load existing .txt tags as additional context for grok?",
+                "Also load existing .txt tags as additional context for LLM captioner?",
                 default=True,
             )
 
@@ -1431,7 +1431,7 @@ def run_tagging(input_dir: str, python: str, media_counts: dict):
             else:
                 api_key = ask_input("Enter OpenRouter API key (sk-or-...)")
             if not api_key:
-                print_error("No API key provided. Grok tagger will fail.")
+                print_error("No API key provided. LLM captioner will fail.")
                 if not ask_yes_no("Continue anyway?", default=False):
                     sys.exit(1)
 
