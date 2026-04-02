@@ -1306,11 +1306,11 @@ def run_tagging(input_dir: str, python: str, media_counts: dict):
     else:
         taggers = tagger_map[tagger_choice]
 
-    has_grok = "grok" in taggers
+    has_llm = "grok" in taggers
     has_local_taggers = any(t in taggers for t in ("wd14", "camie", "pixai"))
 
-    # Grok provider — xAI Batch as default for video
-    grok_provider = "openrouter"
+    # Caption provider — xAI Batch default for video, OpenRouter for images
+    caption_provider = "openrouter"
     xai_api_key = ""
     xai_batch_action = "submit"
     xai_batch_state_file = ""
@@ -1319,7 +1319,7 @@ def run_tagging(input_dir: str, python: str, media_counts: dict):
     xai_batch_no_image = False
     monitor_xai = False
     monitor_poll_seconds = "20"
-    grok_load_existing = False
+    llm_load_existing = False
 
     # Pro mode
     pro_mode = False
@@ -1328,7 +1328,7 @@ def run_tagging(input_dir: str, python: str, media_counts: dict):
 
     # Prompt profile selection
     prompt_profile = "default"
-    if has_grok:
+    if has_llm:
         mode_name = "video" if is_video else "image"
         profiles = list_prompt_profiles(mode_name)
         if len(profiles) > 1:
@@ -1342,8 +1342,8 @@ def run_tagging(input_dir: str, python: str, media_counts: dict):
             prompt_profile = profiles[0]
             print_info(f"Using prompt profile: {prompt_profile}")
 
-    # Grok provider selection
-    if has_grok:
+    # Caption provider selection
+    if has_llm:
         default_provider = 2 if is_video else 1  # xAI Batch default for video
         provider_choice = ask_choice(
             "Caption backend:",
@@ -1354,7 +1354,7 @@ def run_tagging(input_dir: str, python: str, media_counts: dict):
             default=default_provider,
         )
         if provider_choice == 2:
-            grok_provider = "xai-batch"
+            caption_provider = "xai-batch"
             action_choice = ask_choice(
                 "xAI batch action:",
                 [
@@ -1393,23 +1393,23 @@ def run_tagging(input_dir: str, python: str, media_counts: dict):
                 monitor_poll_seconds = str(ask_int("Monitor poll interval (seconds)", default=20, minimum=3))
 
     # Load existing .txt as grok context
-    is_collect_or_status = grok_provider == "xai-batch" and xai_batch_action in ("status", "collect")
-    if has_grok and not is_video and not is_collect_or_status:
+    is_collect_or_status = caption_provider == "xai-batch" and xai_batch_action in ("status", "collect")
+    if has_llm and not is_video and not is_collect_or_status:
         if not has_local_taggers:
-            grok_load_existing = ask_yes_no(
+            llm_load_existing = ask_yes_no(
                 "Load existing .txt tags as context for grok?",
                 default=True,
             )
         else:
-            grok_load_existing = ask_yes_no(
+            llm_load_existing = ask_yes_no(
                 "Also load existing .txt tags as additional context for grok?",
                 default=True,
             )
 
     # API keys
     api_key = ""
-    if has_grok:
-        if grok_provider == "xai-batch":
+    if has_llm:
+        if caption_provider == "xai-batch":
             xai_api_key = check_env_key("XAI_API_KEY")
             if xai_api_key:
                 print_success(f"Found XAI_API_KEY in environment ({xai_api_key[:4]}****)")
@@ -1443,7 +1443,7 @@ def run_tagging(input_dir: str, python: str, media_counts: dict):
 
     # Batch size — auto VRAM detection (skip for collect/status — no local inference)
     batch_size = "4"
-    is_collect_or_status = (grok_provider == "xai-batch" and has_grok
+    is_collect_or_status = (caption_provider == "xai-batch" and has_llm
                             and xai_batch_action in ("collect", "status"))
     if has_local_taggers and not is_collect_or_status:
         batch_size = ask_input("Batch size for local taggers (or 'auto' for VRAM-based)", "auto")
@@ -1462,14 +1462,14 @@ def run_tagging(input_dir: str, python: str, media_counts: dict):
                 print_warning("Could not detect VRAM, using batch_size=4")
 
     # OpenRouter model selection + concurrency
-    grok_model = "x-ai/grok-4.1-fast"
-    grok_concurrency = "32"
-    if has_grok and grok_provider == "openrouter":
-        grok_model = ask_input(
+    llm_model = "x-ai/grok-4.1-fast"
+    llm_concurrency = "32"
+    if has_llm and caption_provider == "openrouter":
+        llm_model = ask_input(
             "OpenRouter model ID",
             "x-ai/grok-4.1-fast",
         )
-        grok_concurrency = ask_input("API concurrency (parallel requests)", "32")
+        llm_concurrency = ask_input("API concurrency (parallel requests)", "32")
 
     # Recursive
     recursive = ask_yes_no("Search subdirectories recursively?", default=True)
@@ -1478,7 +1478,7 @@ def run_tagging(input_dir: str, python: str, media_counts: dict):
     force = ask_yes_no("Force reprocess already-processed files?", default=False)
 
     # Collect pre-check
-    if has_grok and grok_provider == "xai-batch" and xai_batch_action == "collect":
+    if has_llm and caption_provider == "xai-batch" and xai_batch_action == "collect":
         if not _collect_precheck(xai_batch_state_file, xai_api_key):
             sys.exit(0)
 
@@ -1498,16 +1498,16 @@ def run_tagging(input_dir: str, python: str, media_counts: dict):
 
     cmd.append("--remove_underscore")
 
-    if has_grok:
-        cmd.extend(["--grok_provider", grok_provider])
+    if has_llm:
+        cmd.extend(["--grok_provider", caption_provider])
         cmd.extend(["--prompt_profile", prompt_profile])
-        if grok_provider == "openrouter":
-            cmd.extend(["--grok_model", grok_model])
-        if grok_provider == "xai-batch":
+        if caption_provider == "openrouter":
+            cmd.extend(["--grok_model", llm_model])
+        if caption_provider == "xai-batch":
             if xai_batch_action in ("status", "collect"):
                 taggers = "grok"
                 cmd = [python, TAGGER_SCRIPT, input_dir, "--taggers", taggers, "--batch_size", batch_size]
-                cmd.extend(["--grok_provider", grok_provider])
+                cmd.extend(["--grok_provider", caption_provider])
                 if is_video:
                     cmd.append("--video")
                 if pro_mode:
@@ -1529,15 +1529,15 @@ def run_tagging(input_dir: str, python: str, media_counts: dict):
             if xai_batch_no_image:
                 cmd.append("--xai_batch_no_image")
         else:
-            cmd.extend(["--grok_concurrency", grok_concurrency])
+            cmd.extend(["--llm_concurrency", llm_concurrency])
 
-    if grok_load_existing:
+    if llm_load_existing:
         cmd.append("--grok_context_from_existing")
 
     cmd.extend(["--thresh", "0.30"])
 
     # Summary
-    grok_model_display = XAI_BATCH_DEFAULT_MODEL if grok_provider == "xai-batch" else grok_model
+    llm_model_display = XAI_BATCH_DEFAULT_MODEL if caption_provider == "xai-batch" else llm_model
     summary_rows = [
         ("Input", input_dir),
         ("Mode", f"{'video' if is_video else 'images'}{' (PRO)' if pro_mode else ''}"),
@@ -1545,12 +1545,12 @@ def run_tagging(input_dir: str, python: str, media_counts: dict):
     ]
     if has_local_taggers:
         summary_rows.append(("Batch size", batch_size))
-    if has_grok:
-        summary_rows.append(("Caption backend", grok_provider))
-        summary_rows.append(("Model", grok_model_display))
+    if has_llm:
+        summary_rows.append(("Caption backend", caption_provider))
+        summary_rows.append(("Model", llm_model_display))
         summary_rows.append(("Prompt profile", prompt_profile))
-        if grok_provider == "openrouter":
-            summary_rows.append(("Concurrency", grok_concurrency))
+        if caption_provider == "openrouter":
+            summary_rows.append(("Concurrency", llm_concurrency))
         else:
             summary_rows.append(("Batch action", xai_batch_action))
             summary_rows.append(("State file", xai_batch_state_file))
@@ -1566,7 +1566,7 @@ def run_tagging(input_dir: str, python: str, media_counts: dict):
 
     # --- Dry-run: test with a single sample first ---
     # Skip test run for collect/status actions (nothing to test locally)
-    skip_test = (grok_provider == "xai-batch" and has_grok
+    skip_test = (caption_provider == "xai-batch" and has_llm
                  and xai_batch_action in ("collect", "status"))
     if skip_test:
         print_info("Skipping test run (collect/status — no local test needed)")
@@ -1612,7 +1612,7 @@ def run_tagging(input_dir: str, python: str, media_counts: dict):
                     test_cmd.append("--force")
                 test_cmd.append("--save_intermediate_tags")
                 # xAI batch: use a separate state file for the test
-                if grok_provider == "xai-batch" and has_grok:
+                if caption_provider == "xai-batch" and has_llm:
                     test_state = os.path.join(test_dir, ".xai_test_state.json")
                     for i, arg in enumerate(test_cmd):
                         if arg == "--xai_batch_state_file":
@@ -1637,7 +1637,7 @@ def run_tagging(input_dir: str, python: str, media_counts: dict):
                 test_result = test_proc
 
                 # For xAI batch: wait for the single request then collect
-                if grok_provider == "xai-batch" and has_grok and test_result.returncode == 0:
+                if caption_provider == "xai-batch" and has_llm and test_result.returncode == 0:
                     test_state = None
                     for i, arg in enumerate(test_cmd):
                         if arg == "--xai_batch_state_file" and i + 1 < len(test_cmd):
@@ -1752,7 +1752,7 @@ def run_tagging(input_dir: str, python: str, media_counts: dict):
         else:
             print_success("DONE! Check your input directory for .txt files.")
 
-        if has_grok and grok_provider == "xai-batch" and monitor_xai and xai_batch_action in ("submit", "status"):
+        if has_llm and caption_provider == "xai-batch" and monitor_xai and xai_batch_action in ("submit", "status"):
             try:
                 monitor_xai_batch(
                     state_file=xai_batch_state_file,

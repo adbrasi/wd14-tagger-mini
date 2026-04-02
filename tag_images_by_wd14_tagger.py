@@ -1059,9 +1059,8 @@ def call_openrouter(
         ],
     }
 
-    # Add reasoning param for grok/x-ai models (reasoning effort low for speed)
-    if "grok" in model.lower() or "x-ai" in model.lower():
-        payload["reasoning"] = {"effort": "low"}
+    # OpenRouter ignores reasoning for models that don't support it
+    payload["reasoning"] = {"effort": "low"}
 
     if json_mode:
         payload["response_format"] = CAPTION_JSON_SCHEMA
