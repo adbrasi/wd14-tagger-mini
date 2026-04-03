@@ -1318,14 +1318,11 @@ def run_tagging(input_dir: str, python: str, media_counts: dict):
     has_llm = "grok" in taggers
     has_local_taggers = any(t in taggers for t in ("wd14", "camie", "pixai"))
 
-    # Trigger word / prepend text
+    # Trigger word / prepend text — always ask
     prepend_text = ""
-    if tagger_choice == 6:
-        prepend_text = ask_input("Trigger word (prepended to every .txt)", "anime screencap style")
-    elif not has_llm and has_local_taggers:
-        tw = ask_input("Prepend trigger word to .txt? (Enter to skip)", "")
-        if tw:
-            prepend_text = tw
+    tw = ask_input("Prepend trigger word to .txt? (Enter to skip)", "")
+    if tw:
+        prepend_text = tw
 
     # Caption provider — xAI Batch default for video, OpenRouter for images
     caption_provider = "openrouter"
