@@ -1297,17 +1297,27 @@ def run_tagging(input_dir: str, python: str, media_counts: dict):
         "pixai only (fast, tags only)",
         "wd14 only",
         "LLM caption only (needs API key)",
+        "trigger word + pixai + wd14 (tags with trigger prefix)",
         "Custom (enter manually)",
     ]
     tagger_choice = ask_choice("Select tagger combination:", tagger_options, default=1)
-    tagger_map = {1: "pixai,grok", 2: "wd14,pixai,grok", 3: "pixai", 4: "wd14", 5: "grok"}
-    if tagger_choice == 6:
+    tagger_map = {1: "pixai,grok", 2: "wd14,pixai,grok", 3: "pixai", 4: "wd14", 5: "grok", 6: "wd14,pixai"}
+    if tagger_choice == 7:
         taggers = ask_input("Enter taggers (comma-separated)", "pixai,grok")
     else:
         taggers = tagger_map[tagger_choice]
 
     has_llm = "grok" in taggers
     has_local_taggers = any(t in taggers for t in ("wd14", "camie", "pixai"))
+
+    # Trigger word / prepend text
+    prepend_text = ""
+    if tagger_choice == 6:
+        prepend_text = ask_input("Trigger word (prepended to every .txt)", "anime screencap style")
+    elif not has_llm and has_local_taggers:
+        tw = ask_input("Prepend trigger word to .txt? (Enter to skip)", "")
+        if tw:
+            prepend_text = tw
 
     # Caption provider — xAI Batch default for video, OpenRouter for images
     caption_provider = "openrouter"
@@ -1498,6 +1508,9 @@ def run_tagging(input_dir: str, python: str, media_counts: dict):
 
     cmd.append("--remove_underscore")
 
+    if prepend_text:
+        cmd.extend(["--prepend_text", prepend_text])
+
     if has_llm:
         cmd.extend(["--grok_provider", caption_provider])
         cmd.extend(["--prompt_profile", prompt_profile])
@@ -1544,6 +1557,8 @@ def run_tagging(input_dir: str, python: str, media_counts: dict):
         ("Mode", f"{'video' if is_video else 'images'}{' (PRO)' if pro_mode else ''}"),
         ("Taggers", taggers.replace("grok", "llm-caption")),
     ]
+    if prepend_text:
+        summary_rows.append(("Trigger word", prepend_text))
     if has_local_taggers:
         summary_rows.append(("Batch size", batch_size))
     if has_llm:

@@ -2434,21 +2434,27 @@ def update_processing_log(
 
 
 def write_caption_files(combined: Dict[str, List[str]], args) -> None:
+    prepend = getattr(args, "prepend_text", None)
+    sep = args.caption_separator
+
     for image_path, tags in combined.items():
         if not tags:
             continue
         caption_file = os.path.splitext(image_path)[0] + args.caption_extension
-        tag_text = args.caption_separator.join(tags)
+        tag_text = sep.join(tags)
 
         if args.append_tags and os.path.exists(caption_file):
             with open(caption_file, "rt", encoding="utf-8") as f:
                 existing = [
                     t.strip()
-                    for t in f.read().strip("\n").split(args.caption_separator.strip())
+                    for t in f.read().strip("\n").split(sep.strip())
                     if t.strip()
                 ]
             new_tags = [t for t in tags if t not in existing]
-            tag_text = args.caption_separator.join(existing + new_tags)
+            tag_text = sep.join(existing + new_tags)
+
+        if prepend:
+            tag_text = prepend + sep + tag_text
 
         with open(caption_file, "wt", encoding="utf-8") as f:
             f.write(tag_text + "\n")
@@ -2884,6 +2890,7 @@ def setup_parser() -> argparse.ArgumentParser:
     parser.add_argument("--recursive", action="store_true")
     parser.add_argument("--remove_underscore", action="store_true")
     parser.add_argument("--append_tags", action="store_true")
+    parser.add_argument("--prepend_text", type=str, default=None, help="text to prepend to every .txt (e.g. trigger word)")
 
     parser.add_argument("--use_rating_tags", action="store_true")
     parser.add_argument("--use_rating_tags_as_last_tag", action="store_true")
