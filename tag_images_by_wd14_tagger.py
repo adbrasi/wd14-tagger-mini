@@ -1092,7 +1092,16 @@ def call_openrouter(
 
             resp.raise_for_status()
             data = resp.json()
-            return data["choices"][0]["message"]["content"].strip()
+
+            # Validate response structure
+            if "choices" not in data or not data["choices"]:
+                logger.error(f"OpenRouter response missing 'choices': {json.dumps(data)[:500]}")
+                return None
+            content = data["choices"][0].get("message", {}).get("content")
+            if not content:
+                logger.error(f"OpenRouter response has empty content: {json.dumps(data)[:500]}")
+                return None
+            return content.strip()
         except requests.exceptions.RequestException as e:
             logger.warning(f"OpenRouter API error (attempt {attempt + 1}/{max_retries + 1}): {e}")
             if hasattr(e, "response") and e.response is not None:
@@ -1103,6 +1112,9 @@ def call_openrouter(
             else:
                 logger.error(f"OpenRouter API failed after {max_retries + 1} attempts")
                 return None
+        except (KeyError, IndexError, TypeError) as e:
+            logger.error(f"OpenRouter response parse error: {e}")
+            return None
     return None
 
 

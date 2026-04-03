@@ -1754,6 +1754,7 @@ def run_tagging(input_dir: str, python: str, media_counts: dict):
                     # After LLM runs, it's overwritten with the caption
                     # So we read the debug tags file if the tagger saved one
                     # Show intermediate tagger tags (only if LLM also ran)
+                    tags_content = ""
                     if has_llm:
                         test_tags_file = os.path.join(test_dir, ".test_tags.txt")
                         if os.path.exists(test_tags_file):
@@ -1770,15 +1771,25 @@ def run_tagging(input_dir: str, python: str, media_counts: dict):
                     if os.path.exists(test_txt):
                         with open(test_txt, "r", encoding="utf-8") as f:
                             caption = f.read().strip()
-                        label = "LLM caption:" if has_llm else "Output (.txt):"
-                        print_success(label)
-                        console.print(f"\n[dim]{'─' * 60}[/]")
-                        console.print(f"[green]{caption[:800]}[/]")
-                        if len(caption) > 800:
-                            console.print(f"[dim]... ({len(caption)} chars total)[/]")
-                        console.print(f"[dim]{'─' * 60}[/]\n")
+
+                        # Detect if LLM failed silently (output == input tags)
+                        if has_llm and tags_content and caption == tags_content:
+                            print_error("LLM caption FAILED — output is identical to input tags")
+                            print_info("The LLM did not generate a caption. Check API key, model, and logs above.")
+                        else:
+                            label = "LLM caption:" if has_llm else "Output (.txt):"
+                            print_success(label)
+                            console.print(f"\n[dim]{'─' * 60}[/]")
+                            console.print(f"[green]{caption[:800]}[/]")
+                            if len(caption) > 800:
+                                console.print(f"[dim]... ({len(caption)} chars total)[/]")
+                            console.print(f"[dim]{'─' * 60}[/]\n")
                     else:
-                        print_success("Test run completed (no caption file — may be tags-only mode)")
+                        if has_llm:
+                            print_error("LLM caption FAILED — no .txt file generated")
+                            print_info("Check API key, model, and error logs above.")
+                        else:
+                            print_success("Test run completed (no caption file — may be tags-only mode)")
 
                     if not ask_yes_no("Looks good? Proceed with full dataset?", default=True):
                         print_info("Aborted")
