@@ -8,6 +8,7 @@ import hashlib
 import json
 import os
 import re
+import signal
 import subprocess
 import sys
 import time
@@ -1256,14 +1257,21 @@ def run_hf_upload(input_dir: str, python: str, project_name: str = ""):
     proc = subprocess.Popen(
         [python, "-c", upload_script, repo_name, upload_dir,
          "true" if private else "false", str(num_workers)],
-        env=env,
+        env=env, start_new_session=True,
     )
     try:
         proc.wait()
     except KeyboardInterrupt:
         print_warning("\nInterrupted — killing upload process...")
-        proc.kill()
-        proc.wait()
+        try:
+            os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+        except (ProcessLookupError, OSError):
+            proc.kill()
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait()
         print_info("Re-run to resume automatically (upload_large_folder is resumable)")
         return
 
@@ -1642,12 +1650,15 @@ def run_tagging(input_dir: str, python: str, media_counts: dict):
                 if hf_token:
                     test_env["HF_TOKEN"] = hf_token
 
-                test_proc = subprocess.Popen(test_cmd, env=test_env)
+                test_proc = subprocess.Popen(test_cmd, env=test_env, start_new_session=True)
                 try:
                     test_proc.wait()
                 except KeyboardInterrupt:
                     print_warning("\nInterrupted — killing test process...")
-                    test_proc.kill()
+                    try:
+                        os.killpg(os.getpgid(test_proc.pid), signal.SIGTERM)
+                    except (ProcessLookupError, OSError):
+                        test_proc.kill()
                     test_proc.wait()
                     return False
                 test_result = test_proc
@@ -1695,14 +1706,45 @@ def run_tagging(input_dir: str, python: str, media_counts: dict):
                                 print_warning("xAI batch test timed out (60s) — batch is slow right now")
                                 print_info("The batch was submitted and will process in background.")
                                 choice = ask_choice("How to proceed?", [
+                                    "Switch to OpenRouter (real-time, use a different model)",
                                     "Continue with xAI batch anyway (collect results later)",
                                     "Skip test and start full pipeline with xAI batch",
                                     "Abort",
                                 ])
-                                if choice == 3:
+                                if choice == 1:
+                                    # Switch to OpenRouter
+                                    caption_provider = "openrouter"
+                                    llm_model = ask_input("OpenRouter model ID", "x-ai/grok-4.1-fast")
+                                    env_key = check_env_key("OPENROUTER_API_KEY")
+                                    if env_key:
+                                        masked = f"{env_key[:4]}****{env_key[-4:]}" if len(env_key) > 8 else f"{env_key[:4]}****"
+                                        use_env = ask_yes_no(f"Use OPENROUTER_API_KEY ({masked})?", default=True)
+                                        api_key = env_key if use_env else ask_input("Enter OpenRouter API key")
+                                    else:
+                                        api_key = ask_input("Enter OpenRouter API key (sk-or-...)")
+                                    llm_concurrency = ask_input("API concurrency", "32")
+                                    # Rebuild cmd for openrouter
+                                    cmd = [c for c in cmd if c not in ("--grok_provider", "xai-batch")]
+                                    # Remove xai-specific args
+                                    _clean = []
+                                    _skip_next = False
+                                    for c in cmd:
+                                        if _skip_next:
+                                            _skip_next = False
+                                            continue
+                                        if c.startswith("--xai_batch") or c.startswith("--xai_api"):
+                                            _skip_next = True
+                                            continue
+                                        _clean.append(c)
+                                    cmd = _clean
+                                    cmd.extend(["--grok_provider", "openrouter"])
+                                    cmd.extend(["--grok_model", llm_model])
+                                    cmd.extend(["--grok_concurrency", llm_concurrency])
+                                    print_success(f"Switched to OpenRouter: {llm_model}")
+                                elif choice == 4:
                                     print_info("Aborted")
                                     return False
-                                # choice 1 or 2: continue normally
+                                # choice 2 or 3: continue normally
 
                 if test_result.returncode != 0:
                     print_error("Test run FAILED")
@@ -1756,13 +1798,23 @@ def run_tagging(input_dir: str, python: str, media_counts: dict):
     if hf_token:
         env["HF_TOKEN"] = hf_token
 
-    proc = subprocess.Popen(cmd, env=env)
+    proc = subprocess.Popen(cmd, env=env, start_new_session=True)
     try:
         proc.wait()
     except KeyboardInterrupt:
         print_warning("\nInterrupted — killing tagger process...")
-        proc.kill()
-        proc.wait()
+        try:
+            os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+        except (ProcessLookupError, OSError):
+            pass
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            try:
+                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+            except (ProcessLookupError, OSError):
+                pass
+            proc.wait()
         return False
 
     if proc.returncode == 0:
