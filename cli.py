@@ -1301,7 +1301,7 @@ def run_tagging(input_dir: str, python: str, media_counts: dict):
         "Custom (enter manually)",
     ]
     tagger_choice = ask_choice("Select tagger combination:", tagger_options, default=1)
-    tagger_map = {1: "pixai,grok", 2: "wd14,pixai,grok", 3: "pixai", 4: "wd14", 5: "grok", 6: "wd14,pixai"}
+    tagger_map = {1: "pixai,grok", 2: "wd14,pixai,grok", 3: "pixai", 4: "wd14", 5: "grok", 6: "pixai,wd14"}
     if tagger_choice == 7:
         taggers = ask_input("Enter taggers (comma-separated)", "pixai,grok")
     else:
@@ -1714,22 +1714,25 @@ def run_tagging(input_dir: str, python: str, media_counts: dict):
                     # Before LLM runs, the .txt has only booru tags from pixai/wd14
                     # After LLM runs, it's overwritten with the caption
                     # So we read the debug tags file if the tagger saved one
-                    test_tags_file = os.path.join(test_dir, ".test_tags.txt")
-                    if os.path.exists(test_tags_file):
-                        with open(test_tags_file, "r", encoding="utf-8") as tf:
-                            tags_content = tf.read().strip()
-                        if tags_content:
-                            print_info("Pixai/wd14 tags:")
-                            console.print(f"[dim]{'─' * 60}[/]")
-                            console.print(f"[yellow]{tags_content}[/]")
-                            console.print(f"[dim]{'─' * 60}[/]\n")
+                    # Show intermediate tagger tags (only if LLM also ran)
+                    if has_llm:
+                        test_tags_file = os.path.join(test_dir, ".test_tags.txt")
+                        if os.path.exists(test_tags_file):
+                            with open(test_tags_file, "r", encoding="utf-8") as tf:
+                                tags_content = tf.read().strip()
+                            if tags_content:
+                                print_info("Tagger tags (input to LLM):")
+                                console.print(f"[dim]{'─' * 60}[/]")
+                                console.print(f"[yellow]{tags_content}[/]")
+                                console.print(f"[dim]{'─' * 60}[/]\n")
 
-                    # Show the generated caption
+                    # Show the final .txt output
                     test_txt = os.path.splitext(test_link)[0] + ".txt"
                     if os.path.exists(test_txt):
                         with open(test_txt, "r", encoding="utf-8") as f:
                             caption = f.read().strip()
-                        print_success("LLM caption:")
+                        label = "LLM caption:" if has_llm else "Output (.txt):"
+                        print_success(label)
                         console.print(f"\n[dim]{'─' * 60}[/]")
                         console.print(f"[green]{caption[:800]}[/]")
                         if len(caption) > 800:
