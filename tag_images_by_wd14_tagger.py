@@ -1057,6 +1057,7 @@ def call_openrouter(
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": content_parts},
         ],
+        "max_tokens": 1024,
     }
 
     # OpenRouter ignores reasoning for models that don't support it
@@ -1077,6 +1078,12 @@ def call_openrouter(
                 logger.warning(f"OpenRouter {resp.status_code} (attempt {attempt + 1}), retrying in {wait}s...")
                 time.sleep(wait)
                 continue
+
+            # 402 = out of credits — abort everything, don't waste more
+            if resp.status_code == 402:
+                msg = f"OpenRouter out of credits (402): {resp.text[:300]}"
+                logger.error(msg)
+                raise RuntimeError(msg)
 
             # Fail immediately on non-transient client errors (401, 400, 403)
             if 400 <= resp.status_code < 500 and resp.status_code != 429:
@@ -2169,7 +2176,7 @@ def run_grok(
 
     pbar = None
     if progress is None and not args.no_progress:
-        pbar = tqdm(total=len(paths), smoothing=0.0, desc="grok")
+        pbar = tqdm(total=len(paths), smoothing=0.0, desc="llm-caption")
 
     futures = {}
     completed_paths: List[str] = []
@@ -2195,6 +2202,12 @@ def run_grok(
         for future in as_completed(futures):
             try:
                 image_path, caption = future.result()
+            except RuntimeError as e:
+                # Fatal error (e.g. 402 out of credits) — cancel all pending and stop
+                logger.error(f"Fatal: {e}")
+                for f in futures:
+                    f.cancel()
+                break
             except Exception as e:
                 image_path = futures[future]
                 logger.error(f"Grok task failed for {image_path}: {e}")
