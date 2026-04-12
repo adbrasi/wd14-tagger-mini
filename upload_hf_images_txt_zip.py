@@ -253,7 +253,7 @@ def upload_images_txt_as_zips(
     )
     logging.info("repo ready: %s (type=%s)", resolved_repo_id, repo_type)
 
-    existing_files = api.list_repo_files(repo_id=resolved_repo_id, repo_type=repo_type, token=token)
+    existing_files = list(api.list_repo_files(repo_id=resolved_repo_id, repo_type=repo_type, token=token))
     unsafe_existing = [p for p in existing_files if not _is_safe_existing_repo_file(p, clean_prefix)]
     if unsafe_existing and not allow_existing_repo:
         raise RuntimeError(

@@ -4,7 +4,6 @@
 Full pipeline wizard: download → validate → preprocess → tag → upload.
 Uses Rich for styled terminal UI throughout.
 """
-import hashlib
 import json
 import os
 import re
@@ -17,6 +16,12 @@ import zipfile
 
 import requests
 
+from prompt_profiles import (
+    build_prompt_profile_options,
+    collect_prompt_profile_values,
+    describe_prompt_vars,
+    list_prompt_profiles,
+)
 from ui import (
     ask_choice,
     ask_input,
@@ -32,6 +37,14 @@ from ui import (
     print_summary_table,
     print_warning,
 )
+from wizard_steps import (
+    ask_literal_prefix,
+    build_tagging_summary_rows,
+    choose_pipeline,
+    choose_processing_mode,
+    configure_caption_backend,
+)
+from xai_batch_state import resolve_default_xai_state_file
 
 # -------------------------
 # Constants
@@ -108,14 +121,6 @@ def install_deps(python: str):
 # -------------------------
 # xAI Batch Monitoring
 # -------------------------
-
-def resolve_default_xai_state_file(input_dir: str) -> str:
-    """Match the default state-file naming used by tag_images_by_wd14_tagger.py."""
-    base_dir = os.path.abspath(input_dir)
-    parent_dir = os.path.dirname(base_dir)
-    dataset_name = os.path.basename(base_dir)
-    key = hashlib.md5(base_dir.encode("utf-8")).hexdigest()[:10]
-    return os.path.join(parent_dir, f".xai_batch_state_{dataset_name}_{key}.json")
 
 
 def fetch_xai_batch_status(
@@ -296,38 +301,6 @@ def download_hf_dataset(repo_id: str, subfolder, local_dir: str, token, python_p
         result_path = local_dir
     print_success(f"Download complete: {result_path}")
     return result_path
-
-
-# -------------------------
-# Prompt profiles
-# -------------------------
-
-def list_prompt_profiles(mode: str) -> list:
-    """List available prompt profiles for a mode (image/video).
-
-    Scans prompts/<mode>/ for subdirectories containing system_prompt.md.
-    Returns sorted list of profile names, with 'default' first if it exists.
-    """
-    mode_dir = os.path.join(PROMPTS_DIR, mode)
-    if not os.path.isdir(mode_dir):
-        return ["default"]
-
-    profiles = []
-    for entry in os.listdir(mode_dir):
-        profile_dir = os.path.join(mode_dir, entry)
-        if os.path.isdir(profile_dir) and os.path.exists(
-            os.path.join(profile_dir, "system_prompt.md")
-        ):
-            profiles.append(entry)
-
-    if not profiles:
-        return ["default"]
-
-    profiles.sort()
-    if "default" in profiles:
-        profiles.remove("default")
-        profiles.insert(0, "default")
-    return profiles
 
 
 # -------------------------
@@ -578,6 +551,8 @@ def _download_direct_url(url: str, dest_dir: str, python: str = "") -> str:
             wget_cmd.extend(["--config", _header_file.name])
         wget_cmd.append(url)
         result = subprocess.run(wget_cmd)
+    except Exception:
+        result = None
     finally:
         if _header_file is not None:
             try:
@@ -585,7 +560,7 @@ def _download_direct_url(url: str, dest_dir: str, python: str = "") -> str:
             except OSError:
                 pass
 
-    if result.returncode != 0 or not os.path.exists(dest_file):
+    if result is None or result.returncode != 0 or not os.path.exists(dest_file):
         print_error(f"Download failed: {url}")
         return ""
 
@@ -859,6 +834,9 @@ def run_preprocessing(input_dir: str):
         "video_normalize",
         os.path.join(SCRIPT_DIR, "video_normalize.py"),
     )
+    if _spec is None or _spec.loader is None:
+        print_error("video_normalize.py not found")
+        return
     _mod = importlib.util.module_from_spec(_spec)
     _spec.loader.exec_module(_mod)
     convertible_exts = _mod.CONVERTIBLE_EXTS
@@ -1291,49 +1269,24 @@ def run_tagging(input_dir: str, python: str, media_counts: dict):
     img_count = media_counts["images"]
     vid_count = media_counts["videos"]
 
-    # Mode selection
-    mode = ask_choice("What are you processing?", [
-        f"Videos (extract frames and tag) — {vid_count:,} found",
-        f"Images (tag directly) — {img_count:,} found",
-    ], default=1 if vid_count > 0 else 2)
-    is_video = mode == 1
-
-    # Tagger selection
-    tagger_options = [
-        "pixai + LLM caption (recommended)",
-        "wd14 + pixai + LLM caption (full pipeline)",
-        "pixai only (fast, tags only)",
-        "wd14 only",
-        "LLM caption only (needs API key)",
-        "trigger word + pixai + wd14 (tags with trigger prefix)",
-        "Custom (enter manually)",
-    ]
-    tagger_choice = ask_choice("Select tagger combination:", tagger_options, default=1)
-    tagger_map = {1: "pixai,grok", 2: "wd14,pixai,grok", 3: "pixai", 4: "wd14", 5: "grok", 6: "pixai,wd14"}
-    if tagger_choice == 7:
-        taggers = ask_input("Enter taggers (comma-separated)", "pixai,grok")
-    else:
-        taggers = tagger_map[tagger_choice]
+    is_video = choose_processing_mode(
+        image_count=img_count,
+        video_count=vid_count,
+        ask_choice=ask_choice,
+    )
+    tagger_choice, taggers = choose_pipeline(
+        ask_choice=ask_choice,
+        ask_input=ask_input,
+    )
 
     has_llm = "grok" in taggers
     has_local_taggers = any(t in taggers for t in ("wd14", "camie", "pixai"))
 
-    # Trigger word / prepend text — always ask
+    # Optional literal prefix saved into .txt output.
     prepend_text = ""
-    tw = ask_input("Prepend trigger word to .txt? (Enter to skip)", "")
-    if tw:
-        prepend_text = tw
 
     # Caption provider — xAI Batch default for video, OpenRouter for images
-    caption_provider = "openrouter"
     xai_api_key = ""
-    xai_batch_action = "submit"
-    xai_batch_state_file = ""
-    xai_batch_submit_chunk = "1000"
-    xai_batch_page_size = "100"
-    xai_batch_no_image = False
-    monitor_xai = False
-    monitor_poll_seconds = "20"
     llm_load_existing = False
 
     # Pro mode
@@ -1341,83 +1294,78 @@ def run_tagging(input_dir: str, python: str, media_counts: dict):
     if is_video:
         pro_mode = ask_yes_no("Enable PRO mode? (2 frames per video, better quality)", default=False)
 
+    backend_config = configure_caption_backend(
+        has_llm=has_llm,
+        is_video=is_video,
+        input_dir=input_dir,
+        resolve_default_xai_state_file=resolve_default_xai_state_file,
+        ask_choice=ask_choice,
+        ask_yes_no=ask_yes_no,
+        ask_input=ask_input,
+        ask_int=ask_int,
+    )
+    caption_provider = backend_config["caption_provider"]
+    xai_batch_action = backend_config["xai_batch_action"]
+    xai_batch_state_file = backend_config["xai_batch_state_file"]
+    xai_batch_submit_chunk = backend_config["xai_batch_submit_chunk"]
+    xai_batch_page_size = backend_config["xai_batch_page_size"]
+    xai_batch_no_image = backend_config["xai_batch_no_image"]
+    monitor_xai = backend_config["monitor_xai"]
+    monitor_poll_seconds = backend_config["monitor_poll_seconds"]
+
     # Prompt profile selection
     prompt_profile = "default"
-    if has_llm:
+    prompt_vars = {}
+    needs_prompt_profile = has_llm and not (
+        caption_provider == "xai-batch" and xai_batch_action in ("status", "collect")
+    )
+    if needs_prompt_profile:
         mode_name = "video" if is_video else "image"
-        profiles = list_prompt_profiles(mode_name)
+        profiles = list_prompt_profiles(PROMPTS_DIR, mode_name)
         if len(profiles) > 1:
+            profile_options = build_prompt_profile_options(PROMPTS_DIR, mode_name, profiles)
             profile_choice = ask_choice(
-                f"Prompt profile ({mode_name}):",
-                profiles,
+                f"Choose caption preset ({mode_name}):",
+                profile_options,
                 default=1,
             )
             prompt_profile = profiles[profile_choice - 1]
         else:
             prompt_profile = profiles[0]
-            print_info(f"Using prompt profile: {prompt_profile}")
+            print_info(f"Using caption preset: {prompt_profile}")
 
-    # Caption provider selection
-    if has_llm:
-        default_provider = 2 if is_video else 1  # xAI Batch default for video
-        provider_choice = ask_choice(
-            "Caption backend:",
-            [
-                "OpenRouter (real-time, concurrent requests, any model)",
-                "xAI Batch API (background jobs, 50% cheaper, xAI models only)",
-            ],
-            default=default_provider,
+        prompt_vars = collect_prompt_profile_values(
+            PROMPTS_DIR,
+            mode_name,
+            prompt_profile,
+            ask_input=ask_input,
+            warn=print_warning,
         )
-        if provider_choice == 2:
-            caption_provider = "xai-batch"
-            action_choice = ask_choice(
-                "xAI batch action:",
-                [
-                    "Submit requests to batch",
-                    "Check batch status only",
-                    "Collect completed results and write .txt",
-                ],
-                default=1,
-            )
-            action_map = {1: "submit", 2: "status", 3: "collect"}
-            xai_batch_action = action_map[action_choice]
+        if prompt_vars:
+            print_info(f"Preset variables: {describe_prompt_vars(prompt_vars)}")
+    elif has_llm:
+        print_info("Skipping caption preset questions for xAI batch status/collect.")
 
-            xai_batch_state_file = ask_input(
-                "Batch state file (.json)",
-                resolve_default_xai_state_file(input_dir),
-            )
-
-            if xai_batch_action == "submit":
-                send_images = ask_yes_no(
-                    "Include images in each request? (better captions, larger payload)",
-                    default=True,
-                )
-                xai_batch_no_image = not send_images
-                chunk_default = "500" if send_images else "5000"
-                xai_batch_submit_chunk = ask_input(
-                    "Requests per submit call",
-                    chunk_default,
-                )
-                monitor_xai = ask_yes_no("Monitor batch progress after submit?", default=True)
-            elif xai_batch_action == "status":
-                monitor_xai = ask_yes_no("Keep monitoring status continuously?", default=True)
-            elif xai_batch_action == "collect":
-                xai_batch_page_size = ask_input("Results page size for collect", "100")
-
-            if monitor_xai:
-                monitor_poll_seconds = str(ask_int("Monitor poll interval (seconds)", default=20, minimum=3))
+    prepend_text = ask_literal_prefix(
+        has_llm=has_llm,
+        prompt_vars=prompt_vars,
+        pipeline_choice=tagger_choice,
+        ask_input=ask_input,
+        print_info=print_info,
+        print_warning=print_warning,
+    )
 
     # Load existing .txt as LLM context
     is_collect_or_status = caption_provider == "xai-batch" and xai_batch_action in ("status", "collect")
     if has_llm and not is_video and not is_collect_or_status:
         if not has_local_taggers:
             llm_load_existing = ask_yes_no(
-                "Load existing .txt tags as context for LLM captioner?",
+                "Use existing .txt files as context for the LLM captioner?",
                 default=True,
             )
         else:
             llm_load_existing = ask_yes_no(
-                "Also load existing .txt tags as additional context for LLM captioner?",
+                "Also use existing .txt files as extra context for the LLM captioner?",
                 default=True,
             )
 
@@ -1461,7 +1409,7 @@ def run_tagging(input_dir: str, python: str, media_counts: dict):
     is_collect_or_status = (caption_provider == "xai-batch" and has_llm
                             and xai_batch_action in ("collect", "status"))
     if has_local_taggers and not is_collect_or_status:
-        batch_size = ask_input("Batch size for local taggers (or 'auto' for VRAM-based)", "auto")
+        batch_size = ask_input("Local tagger batch size (or 'auto' to detect from VRAM)", "auto")
         if batch_size.lower() == "auto":
             cmd_args = [
                 python, "-c",
@@ -1481,10 +1429,10 @@ def run_tagging(input_dir: str, python: str, media_counts: dict):
     llm_concurrency = "32"
     if has_llm and caption_provider == "openrouter":
         llm_model = ask_input(
-            "OpenRouter model ID",
+            "OpenRouter model ID for captioning",
             "x-ai/grok-4.1-fast",
         )
-        llm_concurrency = ask_input("API concurrency (parallel requests)", "32")
+        llm_concurrency = ask_input("Parallel API requests", "32")
 
     # Recursive
     recursive = ask_yes_no("Search subdirectories recursively?", default=True)
@@ -1518,7 +1466,10 @@ def run_tagging(input_dir: str, python: str, media_counts: dict):
 
     if has_llm:
         cmd.extend(["--grok_provider", caption_provider])
-        cmd.extend(["--prompt_profile", prompt_profile])
+        if needs_prompt_profile:
+            cmd.extend(["--prompt_profile", prompt_profile])
+            for key, value in sorted(prompt_vars.items()):
+                cmd.extend(["--prompt_var", f"{key}={value}"])
         if caption_provider == "openrouter":
             cmd.extend(["--grok_model", llm_model])
         if caption_provider == "xai-batch":
@@ -1526,7 +1477,10 @@ def run_tagging(input_dir: str, python: str, media_counts: dict):
                 taggers = "grok"
                 cmd = [python, TAGGER_SCRIPT, input_dir, "--taggers", taggers, "--batch_size", batch_size]
                 cmd.extend(["--grok_provider", caption_provider])
-                cmd.extend(["--prompt_profile", prompt_profile])
+                if needs_prompt_profile:
+                    cmd.extend(["--prompt_profile", prompt_profile])
+                    for key, value in sorted(prompt_vars.items()):
+                        cmd.extend(["--prompt_var", f"{key}={value}"])
                 if is_video:
                     cmd.append("--video")
                 if pro_mode:
@@ -1555,30 +1509,27 @@ def run_tagging(input_dir: str, python: str, media_counts: dict):
 
     cmd.extend(["--thresh", "0.30"])
 
-    # Summary
     llm_model_display = XAI_BATCH_DEFAULT_MODEL if caption_provider == "xai-batch" else llm_model
-    summary_rows = [
-        ("Input", input_dir),
-        ("Mode", f"{'video' if is_video else 'images'}{' (PRO)' if pro_mode else ''}"),
-        ("Taggers", taggers.replace("grok", "llm-caption")),
-    ]
-    if prepend_text:
-        summary_rows.append(("Trigger word", prepend_text))
-    if has_local_taggers:
-        summary_rows.append(("Batch size", batch_size))
-    if has_llm:
-        summary_rows.append(("Caption backend", caption_provider))
-        summary_rows.append(("Model", llm_model_display))
-        summary_rows.append(("Prompt profile", prompt_profile))
-        if caption_provider == "openrouter":
-            summary_rows.append(("Concurrency", llm_concurrency))
-        else:
-            summary_rows.append(("Batch action", xai_batch_action))
-            summary_rows.append(("State file", xai_batch_state_file))
-    summary_rows.extend([
-        ("Recursive", str(recursive)),
-        ("Force", str(force)),
-    ])
+    summary_rows = build_tagging_summary_rows(
+        input_dir=input_dir,
+        is_video=is_video,
+        pro_mode=pro_mode,
+        pipeline_label=taggers.replace("grok", "llm-caption"),
+        prepend_text=prepend_text,
+        has_local_taggers=has_local_taggers,
+        batch_size=batch_size,
+        has_llm=has_llm,
+        caption_provider=caption_provider,
+        llm_model_display=llm_model_display,
+        needs_prompt_profile=needs_prompt_profile,
+        prompt_profile=prompt_profile,
+        prompt_vars=prompt_vars,
+        llm_concurrency=llm_concurrency,
+        xai_batch_action=xai_batch_action,
+        xai_batch_state_file=xai_batch_state_file,
+        recursive=recursive,
+        force=force,
+    )
     print_summary_table("CONFIGURATION", summary_rows)
 
     if not ask_yes_no("Start processing?", default=True):
@@ -1826,7 +1777,7 @@ def run_tagging(input_dir: str, python: str, media_counts: dict):
         return False
 
     if proc.returncode == 0:
-        if xai_batch_action == "collect":
+        if caption_provider == "xai-batch" and xai_batch_action == "collect":
             print_success("COLLECT DONE! .txt files written next to your images.")
         else:
             print_success("DONE! Check your input directory for .txt files.")

@@ -167,7 +167,7 @@ def get_pil_interpolation(interpolation: Optional[str]) -> Optional[Image.Resamp
     if value in {"bicubic", "cubic"}:
         return Image.Resampling.BICUBIC
     if value == "area":
-        return Image.Resampling.HAMMING
+        return Image.Resampling.BOX
     if value == "box":
         return Image.Resampling.BOX
     return None

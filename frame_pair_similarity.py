@@ -114,7 +114,8 @@ def compute_clip_similarity(
     import open_clip  # lazy import — heavy dependency
 
     n = len(paths_a)
-    assert n == len(paths_b), "paths_a and paths_b must have the same length"
+    if n != len(paths_b):
+        raise ValueError("paths_a and paths_b must have the same length")
     dev = _resolve_device(device)
 
     logger.info("Loading CLIP model %s …", _CLIP_MODEL_NAME)
@@ -191,7 +192,8 @@ def compute_sscd_similarity(
     Pairs where either image cannot be loaded score ``0.0``.
     """
     n = len(paths_a)
-    assert n == len(paths_b), "paths_a and paths_b must have the same length"
+    if n != len(paths_b):
+        raise ValueError("paths_a and paths_b must have the same length")
     dev = _resolve_device(device)
 
     logger.info("Loading SSCD model from %s …", model_path)
@@ -265,7 +267,8 @@ def compute_ssim_similarity(
     from pytorch_msssim import ssim  # lazy import
 
     n = len(paths_a)
-    assert n == len(paths_b), "paths_a and paths_b must have the same length"
+    if n != len(paths_b):
+        raise ValueError("paths_a and paths_b must have the same length")
     dev = _resolve_device(device)
 
     # Build transform dynamically when a non-default resize is requested.
@@ -353,7 +356,8 @@ def compute_combined_similarity(
         Similarity percentages in ``[0, 100]`` (one per pair).
     """
     n = len(paths_a)
-    assert n == len(paths_b), "paths_a and paths_b must have the same length"
+    if n != len(paths_b):
+        raise ValueError("paths_a and paths_b must have the same length")
 
     w = dict(weights or _DEFAULT_WEIGHTS)
 

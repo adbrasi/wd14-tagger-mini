@@ -23,6 +23,13 @@ import requests
 from PIL import Image
 from tqdm import tqdm
 
+from xai_batch_state import (
+    hash_jsonable,
+    hydrate_prompt_settings_from_xai_state,
+    load_xai_state,
+    resolve_xai_state_file_from_train_dir,
+    save_xai_state,
+)
 # Allow opening very large images (resize will bring them down to 1024px anyway)
 Image.MAX_IMAGE_PIXELS = 500_000_000
 
@@ -894,6 +901,8 @@ XAI_BATCH_POST_WORKERS = 8
 
 PROMPTS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "prompts")
 GROK_TAG_CATEGORIES = {"character", "artist", "copyright"}
+PROMPT_VAR_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+PROMPT_VAR_RE = re.compile(r"\{([A-Za-z_][A-Za-z0-9_]*)\}")
 
 
 def load_prompt_file(path: str) -> str:
@@ -902,10 +911,72 @@ def load_prompt_file(path: str) -> str:
         return f.read().strip()
 
 
+def parse_prompt_vars(raw_items: Optional[List[str]]) -> Dict[str, str]:
+    """Parse repeated --prompt_var KEY=VALUE arguments into a mapping."""
+    values: Dict[str, str] = {}
+    for item in raw_items or []:
+        if "=" not in item:
+            raise ValueError(f"invalid --prompt_var '{item}' (expected KEY=VALUE)")
+
+        key, value = item.split("=", 1)
+        key = key.strip()
+        if not PROMPT_VAR_NAME_RE.fullmatch(key):
+            raise ValueError(
+                f"invalid prompt variable name '{key}' "
+                "(allowed: letters, numbers, underscore; cannot start with a number)"
+            )
+        values[key] = value.strip()
+    return values
+
+
+def get_prompt_vars(args) -> Dict[str, str]:
+    """Return parsed prompt vars with simple per-args caching."""
+    cached = getattr(args, "_prompt_vars_cache", None)
+    if cached is None:
+        cached = parse_prompt_vars(getattr(args, "prompt_var", None))
+        setattr(args, "_prompt_vars_cache", cached)
+    return dict(cached)
+
+
+def render_prompt_template(
+    template: str,
+    context: Dict[str, str],
+    *,
+    template_name: str,
+    allow_missing: Optional[set[str]] = None,
+) -> str:
+    """Replace {placeholders} using the provided context.
+
+    Only placeholders with identifier-like names are considered, so JSON examples
+    such as {"caption": "..."} remain untouched.
+    """
+    allow_missing = allow_missing or set()
+    missing: set[str] = set()
+
+    def repl(match: re.Match[str]) -> str:
+        key = match.group(1)
+        if key in context:
+            return str(context[key])
+        if key in allow_missing:
+            return match.group(0)
+        missing.add(key)
+        return match.group(0)
+
+    rendered = PROMPT_VAR_RE.sub(repl, template)
+    if missing:
+        missing_list = ", ".join(sorted(missing))
+        raise ValueError(f"missing prompt variables for {template_name}: {missing_list}")
+    return rendered
+
+
 def get_system_prompt(args) -> str:
     """Load system prompt from file or use CLI override."""
     if args.grok_system_prompt_file:
-        return load_prompt_file(args.grok_system_prompt_file)
+        return render_prompt_template(
+            load_prompt_file(args.grok_system_prompt_file),
+            get_prompt_vars(args),
+            template_name="system prompt override",
+        )
 
     mode_dir = "video" if getattr(args, "video", False) else "image"
     profile = getattr(args, "prompt_profile", None) or "default"
@@ -916,7 +987,11 @@ def get_system_prompt(args) -> str:
     ]
     for path in candidates:
         if os.path.exists(path):
-            return load_prompt_file(path)
+            return render_prompt_template(
+                load_prompt_file(path),
+                get_prompt_vars(args),
+                template_name=f"system prompt ({os.path.basename(os.path.dirname(path))})",
+            )
 
     return "You are an expert image captioner for AI training datasets."
 
@@ -924,7 +999,12 @@ def get_system_prompt(args) -> str:
 def get_user_prompt_template(args) -> str:
     """Load user prompt template from file or use CLI override."""
     if args.grok_prompt_file:
-        return load_prompt_file(args.grok_prompt_file)
+        return render_prompt_template(
+            load_prompt_file(args.grok_prompt_file),
+            get_prompt_vars(args),
+            template_name="user prompt override",
+            allow_missing={"tags"},
+        )
 
     mode_dir = "video" if getattr(args, "video", False) else "image"
     profile = getattr(args, "prompt_profile", None) or "default"
@@ -935,7 +1015,12 @@ def get_user_prompt_template(args) -> str:
     ]
     for path in candidates:
         if os.path.exists(path):
-            return load_prompt_file(path)
+            return render_prompt_template(
+                load_prompt_file(path),
+                get_prompt_vars(args),
+                template_name=f"user prompt ({os.path.basename(os.path.dirname(path))})",
+                allow_missing={"tags"},
+            )
 
     return "Analyze this image and the following tags:\n\n{tags}"
 
@@ -1179,7 +1264,11 @@ def _grok_single_task(
             except Exception as e:
                 logger.warning(f"Failed to load extra image {ep}: {e}")
 
-    user_prompt = user_prompt_template.replace("{tags}", tags_str)
+    user_prompt = render_prompt_template(
+        user_prompt_template,
+        {"tags": tags_str},
+        template_name=f"user prompt for {image_path}",
+    )
     raw = call_openrouter(api_key, model, system_prompt, user_prompt, image_data_uris)
 
     if not raw:
@@ -1260,28 +1349,7 @@ def _xai_request(
 def _resolve_xai_state_file(args) -> str:
     if args.xai_batch_state_file:
         return args.xai_batch_state_file
-    base_dir = os.path.abspath(args.train_data_dir)
-    parent_dir = os.path.dirname(base_dir)
-    dataset_name = os.path.basename(base_dir)
-    key = hashlib.md5(base_dir.encode("utf-8")).hexdigest()[:10]
-    return os.path.join(parent_dir, f".xai_batch_state_{dataset_name}_{key}.json")
-
-
-def _load_xai_state(path: str) -> Dict:
-    if not os.path.exists(path):
-        return {}
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except Exception as e:
-        logger.warning(f"could not read xai batch state from {path}: {e}")
-        return {}
-
-
-def _save_xai_state(path: str, state: Dict) -> None:
-    os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(state, f, ensure_ascii=False, indent=2)
+    return resolve_xai_state_file_from_train_dir(args.train_data_dir)
 
 
 def _xai_extract_content_text(content) -> str:
@@ -1462,24 +1530,58 @@ def run_grok_xai_batch(
 
     headers = _xai_headers(api_key)
     model = getattr(args, "xai_batch_model", None) or DEFAULT_XAI_BATCH_MODEL
-    system_prompt = get_system_prompt(args)
-    user_prompt_template = get_user_prompt_template(args)
-    tag_category_lookup = _load_grok_tag_category_lookup(args)
+    action = args.xai_batch_action
+    system_prompt = ""
+    user_prompt_template = ""
+    system_prompt_hash = ""
+    user_prompt_template_hash = ""
+    tag_category_lookup = _load_grok_tag_category_lookup(args) if action == "submit" else {}
     train_data_dir_abs = os.path.abspath(args.train_data_dir)
 
     state_file = _resolve_xai_state_file(args)
-    state = _load_xai_state(state_file)
+    state = load_xai_state(state_file, logger=logger)
+    hydrate_prompt_settings_from_xai_state(args, state)
+    prompt_profile = getattr(args, "prompt_profile", None) or "default"
+    prompt_vars = get_prompt_vars(args)
+    prompt_vars_hash = hash_jsonable(prompt_vars)
 
-    system_prompt_hash = hashlib.sha256(system_prompt.encode("utf-8")).hexdigest()
+    if action == "submit":
+        system_prompt = get_system_prompt(args)
+        user_prompt_template = get_user_prompt_template(args)
+        system_prompt_hash = hashlib.sha256(system_prompt.encode("utf-8")).hexdigest()
+        user_prompt_template_hash = hashlib.sha256(user_prompt_template.encode("utf-8")).hexdigest()
+    else:
+        try:
+            if (
+                getattr(args, "grok_system_prompt_file", None)
+                or getattr(args, "grok_prompt_file", None)
+                or getattr(args, "prompt_profile", None)
+                or prompt_vars
+            ):
+                system_prompt = get_system_prompt(args)
+                user_prompt_template = get_user_prompt_template(args)
+                system_prompt_hash = hashlib.sha256(system_prompt.encode("utf-8")).hexdigest()
+                user_prompt_template_hash = hashlib.sha256(user_prompt_template.encode("utf-8")).hexdigest()
+        except Exception as e:
+            logger.info(
+                "Skipping prompt consistency checks for xai batch %s because prompt context "
+                "was not provided or could not be rendered: %s",
+                action,
+                e,
+            )
 
     if not state:
         state = {
-            "version": 1,
+            "version": 2,
             "provider": "xai-batch",
             "batch_id": None,
             "batch_name": None,
             "model": model,
+            "prompt_profile": prompt_profile,
             "system_prompt_sha256": system_prompt_hash,
+            "user_prompt_template_sha256": user_prompt_template_hash,
+            "prompt_vars": prompt_vars,
+            "prompt_vars_sha256": prompt_vars_hash,
             "state_file": state_file,
             "request_map": {},
             "created_at": time.time(),
@@ -1488,19 +1590,53 @@ def run_grok_xai_batch(
     # Batch API docs do not require x-grok-conv-id; keep headers minimal for compatibility.
     headers = _xai_headers(api_key)
 
-    # Warn if the system prompt changed since the batch was created (would bust cache)
+    # Warn if the system prompt changed since this batch was created.
     saved_hash = state.get("system_prompt_sha256")
-    if saved_hash and saved_hash != system_prompt_hash:
+    if saved_hash and system_prompt_hash and saved_hash != system_prompt_hash:
         logger.warning(
             "System prompt has changed since this batch was created! "
             "Cache hits will be lost. saved_sha256=%s current_sha256=%s",
             saved_hash[:12],
             system_prompt_hash[:12],
         )
-    elif not saved_hash:
+    elif not saved_hash and system_prompt_hash:
         state["system_prompt_sha256"] = system_prompt_hash
 
-    action = args.xai_batch_action
+    saved_user_hash = state.get("user_prompt_template_sha256")
+    if saved_user_hash and user_prompt_template_hash and saved_user_hash != user_prompt_template_hash:
+        logger.warning(
+            "User prompt template has changed since this batch was created. "
+            "saved_sha256=%s current_sha256=%s",
+            saved_user_hash[:12],
+            user_prompt_template_hash[:12],
+        )
+    elif not saved_user_hash and user_prompt_template_hash:
+        state["user_prompt_template_sha256"] = user_prompt_template_hash
+
+    saved_prompt_vars_hash = state.get("prompt_vars_sha256")
+    if saved_prompt_vars_hash and prompt_vars and saved_prompt_vars_hash != prompt_vars_hash:
+        logger.warning(
+            "Prompt preset variables have changed since this batch was created. "
+            "saved_sha256=%s current_sha256=%s saved_vars=%s current_vars=%s",
+            saved_prompt_vars_hash[:12],
+            prompt_vars_hash[:12],
+            state.get("prompt_vars", {}),
+            prompt_vars,
+        )
+    elif not saved_prompt_vars_hash:
+        state["prompt_vars"] = prompt_vars
+        state["prompt_vars_sha256"] = prompt_vars_hash
+
+    saved_prompt_profile = state.get("prompt_profile")
+    if saved_prompt_profile and saved_prompt_profile != prompt_profile:
+        logger.warning(
+            "Prompt profile differs from the one saved in this batch state. "
+            "saved_profile=%s current_profile=%s",
+            saved_prompt_profile,
+            prompt_profile,
+        )
+    elif not saved_prompt_profile:
+        state["prompt_profile"] = prompt_profile
 
     def _create_xai_batch(reason: Optional[str] = None) -> str:
         batch_name = args.xai_batch_name or f"tagger_{int(time.time())}"
@@ -1519,7 +1655,7 @@ def run_grok_xai_batch(
         if reason:
             state["batch_reset_reason"] = reason
             state["batch_reset_at"] = time.time()
-        _save_xai_state(state_file, state)
+        save_xai_state(state_file, state)
         logger.info(f"created xai batch: {new_batch_id}")
         return new_batch_id
 
@@ -1534,7 +1670,7 @@ def run_grok_xai_batch(
         try:
             batch_meta = _xai_request("GET", f"{args.xai_api_base_url}/v1/batches/{batch_id}", headers)
             state["last_status"] = batch_meta
-            _save_xai_state(state_file, state)
+            save_xai_state(state_file, state)
         except requests.exceptions.HTTPError as e:
             status = e.response.status_code if e.response is not None else None
             if status in (403, 404):
@@ -1552,7 +1688,7 @@ def run_grok_xai_batch(
     if action == "status":
         batch_meta = _xai_request("GET", f"{args.xai_api_base_url}/v1/batches/{batch_id}", headers)
         state["last_status"] = batch_meta
-        _save_xai_state(state_file, state)
+        save_xai_state(state_file, state)
         counters = batch_meta.get("state", {})
         logger.info(
             f"xai batch {batch_id} status: "
@@ -1570,7 +1706,7 @@ def run_grok_xai_batch(
             logger.info("force mode enabled: clearing prior xai request_map states before submit.")
             request_map.clear()
             state["request_map_force_reset_at"] = time.time()
-            _save_xai_state(state_file, state)
+            save_xai_state(state_file, state)
         rotated_batch_after_forbidden = False
         chunk_size = args.xai_batch_submit_chunk
         if chunk_size <= 0:
@@ -1645,7 +1781,11 @@ def run_grok_xai_batch(
 
         def _encode_item(item: Tuple) -> Tuple[str, str, Optional[str], Any]:
             img_path, img_abs, rel_p, req_id, tags_str, extras = item
-            user_prompt = user_prompt_template.replace("{tags}", tags_str)
+            user_prompt = render_prompt_template(
+                user_prompt_template,
+                {"tags": tags_str},
+                template_name=f"xai batch user prompt for {img_path}",
+            )
             content = _xai_build_user_content(
                 user_prompt=user_prompt,
                 image_path=img_path,
@@ -1665,7 +1805,7 @@ def run_grok_xai_batch(
                         req_state["image_payload"] = "stripped_due_to_413"
                 submitted_now += len(sub_batch)
                 state["submitted_at"] = time.time()
-                _save_xai_state(state_file, state)
+                save_xai_state(state_file, state)
             if submit_pbar is not None:
                 submit_pbar.update(len(sub_batch))
                 submit_pbar.set_postfix(
@@ -1683,7 +1823,7 @@ def run_grok_xai_batch(
                 req_state["error"] = "xai_413_payload_too_large"
                 req_state["updated_at"] = time.time()
                 skipped_payload_too_large += 1
-                _save_xai_state(state_file, state)
+                save_xai_state(state_file, state)
             if submit_pbar is not None:
                 submit_pbar.update(1)
                 submit_pbar.set_postfix(
@@ -1702,7 +1842,7 @@ def run_grok_xai_batch(
                 req_state["error_message"] = message[:1000]
                 req_state["updated_at"] = time.time()
                 failed_submit_requests += 1
-                _save_xai_state(state_file, state)
+                save_xai_state(state_file, state)
             if submit_pbar is not None:
                 submit_pbar.update(1)
                 submit_pbar.set_postfix(
@@ -1745,21 +1885,25 @@ def run_grok_xai_batch(
 
         def _post_sub_batch(sub_batch: List[Dict]) -> None:
             """POST a sub-batch with thread-safe rate limiting."""
+            wait = 0
             with rate_lock:
                 now = time.monotonic()
                 while add_call_timestamps and now - add_call_timestamps[0] >= rate_limit_window:
                     add_call_timestamps.popleft()
                 if len(add_call_timestamps) >= max_add_calls_per_window:
                     wait = rate_limit_window - (now - add_call_timestamps[0]) + 0.05
-                    if wait > 0:
-                        logger.info(
-                            "throttling xAI add-requests calls to respect rolling limit: sleeping %.2fs",
-                            wait,
-                        )
-                        time.sleep(wait)
-                        now = time.monotonic()
-                        while add_call_timestamps and now - add_call_timestamps[0] >= rate_limit_window:
-                            add_call_timestamps.popleft()
+
+            if wait > 0:
+                logger.info(
+                    "throttling xAI add-requests calls to respect rolling limit: sleeping %.2fs",
+                    wait,
+                )
+                time.sleep(wait)
+
+            with rate_lock:
+                now = time.monotonic()
+                while add_call_timestamps and now - add_call_timestamps[0] >= rate_limit_window:
+                    add_call_timestamps.popleft()
                 # Reserve the slot before releasing the lock
                 add_call_timestamps.append(now)
 
@@ -1801,9 +1945,11 @@ def run_grok_xai_batch(
                 err_text = ((e.response.text or "") if e.response is not None else str(e)).strip()
 
             # If this state file points to an inaccessible batch from another key/team, rotate once.
-            if status in (403, 404) and submitted_now == 0 and not rotated_batch_after_forbidden:
+            if status in (403, 404) and not rotated_batch_after_forbidden:
                 with state_lock:
-                    if not rotated_batch_after_forbidden:
+                    if submitted_now > 0:
+                        pass  # already submitted successfully, skip rotation
+                    elif not rotated_batch_after_forbidden:
                         logger.warning(
                             "received HTTP %s while adding to batch_id=%s before any successful submit. "
                             "creating a fresh batch and retrying current sub-batch once.",
@@ -1871,7 +2017,10 @@ def run_grok_xai_batch(
                     )
                 return
 
-            if status in (403, 404) and submitted_now == 0:
+            _submitted_safe = 0
+            with state_lock:
+                _submitted_safe = submitted_now
+            if status in (403, 404) and _submitted_safe == 0:
                 body_preview = err_text[:600] if err_text else "<empty body>"
                 with fatal_lock:
                     fatal_error = RuntimeError(
@@ -1995,7 +2144,7 @@ def run_grok_xai_batch(
                 raise fatal_error
 
         except KeyboardInterrupt:
-            _save_xai_state(state_file, state)
+            save_xai_state(state_file, state)
             logger.warning(
                 "xai batch submit interrupted by user (Ctrl+C). "
                 f"state saved to {state_file}; you can resume with submit/status/collect."
@@ -2108,7 +2257,7 @@ def run_grok_xai_batch(
             pagination_token = page.get("pagination_token")
             state["last_collect_at"] = time.time()
             state["usage_totals_from_collected_results"] = usage_totals
-            _save_xai_state(state_file, state)
+            save_xai_state(state_file, state)
 
             if not pagination_token:
                 break
@@ -2930,6 +3079,13 @@ def setup_parser() -> argparse.ArgumentParser:
     parser.add_argument("--grok_system_prompt_file", type=str, default=None, help="path to system prompt .md file")
     parser.add_argument("--grok_prompt_file", type=str, default=None, help="path to user prompt template .md file")
     parser.add_argument("--prompt_profile", type=str, default="default", help="prompt profile name (subdirectory under prompts/<mode>/)")
+    parser.add_argument(
+        "--prompt_var",
+        action="append",
+        default=[],
+        metavar="KEY=VALUE",
+        help="inject additional variables into prompt templates (repeatable)",
+    )
     parser.add_argument(
         "--grok_tag_category_metadata_file",
         type=str,

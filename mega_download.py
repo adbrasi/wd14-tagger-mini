@@ -116,6 +116,10 @@ def flatten_directory(source_dir: str, target_dir: str) -> dict:
     os.makedirs(target_dir, exist_ok=True)
     stats = {"moved": 0, "conflicts": 0, "pairs": 0, "failed": 0}
 
+    if os.path.abspath(source_dir) == os.path.abspath(target_dir):
+        print_warning("source_dir and target_dir are the same; nothing to flatten")
+        return stats
+
     # Collect all media files first
     media_files = []
     for root, _, files in os.walk(source_dir):
