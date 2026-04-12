@@ -2067,7 +2067,7 @@ def main():
             return
         # After tagging, offer upload if not already in full pipeline
         if workflow == 2 and tag_ok:
-            if ask_yes_no("Upload dataset to HuggingFace?", default=False):
+            if ask_yes_no("Upload dataset to HuggingFace?", default=True):
                 run_hf_upload(input_dir, python, project_name)
 
     if workflow in (3, 4):
