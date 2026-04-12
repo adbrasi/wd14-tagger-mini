@@ -1,0 +1,11 @@
+{
+  "display_name": "anima-style",
+  "description": "Preset generico para datasets do Anima: pergunta o trigger/estilo e gera prompt hibrido booru + linguagem natural.",
+  "variables": [
+    {
+      "name": "style_name",
+      "prompt": "Nome/trigger do estilo para o dataset Anima",
+      "required": true
+    }
+  ]
+}

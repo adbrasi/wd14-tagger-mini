@@ -290,7 +290,7 @@ def _run_grok_batch_subprocess(
     if system_prompt_file:
         cmd.extend(["--grok_system_prompt_file", system_prompt_file])
     if user_prompt_file:
-        cmd.extend(["--grok_user_prompt_file", user_prompt_file])
+        cmd.extend(["--grok_prompt_file", user_prompt_file])
     if prompt_profile:
         cmd.extend(["--prompt_profile", prompt_profile])
     if batch_state_file:

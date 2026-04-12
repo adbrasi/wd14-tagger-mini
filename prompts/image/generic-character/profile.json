@@ -1,0 +1,11 @@
+{
+  "display_name": "generic-character",
+  "description": "Preset generico de personagem; pergunta o nome/trigger do personagem.",
+  "variables": [
+    {
+      "name": "character_name",
+      "prompt": "Nome/trigger do personagem",
+      "required": true
+    }
+  ]
+}

@@ -1,0 +1,11 @@
+{
+  "display_name": "generic-style",
+  "description": "Preset generico de estilo; pergunta o nome/trigger do estilo.",
+  "variables": [
+    {
+      "name": "style_name",
+      "prompt": "Nome/trigger do estilo",
+      "required": true
+    }
+  ]
+}

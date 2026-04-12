@@ -3,6 +3,7 @@
 Centralizes all user interaction: prompts, progress bars, panels, tables.
 All other modules import from here instead of using print() directly.
 """
+import sys
 from typing import List, Optional
 
 from rich.console import Console
@@ -16,7 +17,6 @@ from rich.progress import (
     TimeElapsedColumn,
     TimeRemainingColumn,
 )
-from rich.prompt import Confirm, IntPrompt, Prompt
 from rich.table import Table
 from rich.text import Text
 
@@ -56,6 +56,9 @@ def _fix_terminal():
     """Fix backspace (^?) on broken terminals like RunPod/VastAI."""
     import os as _os
     if not getattr(_fix_terminal, "_done", False):
+        if not sys.stdin.isatty() or not sys.stdout.isatty():
+            _fix_terminal._done = True
+            return
         try:
             _os.system("stty erase ^? 2>/dev/null")
         except Exception:
@@ -132,7 +135,7 @@ def ask_yes_no(prompt: str, default: bool = True) -> bool:
             return True
         if raw in ("n", "no", "nao", "não"):
             return False
-        console.print("  [red]Enter y or n[/]")
+        console.print("  [red]Enter y/yes/sim or n/no[/]")
 
 
 def ask_int(prompt: str, default: int = 1, minimum: int = 1) -> int:
@@ -155,6 +158,7 @@ def ask_int(prompt: str, default: int = 1, minimum: int = 1) -> int:
 
 def make_progress(**kwargs) -> Progress:
     """General-purpose progress bar."""
+    disable = kwargs.pop("disable", not console.is_terminal)
     return Progress(
         SpinnerColumn(),
         TextColumn("[progress.description]{task.description}"),
@@ -163,6 +167,7 @@ def make_progress(**kwargs) -> Progress:
         TimeElapsedColumn(),
         TimeRemainingColumn(),
         console=console,
+        disable=disable,
         **kwargs,
     )
 

@@ -135,10 +135,19 @@ Before processing, the CLI validates media/txt pairs:
 ### Prompt files
 
 Prompts are loaded from `prompts/` directory:
-- `prompts/video/system_prompt.md` — Video-specific system instructions
-- `prompts/video/user_prompt.md` — Video user prompt template
-- `prompts/image/system_prompt.md` — Image-specific system instructions
-- `prompts/image/user_prompt.md` — Image user prompt template
+- `prompts/<mode>/<profile>/system_prompt.md`
+- `prompts/<mode>/<profile>/user_prompt.md`
+
+The interactive CLI discovers profiles automatically. Optional `profile.json` files can declare variables that the CLI will ask for, then inject via `--prompt_var KEY=VALUE`.
+
+Examples:
+- `prompts/image/generic-style/` asks for a style trigger like `anime screencap style`
+- `prompts/image/generic-character/` asks for a character trigger like `my_character`
+
+Implementation helpers:
+- `prompt_profiles.py` handles preset discovery and variable prompts
+- `xai_batch_state.py` centralizes xAI batch state naming/persistence
+- `wizard_steps.py` contains reusable interactive wizard steps
 
 Override with: `--grok_system_prompt_file` and `--grok_prompt_file`
 

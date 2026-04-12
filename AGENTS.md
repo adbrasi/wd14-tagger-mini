@@ -4,12 +4,15 @@
 - Core scripts live at the repository root:
   - `tag_images_by_wd14_tagger.py`: main image/video tagging and caption pipeline.
   - `cli.py`: interactive launcher for preprocessing and tagging workflows.
-  - `xai_batch_manager.py`: lightweight xAI batch status/snapshot utility.
+  - `frame_pair_pipeline.py`: frame-pair dataset organization + caption pipeline.
+  - `prompt_profiles.py`: prompt preset discovery and variable collection helpers.
+  - `wizard_steps.py`: reusable interactive tagging-wizard steps.
+  - `xai_batch_state.py`: shared xAI batch state naming/persistence helpers.
   - `wd14_utils.py`: shared helpers (logging, file discovery, frame extraction, video preprocessing, resizing).
   - `run_tagger.sh`: shell wrapper for common modes.
 - Prompt templates are separated by modality:
-  - `prompts/image/{system_prompt.md,user_prompt.md}`
-  - `prompts/video/{system_prompt.md,user_prompt.md}`
+  - `prompts/image/<profile>/{system_prompt.md,user_prompt.md}`
+  - `prompts/video/<profile>/{system_prompt.md,user_prompt.md}`
 - `camie-tagger-v2-metadata.json` is a large model metadata asset; only update it when syncing model data.
 
 ## Build, Test, and Development Commands
@@ -35,8 +38,7 @@ There is no separate build step; scripts are executed directly.
 - No formal test suite is currently configured; add focused tests under `tests/` for new logic.
 - Minimum pre-PR validation:
 ```bash
-python -m py_compile cli.py tag_images_by_wd14_tagger.py wd14_utils.py xai_batch_manager.py
-python xai_batch_manager.py --help
+python -m py_compile cli.py tag_images_by_wd14_tagger.py wd14_utils.py frame_pair_pipeline.py ui.py constants.py
 python tag_images_by_wd14_tagger.py --help
 ```
 - For behavior changes, run a smoke test on a small sample folder and verify generated `.txt` captions.
