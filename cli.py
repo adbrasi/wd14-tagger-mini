@@ -2005,6 +2005,7 @@ def main():
             d for d in os.listdir(datasets_root)
             if os.path.isdir(os.path.join(datasets_root, d))
             and not d.startswith(".")
+            and not d.endswith("_zips")
         )
 
     if existing_projects:
