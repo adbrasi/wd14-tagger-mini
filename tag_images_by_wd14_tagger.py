@@ -1214,9 +1214,18 @@ def call_openrouter(
             if "choices" not in data or not data["choices"]:
                 logger.error(f"OpenRouter response missing 'choices': {json.dumps(data)[:500]}")
                 return None
-            content = data["choices"][0].get("message", {}).get("content")
-            if not content:
-                logger.error(f"OpenRouter response has empty content: {json.dumps(data)[:500]}")
+            choice = data["choices"][0]
+            content = choice.get("message", {}).get("content")
+            # Detect provider errors embedded in a 200 response (e.g. 502 upstream)
+            choice_error = choice.get("error")
+            if choice_error or not content:
+                if attempt < max_retries:
+                    reason = choice_error.get("message", "empty content") if choice_error else "empty content"
+                    wait = min(2 ** attempt * 2, 30)
+                    logger.warning(f"OpenRouter returned no content ({reason}), retrying in {wait}s (attempt {attempt + 1})...")
+                    time.sleep(wait)
+                    continue
+                logger.error(f"OpenRouter response has empty content after {max_retries + 1} attempts: {json.dumps(data)[:500]}")
                 return None
             return content.strip()
         except requests.exceptions.RequestException as e:
