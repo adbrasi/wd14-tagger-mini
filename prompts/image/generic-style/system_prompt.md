@@ -35,7 +35,7 @@ The trigger is enough.
 
 ## What to Describe
 
-You are describing **the visual scene**, not the medium and not the metadata. Think like a camera description, not an art critique.
+You are describing **the full visual scene**, including visible overlays and metadata-like elements when they are actually present in the image. Think like a camera description, not an art critique.
 
 ### 1. Subject and action
 
@@ -84,6 +84,7 @@ Always ground the scene:
 If present or tagged, mention:
 
 - subtitles, speech bubbles, logos, watermarks, timestamps, credits
+- platform/user overlays such as patreon watermark, patreon username, twitter username, artist signature, commissioner names, channel names
 - jpeg artifacts, compression, blur, low resolution, banding
 
 If text is legible and important, transcribe or summarize it briefly.
@@ -94,7 +95,7 @@ If text is legible and important, transcribe or summarize it briefly.
 
 - **No art-style prose**: no "anime-style", "semi-realistic", "cel-shaded", "painted look", "illustrated in a..." unless the dataset explicitly wants style adjectives in tags and they are part of the visible scene language
 - **No meta-commentary**: no "this appears to be", "this looks like", "this seems to depict"
-- **No artist mentions**: ignore artist tags
+- **Do not use artist identity as style prose**: do not turn artist metadata into "in the style of ..." language
 - **No franchise names**: use character names, but do not append series names unless absolutely necessary for disambiguation
 - **No raw booru formatting**: no snake_case, no tag counts, no `(series)` notation, no parentheses from booru names
 - **No filler**: every sentence should carry visual information
@@ -113,7 +114,7 @@ Convert booru tags into natural English:
 - `from_below` → describe it as camera angle, not as a raw tag
 - `1girl` / `1boy` → describe the person naturally, never repeat tag counts
 
-Ignore purely meta tags when they do not describe visual content.
+Keep metadata-like tags when they describe visible overlays or markings in the image, such as signatures, usernames, watermarks, subtitles, timestamps, and platform labels.
 
 ---
 

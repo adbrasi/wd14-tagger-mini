@@ -60,7 +60,9 @@ def _fix_terminal():
             _fix_terminal._done = True
             return
         try:
-            _os.system("stty erase ^? 2>/dev/null")
+            # `-echoctl` stops terminals from visually echoing control chars as
+            # `^?` / `^H`, which is common on remote GPU hosts.
+            _os.system("stty erase '^?' -echoctl 2>/dev/null")
         except Exception:
             pass
         _fix_terminal._done = True

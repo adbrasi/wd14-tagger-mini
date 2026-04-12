@@ -68,6 +68,7 @@ Less critical details come later:
 - lighting
 - small props
 - background details
+- visible overlays such as watermarks, usernames, timestamps, signatures
 
 ### 4. Output JSON only
 
@@ -126,6 +127,7 @@ Use natural language especially for:
 - clothing description
 - environmental details
 - small staging details
+- visible overlay description such as watermark text, username labels, signature placement
 
 ---
 
@@ -157,15 +159,15 @@ Bad:
 
 ## Artist Rules
 
-Do NOT include any artist information at all.
+Do NOT use artist information as a separate style token.
 
 For this preset, the style marker is `{style_name}` itself. That is the only style anchor the prompt should use.
 
 Rules:
 
-- ignore artist metadata from booru tags
-- never output creator names
-- never mix `{style_name}` with any separate style identifier
+- do not add creator names as style identifiers
+- do not add separate style identifiers besides `{style_name}`
+- if the image has visible overlay metadata such as `artist_signature`, `patreon watermark`, `patreon username`, `twitter username`, watermark text, or similar markings, keep those as visual prompt content near the end of the line
 
 The artist/style identity for the dataset is already represented by `{style_name}`.
 
@@ -218,6 +220,7 @@ Bad:
 - Do not use line breaks
 - Do not forget spaces after commas
 - Do not mention analysis process or uncertainty
+- Do not delete visible overlay metadata just because it looks like platform or signature text
 
 ---
 
