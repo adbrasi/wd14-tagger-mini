@@ -1025,6 +1025,38 @@ def get_user_prompt_template(args) -> str:
     return "Analyze this image and the following tags:\n\n{tags}"
 
 
+def build_grok_user_prompt(
+    user_prompt_template: str,
+    tags_str: str,
+    existing_context_text: Optional[str],
+    *,
+    template_name: str,
+) -> str:
+    """Render the user prompt, placing existing .txt context below the tags block."""
+    extra_context_block = ""
+    if existing_context_text:
+        extra_context_block = (
+            "\n\nExisting .txt context (use as secondary context, below the booru tags):\n"
+            f"{existing_context_text.strip()}"
+        )
+
+    if "{existing_context}" in user_prompt_template:
+        return render_prompt_template(
+            user_prompt_template,
+            {
+                "tags": tags_str,
+                "existing_context": existing_context_text or "(none)",
+            },
+            template_name=template_name,
+        )
+
+    return render_prompt_template(
+        user_prompt_template,
+        {"tags": tags_str + extra_context_block},
+        template_name=template_name,
+    )
+
+
 def _normalize_tag_key(tag: str) -> str:
     return tag.strip().lower()
 
@@ -1239,6 +1271,7 @@ def _grok_single_task(
     user_prompt_template: str,
     image_path: str,
     tags_str: str,
+    existing_context_text: Optional[str] = None,
     extra_image_paths: Optional[List[str]] = None,
 ) -> Tuple[str, Optional[str]]:
     """Process a single image through grok. Returns (image_path, caption_or_none).
@@ -1264,9 +1297,10 @@ def _grok_single_task(
             except Exception as e:
                 logger.warning(f"Failed to load extra image {ep}: {e}")
 
-    user_prompt = render_prompt_template(
+    user_prompt = build_grok_user_prompt(
         user_prompt_template,
-        {"tags": tags_str},
+        tags_str,
+        existing_context_text,
         template_name=f"user prompt for {image_path}",
     )
     raw = call_openrouter(api_key, model, system_prompt, user_prompt, image_data_uris)
@@ -1517,6 +1551,7 @@ def run_grok_xai_batch(
     dedupe: bool,
     result_map: Dict[str, List[str]],
     existing_tags: Dict[str, List[str]],
+    existing_context_map: Optional[Dict[str, str]],
     extra_frames: Dict[str, List[str]],
     frame_to_video: Optional[Dict[str, str]] = None,
 ) -> Dict:
@@ -1720,7 +1755,7 @@ def run_grok_xai_batch(
 
         # Pass 1: scan all paths, filter already-submitted ones (no I/O)
         scan_pbar = tqdm(total=len(paths), desc="xai-batch scan", smoothing=0.0, unit="img") if use_pbar else None
-        to_process: List[Tuple[str, str, Optional[str], str, str, Optional[List[str]]]] = []
+        to_process: List[Tuple[str, str, Optional[str], str, str, Optional[str], Optional[List[str]]]] = []
         for image_path in paths:
             # In video mode, resolve to original video path for state persistence
             # (frame temp paths won't exist when collect runs later)
@@ -1740,8 +1775,9 @@ def run_grok_xai_batch(
             tags_list = existing_tags.get(image_path, [])
             prompt_tags = _format_grok_tags_with_categories(tags_list, tag_category_lookup)
             tags_str = args.caption_separator.join(prompt_tags) if prompt_tags else "(no prior tags)"
+            existing_context_text = (existing_context_map or {}).get(image_path)
             extras = extra_frames.get(image_path)
-            to_process.append((image_path, original_abs, rel_path, req_id, tags_str, extras))
+            to_process.append((image_path, original_abs, rel_path, req_id, tags_str, existing_context_text, extras))
         if scan_pbar is not None:
             scan_pbar.close()
 
@@ -1780,10 +1816,11 @@ def run_grok_xai_batch(
         fatal_lock = threading.Lock()
 
         def _encode_item(item: Tuple) -> Tuple[str, str, Optional[str], Any]:
-            img_path, img_abs, rel_p, req_id, tags_str, extras = item
-            user_prompt = render_prompt_template(
+            img_path, img_abs, rel_p, req_id, tags_str, existing_context_text, extras = item
+            user_prompt = build_grok_user_prompt(
                 user_prompt_template,
-                {"tags": tags_str},
+                tags_str,
+                existing_context_text,
                 template_name=f"xai batch user prompt for {img_path}",
             )
             content = _xai_build_user_content(
@@ -2292,6 +2329,7 @@ def run_grok(
     dedupe: bool,
     result_map: Dict[str, List[str]],
     existing_tags: Optional[Dict[str, List[str]]] = None,
+    existing_context_map: Optional[Dict[str, str]] = None,
     extra_frames: Optional[Dict[str, List[str]]] = None,
     progress=None,
     frame_to_video: Optional[Dict[str, str]] = None,
@@ -2315,6 +2353,7 @@ def run_grok(
             dedupe=dedupe,
             result_map=result_map,
             existing_tags=existing_tags or {},
+            existing_context_map=existing_context_map or {},
             extra_frames=extra_frames or {},
             frame_to_video=frame_to_video or {},
         )
@@ -2333,6 +2372,7 @@ def run_grok(
     tag_category_lookup = _load_grok_tag_category_lookup(args)
 
     existing_tags = existing_tags or {}
+    existing_context_map = existing_context_map or {}
     extra_frames = extra_frames or {}
 
     pbar = None
@@ -2356,6 +2396,7 @@ def run_grok(
                 user_prompt_template,
                 image_path,
                 tags_str,
+                existing_context_map.get(image_path),
                 extras,
             )
             futures[future] = image_path
@@ -2815,7 +2856,8 @@ def main(args):
         if suggestion is not None:
             logger.info(f"Suggested batch_size based on free VRAM: {suggestion}")
 
-    # Load existing .txt files and merge with new tags
+    # Load existing .txt files
+    existing_context_map: Dict[str, str] = {}
     if video_mode:
         # In video mode: check for existing .txt next to the video files
         existing_count = 0
@@ -2841,16 +2883,26 @@ def main(args):
             if not os.path.exists(caption_file):
                 continue
             with open(caption_file, "rt", encoding="utf-8") as f:
+                existing_text = f.read().strip()
+            if not existing_text:
+                continue
+            if args.append_tags:
                 existing = [
                     t.strip()
-                    for t in f.read().strip("\n").split(args.caption_separator.strip())
+                    for t in existing_text.strip("\n").split(args.caption_separator.strip())
                     if t.strip()
                 ]
-            if existing:
-                add_tags_to_map(combined, image_path, existing, not args.no_dedupe)
+                if existing:
+                    add_tags_to_map(combined, image_path, existing, not args.no_dedupe)
+                    existing_count += 1
+            elif args.grok_context_from_existing:
+                existing_context_map[image_path] = existing_text
                 existing_count += 1
         if existing_count:
-            logger.info(f"loaded existing tags from {existing_count} .txt files as grok context")
+            if args.grok_context_from_existing and not args.append_tags:
+                logger.info(f"loaded existing .txt context from {existing_count} files for grok")
+            else:
+                logger.info(f"loaded existing tags from {existing_count} .txt files")
 
     # Separate taggers: booru taggers run first, grok runs last (needs booru output)
     booru_taggers = [t for t in taggers if t != "grok"]
@@ -2951,6 +3003,7 @@ def main(args):
             not args.no_dedupe,
             grok_combined,
             existing_tags=existing_tags_for_grok,
+            existing_context_map=existing_context_map,
             extra_frames=extra_frames_map if pro_mode else None,
             frame_to_video=frame_to_video if video_mode else None,
         )

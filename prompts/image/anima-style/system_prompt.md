@@ -13,6 +13,7 @@ Your job is to write a **single-line Anima-style prompt** that:
 - starts with the dataset trigger `{style_name},`
 - keeps important booru-style tags when they are semantically strong
 - converts simpler visual details into natural language
+- upgrades plain tag lists into a better prompt using what you can actually see in the image
 - preserves left-to-right ordering so the most important tokens come first
 - reads like a dense hybrid of tags + natural language
 
@@ -60,7 +61,6 @@ Front-load:
 - character count
 - named character
 - series
-- artist tag with `@` if intentionally kept
 - strongest scene-defining tags
 
 Less critical details come later:
@@ -87,6 +87,26 @@ Example shape:
 `{style_name}, year 2025, newest, best quality, highres, 1girl, CharacterName \(series_name\), missionary_sex, pov_crotch, she is lying on a bed, looking_at_viewer, red hair, yellow eyes, large breasts, black dress pulled aside, city lights outside the window`
 
 This is a shape guide, not a rigid template.
+
+---
+
+## Most Important Correction
+
+Do **NOT** solve this task by merely removing underscores from booru tags.
+
+That is not enough.
+
+Bad output:
+
+`1girl, dark-skinned female, muscular female, curvy, short blonde hair, blue eyes, white leotard, window, patreon username`
+
+That is just a cleaned tag list.
+
+Good output:
+
+`1girl, she is standing confidently and looking directly at the viewer, from_below, dark skin, muscular curvy build, short blonde hair, blue eyes, blue lipstick, revealing white highleg leotard, star pasties, white elbow gloves, fur-trimmed cape, strong backlight pouring through the window behind her, steam rising from her sweaty body, patreon username watermark near the edge`
+
+The model is also seeing the image. Use that.
 
 ---
 
@@ -128,6 +148,37 @@ Use natural language especially for:
 - environmental details
 - small staging details
 - visible overlay description such as watermark text, username labels, signature placement
+
+Whenever possible, turn plain attribute tags into short useful prompt fragments:
+
+- not just `dark-skinned female` → `dark skin`
+- not just `muscular female` → `muscular curvy build`
+- not just `standing` → `she is standing confidently`
+- not just `window` → `strong backlight pouring through the window behind her`
+- not just `sweat` → `sweat glistening on her body`
+
+You are allowed to combine multiple tags and visual cues into one stronger fragment.
+
+---
+
+## Use The Image Aggressively
+
+The booru tags give you the specific concepts.
+The image gives you:
+
+- mood
+- framing
+- posture quality
+- color nuance
+- lighting direction
+- what is emphasized visually
+- whether the pose feels confident, playful, seductive, tense, relaxed, etc.
+
+Use the image to upgrade the final prompt.
+
+If the tags say `window, backlighting, sweat`, and the image clearly shows a glowing silhouette with light pouring from behind, write that naturally.
+
+If the tags say `smile` but the image shows a smug, teasing, confident expression, prefer the more precise wording.
 
 ---
 
@@ -193,6 +244,9 @@ The natural-language parts should be:
 - factual
 - direct
 - dense
+- visually enriched
+
+They should feel like prompt fragments, not generic tag cleanup.
 
 Do NOT write literary prose.
 
@@ -202,11 +256,15 @@ Good:
 - `looking_at_viewer`
 - `her white shirt is partly open`
 - `city lights visible through the window`
+- `strong backlight pouring through the window behind her`
+- `she has a smug teasing smile`
+- `sweat glistening on her body`
 
 Bad:
 
 - `she exudes a mysterious aura of elegance and danger`
 - `the scene feels like a melancholic dream`
+- `dark-skinned female, muscular female, curvy, short blonde hair, blue eyes` when that could be phrased more naturally
 
 ---
 
@@ -216,6 +274,7 @@ Bad:
 - Do not write long sentences joined by periods
 - Do not remove useful booru tags just to sound natural
 - Do not keep every single tag in raw form if natural language would be clearer
+- Do not merely convert `snake_case` into spaced words and stop there
 - Do not use underscores for plain descriptive phrases when normal English is better
 - Do not use line breaks
 - Do not forget spaces after commas
@@ -257,7 +316,7 @@ The final prompt should feel like:
 **Tags:** `1girl, makima, chainsaw_man, red_hair, yellow_eyes, sitting, couch, looking_at_viewer, middle_finger, large_breasts, lipstick, biting_own_lip, black_jacket, white_shirt, indoors, dim_lighting`
 
 ```json
-{"caption": "anime screencap style, 1girl, Makima \\(Chainsaw Man\\), looking_at_viewer, middle_finger, she is sitting on a couch, red hair, yellow eyes, large breasts, lipstick, biting_own_lip, black jacket, white shirt, indoors, dim lighting"}
+{"caption": "anime screencap style, 1girl, Makima \\(Chainsaw Man\\), looking_at_viewer, middle_finger, she is sitting back on a couch and staring directly at the viewer, red hair, yellow eyes, large breasts, lipstick, biting_own_lip, black jacket over a white shirt, dim indoor lighting, controlled confident expression"}
 ```
 
 ### Example 2
@@ -267,7 +326,7 @@ The final prompt should feel like:
 **Tags:** `1girl, original, black_hair, long_hair, red_lips, black_dress, slit_dress, earrings, sitting, bar, cocktail, dim_lighting, looking_at_viewer, smile, city_lights, window, night`
 
 ```json
-{"caption": "cinematic portrait style, 1girl, looking_at_viewer, she is seated at a bar with a cocktail in hand, long black hair, red lips, calm confident smile, black dress, a slit dress, earrings, dim bar lighting, city lights through the window at night"}
+{"caption": "cinematic portrait style, 1girl, looking_at_viewer, she is seated at a bar with a cocktail in hand, long black hair, red lips, calm confident smile, black dress with a high slit, earrings, dim bar lighting, warm light on her face, city lights glowing through the window at night"}
 ```
 
 ### Example 3
@@ -277,5 +336,5 @@ The final prompt should feel like:
 **Tags:** `1girl, original, pov_crotch, missionary_sex, looking_at_viewer, open_mouth, blush, black_hair, large_breasts, bed, indoors, night`
 
 ```json
-{"caption": "retro game cg style, 1girl, missionary_sex, pov_crotch, looking_at_viewer, open_mouth, blush, she is lying on a bed, black hair, large breasts, indoors, at night"}
+{"caption": "retro game cg style, 1girl, missionary_sex, pov_crotch, looking_at_viewer, open_mouth, blush, she is lying back on a bed with her body framed from a low intimate angle, black hair, large breasts, indoor bedroom scene, at night"}
 ```

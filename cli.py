@@ -1387,24 +1387,18 @@ def run_tagging(input_dir: str, python: str, media_counts: dict):
     if has_llm and not is_video and not is_collect_or_status:
         existing_txt_count = count_existing_caption_files(input_dir, recursive=recursive)
         if existing_txt_count > 0:
-            ignore_label = (
-                "Ignore existing .txt files and use only the new WD14/PixAI tags (Recommended)"
-                if has_local_taggers
-                else "Ignore existing .txt files"
-            )
             txt_choice = ask_choice(
                 f"Found {existing_txt_count:,} existing .txt files. How should they be handled?",
                 [
-                    ignore_label,
+                    "Reprocess images and overwrite existing .txt files",
                     "Use existing .txt files as extra context for the LLM",
-                    "Reprocess and overwrite existing .txt files",
                 ],
                 default=1,
             )
-            if txt_choice == 2:
-                llm_load_existing = True
-            elif txt_choice == 3:
+            if txt_choice == 1:
                 force_reprocess_due_to_existing_txt = True
+            elif txt_choice == 2:
+                llm_load_existing = True
 
     # API keys
     api_key = ""
