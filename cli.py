@@ -325,6 +325,29 @@ def count_media_quick(path: str, recursive: bool = True) -> dict:
     return {"images": images, "videos": videos}
 
 
+def count_existing_caption_files(
+    path: str,
+    recursive: bool = True,
+    caption_extension: str = ".txt",
+) -> int:
+    """Count caption files that already exist next to image files."""
+    count = 0
+    try:
+        walker = os.walk(path) if recursive else [(path, [], os.listdir(path))]
+        for root, _, files in walker:
+            file_set = set(files)
+            for f in files:
+                ext = os.path.splitext(f)[1].lower()
+                if ext not in IMAGE_EXTS:
+                    continue
+                stem = os.path.splitext(f)[0]
+                if stem + caption_extension in file_set:
+                    count += 1
+    except OSError:
+        pass
+    return count
+
+
 def list_zip_archives(path: str, recursive: bool = True) -> list:
     """List .zip files under a directory."""
     zips = []
@@ -1355,19 +1378,33 @@ def run_tagging(input_dir: str, python: str, media_counts: dict):
         print_warning=print_warning,
     )
 
-    # Load existing .txt as LLM context
+    # Recursive
+    recursive = ask_yes_no("Search subdirectories recursively?", default=True)
+
+    # Existing .txt handling for image LLM flows
     is_collect_or_status = caption_provider == "xai-batch" and xai_batch_action in ("status", "collect")
+    force_reprocess_due_to_existing_txt = False
     if has_llm and not is_video and not is_collect_or_status:
-        if not has_local_taggers:
-            llm_load_existing = ask_yes_no(
-                "Use existing .txt files as context for the LLM captioner?",
-                default=True,
+        existing_txt_count = count_existing_caption_files(input_dir, recursive=recursive)
+        if existing_txt_count > 0:
+            ignore_label = (
+                "Ignore existing .txt files and use only the new WD14/PixAI tags (Recommended)"
+                if has_local_taggers
+                else "Ignore existing .txt files"
             )
-        else:
-            llm_load_existing = ask_yes_no(
-                "Also use existing .txt files as extra context for the LLM captioner?",
-                default=True,
+            txt_choice = ask_choice(
+                f"Found {existing_txt_count:,} existing .txt files. How should they be handled?",
+                [
+                    ignore_label,
+                    "Use existing .txt files as extra context for the LLM",
+                    "Reprocess and overwrite existing .txt files",
+                ],
+                default=1,
             )
+            if txt_choice == 2:
+                llm_load_existing = True
+            elif txt_choice == 3:
+                force_reprocess_due_to_existing_txt = True
 
     # API keys
     api_key = ""
@@ -1434,11 +1471,12 @@ def run_tagging(input_dir: str, python: str, media_counts: dict):
         )
         llm_concurrency = ask_input("Parallel API requests", "32")
 
-    # Recursive
-    recursive = ask_yes_no("Search subdirectories recursively?", default=True)
-
     # Force reprocess
-    force = ask_yes_no("Force reprocess already-processed files?", default=False)
+    if force_reprocess_due_to_existing_txt:
+        force = True
+        print_info("Will reprocess and overwrite existing .txt outputs.")
+    else:
+        force = ask_yes_no("Force reprocess already-processed files?", default=False)
 
     # Collect pre-check
     if has_llm and caption_provider == "xai-batch" and xai_batch_action == "collect":
