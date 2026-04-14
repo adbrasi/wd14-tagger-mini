@@ -2872,21 +2872,32 @@ def main(args):
     if video_mode:
         # In video mode: check for existing .txt next to the video files
         existing_count = 0
+        use_as_context = getattr(args, "grok_context_from_existing", False)
         for frame_path, video_path in frame_to_video.items():
             caption_file = os.path.splitext(video_path)[0] + args.caption_extension
             if not os.path.exists(caption_file):
                 continue
             with open(caption_file, "rt", encoding="utf-8") as f:
+                existing_text = f.read().strip()
+            if not existing_text:
+                continue
+            if use_as_context:
+                existing_context_map[frame_path] = existing_text
+                existing_count += 1
+            else:
                 existing = [
                     t.strip()
-                    for t in f.read().strip("\n").split(args.caption_separator.strip())
+                    for t in existing_text.strip("\n").split(args.caption_separator.strip())
                     if t.strip()
                 ]
-            if existing:
-                add_tags_to_map(combined, frame_path, existing, not args.no_dedupe)
-                existing_count += 1
+                if existing:
+                    add_tags_to_map(combined, frame_path, existing, not args.no_dedupe)
+                    existing_count += 1
         if existing_count:
-            logger.info(f"loaded existing tags from {existing_count} .txt files")
+            if use_as_context:
+                logger.info(f"loaded existing .txt context from {existing_count} files for grok")
+            else:
+                logger.info(f"loaded existing tags from {existing_count} .txt files")
     elif args.append_tags or args.grok_context_from_existing:
         existing_count = 0
         for image_path in paths:

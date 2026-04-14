@@ -365,8 +365,11 @@ def count_existing_caption_files(
     path: str,
     recursive: bool = True,
     caption_extension: str = ".txt",
+    media_exts: set = None,
 ) -> int:
-    """Count caption files that already exist next to image files."""
+    """Count caption files that already exist next to media files."""
+    if media_exts is None:
+        media_exts = IMAGE_EXTS
     count = 0
     try:
         walker = os.walk(path) if recursive else [(path, [], os.listdir(path))]
@@ -374,7 +377,7 @@ def count_existing_caption_files(
             file_set = set(files)
             for f in files:
                 ext = os.path.splitext(f)[1].lower()
-                if ext not in IMAGE_EXTS:
+                if ext not in media_exts:
                     continue
                 stem = os.path.splitext(f)[0]
                 if stem + caption_extension in file_set:
@@ -1421,16 +1424,18 @@ def run_tagging(input_dir: str, python: str, media_counts: dict):
     # Recursive
     recursive = ask_yes_no("Search subdirectories recursively?", default=True)
 
-    # Existing .txt handling for image LLM flows
+    # Existing .txt handling for LLM flows (images and videos)
     is_collect_or_status = caption_provider == "xai-batch" and xai_batch_action in ("status", "collect")
     force_reprocess_due_to_existing_txt = False
-    if has_llm and not is_video and not is_collect_or_status:
-        existing_txt_count = count_existing_caption_files(input_dir, recursive=recursive)
+    if has_llm and not is_collect_or_status:
+        media_exts = VIDEO_EXTS if is_video else IMAGE_EXTS
+        media_label = "videos" if is_video else "images"
+        existing_txt_count = count_existing_caption_files(input_dir, recursive=recursive, media_exts=media_exts)
         if existing_txt_count > 0:
             txt_choice = ask_choice(
                 f"Found {existing_txt_count:,} existing .txt files. How should they be handled?",
                 [
-                    "Reprocess images and overwrite existing .txt files",
+                    f"Reprocess {media_label} and overwrite existing .txt files",
                     "Use existing .txt files as extra context for the LLM",
                 ],
                 default=1,
