@@ -6,6 +6,11 @@ All other modules import from here instead of using print() directly.
 import sys
 from typing import List, Optional
 
+try:
+    import readline  # noqa: F401 — importing enables line-editing in input()
+except ImportError:
+    pass  # Windows or minimal env — fall back to raw input()
+
 from rich.console import Console
 from rich.panel import Panel
 from rich.progress import (
