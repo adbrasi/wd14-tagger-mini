@@ -2916,8 +2916,15 @@ def main(args):
                 logger.info(f"loaded existing tags from {existing_count} .txt files")
 
     # Separate taggers: booru taggers run first, grok runs last (needs booru output)
-    booru_taggers = [t for t in taggers if t != "grok"]
     has_grok = "grok" in taggers
+    # Skip booru taggers for batch collect/status — no local inference needed,
+    # and in video mode the paths are raw .mp4 files (not extracted frames).
+    is_collect_or_status = (
+        getattr(args, "grok_provider", "") == "xai-batch"
+        and has_grok
+        and getattr(args, "xai_batch_action", "") in ("collect", "status")
+    )
+    booru_taggers = [] if is_collect_or_status else [t for t in taggers if t != "grok"]
 
     total_batches = 0
     if not args.no_progress:
