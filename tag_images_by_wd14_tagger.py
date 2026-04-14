@@ -2706,16 +2706,18 @@ def recommend_batch_by_vram() -> Optional[int]:
         return None
 
     if free_mb >= 80000:
-        return 64
+        return 96
     if free_mb >= 60000:
-        return 48
+        return 64
     if free_mb >= 40000:
-        return 32
+        return 48
     if free_mb >= 30000:
-        return 16
+        return 32
     if free_mb >= 20000:
-        return 8
+        return 16
     if free_mb >= 12000:
+        return 8
+    if free_mb >= 8000:
         return 4
     return 2
 
