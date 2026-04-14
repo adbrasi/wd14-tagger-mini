@@ -600,7 +600,7 @@ def _process_single_source(
     """
     from mega_download import (
         check_mega_installed,
-        flatten_directory,
+        merge_directory,
         install_mega,
         mega_download,
     )
@@ -613,7 +613,7 @@ def _process_single_source(
         if os.path.abspath(raw) == os.path.abspath(target_dir):
             print_info("Source is target directory — no flatten needed")
             return True
-        # Prevent flatten if source is parent of target (would cause duplication)
+        # Prevent merge if source is parent of target (would cause duplication)
         if os.path.abspath(target_dir).startswith(os.path.abspath(raw) + os.sep):
             print_warning("Source is parent of target — copying instead of moving to avoid duplication")
             import shutil as _shutil
@@ -622,9 +622,12 @@ def _process_single_source(
                     continue
                 for f in files:
                     src = os.path.join(root, f)
-                    _shutil.copy2(src, target_dir)
+                    rel = os.path.relpath(src, raw)
+                    dst = os.path.join(target_dir, rel)
+                    os.makedirs(os.path.dirname(dst), exist_ok=True)
+                    _shutil.copy2(src, dst)
             return True
-        flatten_directory(raw, target_dir)
+        merge_directory(raw, target_dir)
         return True
 
     elif source_type == "mega":
@@ -658,11 +661,10 @@ def _process_single_source(
                     except Exception as e:
                         print_warning(f"Failed to extract {fname}: {e}")
 
-        stats = flatten_directory(tmp_dir, target_dir)
+        stats = merge_directory(tmp_dir, target_dir)
         print_success(
             f"MEGA: {stats['moved']:,} files "
-            f"({stats['conflicts']:,} conflicts resolved, "
-            f"{stats['pairs']:,} txt pairs)"
+            f"({stats['pairs']:,} txt pairs)"
         )
         return True
 
@@ -688,11 +690,10 @@ def _process_single_source(
                 print_error(f"Zip extraction failed: {e}")
                 return False
 
-        stats = flatten_directory(tmp_dir, target_dir)
+        stats = merge_directory(tmp_dir, target_dir)
         print_success(
             f"HF: {stats['moved']:,} files "
-            f"({stats['conflicts']:,} conflicts resolved, "
-            f"{stats['pairs']:,} txt pairs)"
+            f"({stats['pairs']:,} txt pairs)"
         )
         return True
 
@@ -708,11 +709,10 @@ def _process_single_source(
         tmp_dir = _tmp.mkdtemp(prefix=f"araknideo_hfds_{source_num}_")
         dl_token = check_env_key("HF_TOKEN") or check_env_key("HUGGINGFACE_HUB_TOKEN")
         downloaded = download_hf_dataset(repo_id, subfolder, tmp_dir, dl_token or None, python)
-        stats = flatten_directory(downloaded, target_dir)
+        stats = merge_directory(downloaded, target_dir)
         print_success(
             f"HF: {stats['moved']:,} files "
-            f"({stats['conflicts']:,} conflicts resolved, "
-            f"{stats['pairs']:,} txt pairs)"
+            f"({stats['pairs']:,} txt pairs)"
         )
         return True
 

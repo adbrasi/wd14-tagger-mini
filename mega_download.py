@@ -108,8 +108,60 @@ def _unique_path(target_dir: str, filename: str) -> str:
     return candidate
 
 
+def merge_directory(source_dir: str, target_dir: str) -> dict:
+    """Move all media files + their .txt pairs from source into target, preserving folder structure.
+
+    Returns stats: {moved: int, pairs: int, failed: int}
+    """
+    os.makedirs(target_dir, exist_ok=True)
+    stats = {"moved": 0, "pairs": 0, "failed": 0}
+
+    if os.path.abspath(source_dir) == os.path.abspath(target_dir):
+        print_warning("source_dir and target_dir are the same; nothing to merge")
+        return stats
+
+    # Collect all media files first
+    media_files = []
+    for root, _, files in os.walk(source_dir):
+        if os.path.abspath(root).startswith(os.path.abspath(target_dir) + os.sep):
+            continue
+        for f in files:
+            if Path(f).suffix.lower() in MEDIA_EXTS:
+                media_files.append(os.path.join(root, f))
+
+    if not media_files:
+        print_warning(f"No media files found in {source_dir}")
+        return stats
+
+    with make_progress() as progress:
+        task = progress.add_task("Merging files", total=len(media_files))
+
+        for src_path in media_files:
+            try:
+                rel_path = os.path.relpath(src_path, source_dir)
+                dst_path = os.path.join(target_dir, rel_path)
+                os.makedirs(os.path.dirname(dst_path), exist_ok=True)
+
+                shutil.move(src_path, dst_path)
+                stats["moved"] += 1
+
+                # Move paired .txt if exists
+                txt_src = os.path.splitext(src_path)[0] + PAIR_EXT
+                if os.path.exists(txt_src):
+                    txt_dst = os.path.splitext(dst_path)[0] + PAIR_EXT
+                    shutil.move(txt_src, txt_dst)
+                    stats["pairs"] += 1
+            except Exception as e:
+                stats["failed"] += 1
+                print_warning(f"Failed to move {os.path.basename(src_path)}: {e}")
+
+            progress.advance(task)
+
+    return stats
+
+
 def flatten_directory(source_dir: str, target_dir: str) -> dict:
-    """Move all media files + their .txt pairs from subfolders into target_dir.
+    """Move all media files + their .txt pairs from subfolders into target_dir (flat).
 
     Returns stats: {moved: int, conflicts: int, pairs: int, failed: int}
     """
