@@ -898,6 +898,7 @@ def run_preprocessing(input_dir: str):
         return
     _mod = importlib.util.module_from_spec(_spec)
     _spec.loader.exec_module(_mod)
+    sys.modules["video_normalize"] = _mod
     convertible_exts = _mod.CONVERTIBLE_EXTS
 
     # Scan all media files: mp4 + convertible formats (gif/webp/avi/mov/etc)
