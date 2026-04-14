@@ -213,6 +213,9 @@ def monitor_xai_batch(state_file: str, api_key: str, base_url: str, poll_seconds
     first_ts = None
     first_done = None
     zero_total_streak = 0
+    # When progress is >=99%, wait up to this many seconds for stragglers
+    tail_timeout = 120  # 2 minutes
+    tail_start = None
 
     try:
         while True:
@@ -267,6 +270,20 @@ def monitor_xai_batch(state_file: str, api_key: str, base_url: str, poll_seconds
             if pending <= 0 and total > 0:
                 print_success("Batch completed (no pending requests)")
                 return
+
+            # Tail timeout: if >=99% done, wait max 2min for stragglers then move on
+            if total > 0 and pct >= 99.0 and pending > 0:
+                if tail_start is None:
+                    tail_start = now
+                    print_info(f"{pct:.1f}% done — waiting up to {tail_timeout}s for {pending} straggler(s)...")
+                elif now - tail_start >= tail_timeout:
+                    print_warning(
+                        f"Tail timeout ({tail_timeout}s): {pending} request(s) still pending. "
+                        f"Moving on with {done}/{total} completed."
+                    )
+                    return
+            else:
+                tail_start = None
 
             time.sleep(poll_seconds)
     except KeyboardInterrupt:
