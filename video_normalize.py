@@ -28,6 +28,27 @@ CONVERTIBLE_EXTS = {".gif", ".webp", ".avi", ".mov", ".mkv", ".webm", ".flv", ".
 _DEVNULL = subprocess.DEVNULL
 
 
+def _has_nvenc() -> bool:
+    """Check if h264_nvenc is available in ffmpeg."""
+    if not hasattr(_has_nvenc, "_cache"):
+        try:
+            r = subprocess.run(
+                ["ffmpeg", "-hide_banner", "-encoders"],
+                capture_output=True, text=True, timeout=10,
+            )
+            _has_nvenc._cache = "h264_nvenc" in r.stdout
+        except Exception:
+            _has_nvenc._cache = False
+    return _has_nvenc._cache
+
+
+def _video_encode_args() -> list:
+    """Return ffmpeg video codec args: NVENC (GPU) if available, else libx264 (CPU)."""
+    if _has_nvenc():
+        return ["-c:v", "h264_nvenc", "-preset", "p4", "-cq", "18", "-b:v", "0"]
+    return ["-c:v", "libx264", "-preset", "fast", "-crf", "18"]
+
+
 def get_audio_channels(video_path: str) -> Optional[int]:
     """Return number of audio channels, or None if no audio stream."""
     cmd = [
@@ -73,7 +94,7 @@ def convert_to_mp4(src_path: str) -> dict:
     cmd = [
         "ffmpeg", "-y",
         "-i", src_path,
-        "-c:v", "libx264", "-preset", "fast", "-crf", "18",
+    ] + _video_encode_args() + [
         "-c:a", "aac", "-b:a", "192k",
         "-movflags", "+faststart",
         tmp_path,
@@ -268,7 +289,7 @@ def _fix_fps_single(args: tuple) -> dict:
         "ffmpeg", "-y",
         "-i", video_path,
         "-r", str(target_fps),
-        "-c:v", "libx264", "-preset", "fast", "-crf", "18",
+    ] + _video_encode_args() + [
         "-c:a", "copy",
     ] + (["-movflags", "+faststart"] if ext.lower() == ".mp4" else []) + [
         tmp_path,
