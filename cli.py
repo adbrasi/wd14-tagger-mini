@@ -1877,6 +1877,7 @@ def run_tagging(input_dir: str, python: str, media_counts: dict):
             print_success("DONE! Check your input directory for .txt files.")
 
         if has_llm and caption_provider == "xai-batch" and monitor_xai and xai_batch_action in ("submit", "status"):
+            monitor_ok = False
             try:
                 monitor_xai_batch(
                     state_file=xai_batch_state_file,
@@ -1884,10 +1885,47 @@ def run_tagging(input_dir: str, python: str, media_counts: dict):
                     base_url=XAI_API_BASE_URL,
                     poll_seconds=max(3, int(monitor_poll_seconds)),
                 )
+                monitor_ok = True
             except KeyboardInterrupt:
                 print_warning("Monitoring stopped by user. Batch keeps running on xAI.")
             except Exception as e:
                 print_error(f"Monitor error: {e}")
+
+            # Auto-collect after monitor confirms batch is done (or nearly done)
+            if monitor_ok:
+                print_section("COLLECTING RESULTS")
+                print_info("Batch finished — collecting results and writing .txt files...")
+                collect_cmd = [
+                    python, TAGGER_SCRIPT, input_dir,
+                    "--taggers", "grok",
+                    "--batch_size", batch_size,
+                    "--grok_provider", "xai-batch",
+                    "--xai_batch_action", "collect",
+                    "--xai_batch_state_file", xai_batch_state_file,
+                    "--xai_api_base_url", XAI_API_BASE_URL,
+                    "--xai_batch_model", XAI_BATCH_DEFAULT_MODEL,
+                    "--xai_batch_page_size", str(xai_batch_page_size),
+                    "--remove_underscore",
+                ]
+                if is_video:
+                    collect_cmd.append("--video")
+                if pro_mode:
+                    collect_cmd.append("--pro")
+                if recursive:
+                    collect_cmd.append("--recursive")
+                if force:
+                    collect_cmd.append("--force")
+                if prepend_text:
+                    collect_cmd.extend(["--prepend_text", prepend_text])
+
+                collect_proc = subprocess.run(collect_cmd, env=env)
+                if collect_proc.returncode == 0:
+                    print_success("COLLECT DONE! .txt files written next to your videos/images.")
+                else:
+                    print_error(f"Collect failed (exit code {collect_proc.returncode})")
+                    print_info(f"You can retry manually: run tagging → xAI batch → collect with state file: {xai_batch_state_file}")
+            else:
+                print_info(f"To collect results later, run tagging with xAI batch action 'collect' and state file: {xai_batch_state_file}")
         return True
     else:
         print_error(f"Process exited with code {proc.returncode}")
