@@ -13,6 +13,7 @@ import sys
 import time
 import pathlib
 import zipfile
+from typing import Optional
 
 import requests
 
