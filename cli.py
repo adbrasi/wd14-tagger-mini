@@ -103,10 +103,44 @@ def ensure_venv() -> str:
     return python
 
 
+def _detect_cuda_index_url() -> Optional[str]:
+    """Detect the best PyTorch CUDA index URL based on the system's CUDA driver."""
+    try:
+        result = subprocess.run(
+            ["nvidia-smi", "--query-gpu=driver_version", "--format=csv,noheader,nounits"],
+            capture_output=True, text=True, check=False,
+        )
+        if result.returncode != 0:
+            return None
+    except FileNotFoundError:
+        return None
+    # nvidia-smi works — use cu128 as safe default for modern drivers (570+)
+    return "https://download.pytorch.org/whl/cu128"
+
+
 def install_deps(python: str):
     """Install/update requirements."""
     pip = os.path.join(VENV_DIR, "bin", "pip")
     print_info("Installing dependencies...")
+
+    # Install torch/torchvision from CUDA-specific index if GPU is available
+    cuda_url = _detect_cuda_index_url()
+    if cuda_url:
+        # Check if torch is already installed with CUDA support
+        check = subprocess.run(
+            [python, "-c", "import torch; assert 'cu' in torch.__version__"],
+            capture_output=True, text=True,
+        )
+        if check.returncode != 0:
+            print_info("Installing PyTorch with CUDA support...")
+            torch_result = subprocess.run(
+                [pip, "install", "-q", "torch", "torchvision",
+                 "--index-url", cuda_url],
+                capture_output=True, text=True,
+            )
+            if torch_result.returncode != 0:
+                print_warning("PyTorch CUDA install failed, falling back to default")
+
     result = subprocess.run(
         [pip, "install", "-q", "-r", REQUIREMENTS],
         capture_output=True,
