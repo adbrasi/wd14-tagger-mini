@@ -123,6 +123,33 @@ def ask_choice(prompt: str, options: List[str], default: int = 1) -> int:
         console.print(f"  [red]Enter a number between 1 and {len(options)}[/]")
 
 
+def ask_multi_choice(prompt: str, options: List[str]) -> List[int]:
+    """Ask user to select one or more options (comma-separated numbers).
+
+    Returns list of 1-based indices. Empty input selects all.
+    """
+    if not options:
+        raise ValueError("ask_multi_choice requires at least one option")
+    console.print(f"\n[bold]{prompt}[/]")
+    for i, opt in enumerate(options, 1):
+        console.print(f"  [bold]{i})[/] {opt}")
+    while True:
+        _prompt(f"Choose (1-{len(options)}, comma-separated, Enter=all): ")
+        try:
+            raw = _clean_input(input())
+        except (EOFError, KeyboardInterrupt):
+            raise KeyboardInterrupt
+        if not raw:
+            return list(range(1, len(options) + 1))
+        try:
+            choices = [int(x.strip()) for x in raw.split(",")]
+            if all(1 <= c <= len(options) for c in choices):
+                return sorted(set(choices))
+        except ValueError:
+            pass
+        console.print(f"  [red]Enter numbers between 1 and {len(options)}, separated by commas[/]")
+
+
 def ask_yes_no(prompt: str, default: bool = True) -> bool:
     hint = "Y/n" if default else "y/N"
     while True:

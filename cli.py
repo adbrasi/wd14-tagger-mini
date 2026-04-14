@@ -26,6 +26,7 @@ from ui import (
     ask_choice,
     ask_input,
     ask_int,
+    ask_multi_choice,
     ask_yes_no,
     console,
     make_progress,
@@ -2048,6 +2049,57 @@ def main():
     else:
         print_warning(f"No media found in {input_dir} (subdirs will be scanned during processing)")
 
+    # Detect subfolders with media — offer folder selection
+    subdirs_with_media = []
+    for entry in sorted(os.listdir(input_dir)):
+        sub_path = os.path.join(input_dir, entry)
+        if os.path.isdir(sub_path) and not entry.startswith("."):
+            sub_counts = count_media_quick(sub_path, recursive=True)
+            total = sub_counts["images"] + sub_counts["videos"]
+            if total > 0:
+                subdirs_with_media.append((entry, sub_path, sub_counts))
+
+    # Also check for media files directly in root (not in subfolders)
+    root_counts = count_media_quick(input_dir, recursive=False)
+    root_total = root_counts["images"] + root_counts["videos"]
+
+    selected_dirs = [input_dir]  # default: process everything
+    if len(subdirs_with_media) >= 2:
+        options = []
+        if root_total > 0:
+            options.append(f". (root — {root_counts['images']} imgs, {root_counts['videos']} vids)")
+        for name, _, sc in subdirs_with_media:
+            options.append(f"{name}/ ({sc['images']} imgs, {sc['videos']} vids)")
+
+        print_info(f"Found {len(subdirs_with_media)} subfolders with media")
+        if ask_yes_no("Process all folders?", default=True):
+            pass  # keep selected_dirs = [input_dir]
+        else:
+            chosen = ask_multi_choice("Which folders to process?", options)
+            selected_dirs = []
+            offset = 0
+            if root_total > 0:
+                offset = 1
+                if 1 in chosen:
+                    selected_dirs.append(input_dir)  # root only (non-recursive handled below)
+            for idx in chosen:
+                adj = idx - offset
+                if adj >= 1 and adj <= len(subdirs_with_media):
+                    selected_dirs.append(subdirs_with_media[adj - 1][1])
+            if not selected_dirs:
+                print_error("No folders selected")
+                return
+            # Recount media for selected dirs only
+            total_imgs = 0
+            total_vids = 0
+            for d in selected_dirs:
+                rc = d == input_dir and len(selected_dirs) > 1
+                c = count_media_quick(d, recursive=(d != input_dir or not rc))
+                total_imgs += c["images"]
+                total_vids += c["videos"]
+            media_counts = {"images": total_imgs, "videos": total_vids}
+            print_info(f"Selected {len(selected_dirs)} folder(s): {media_counts['images']:,} images, {media_counts['videos']:,} videos")
+
     # What to do?
     workflow = ask_choice("What do you want to do?", [
         "Pre-process dataset (trim to max frames)",
@@ -2057,16 +2109,24 @@ def main():
         "Frame Pair Caption (A→B scene-transition pipeline)",
     ], default=3)
 
-    if workflow in (1, 3):
-        run_preprocessing(input_dir)
+    for proc_dir in selected_dirs:
+        if len(selected_dirs) > 1:
+            folder_label = os.path.relpath(proc_dir, input_dir) if proc_dir != input_dir else os.path.basename(proc_dir)
+            print_section(f"PROCESSING: {folder_label}")
+        dir_counts = count_media_quick(proc_dir, recursive=True)
 
+        if workflow in (1, 3):
+            run_preprocessing(proc_dir)
+
+        if workflow in (2, 3):
+            tag_ok = run_tagging(proc_dir, python, dir_counts)
+            if not tag_ok and workflow == 3:
+                print_info("Pipeline stopped — tagging was aborted")
+                return
+
+    # Upload uses the full input_dir (all folders together)
     if workflow in (2, 3):
-        tag_ok = run_tagging(input_dir, python, media_counts)
-        if not tag_ok and workflow == 3:
-            print_info("Pipeline stopped — tagging was aborted")
-            return
-        # After tagging, offer upload if not already in full pipeline
-        if workflow == 2 and tag_ok:
+        if workflow == 2:
             if ask_yes_no("Upload dataset to HuggingFace?", default=True):
                 run_hf_upload(input_dir, python, project_name)
 
