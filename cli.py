@@ -921,6 +921,9 @@ def run_preprocessing(input_dir: str):
     print_info(f"Found {len(all_media):,} media files ({mp4_count:,} mp4, {non_mp4_count:,} other formats)")
 
     workers = max(4, min(os.cpu_count() or 4, 64))
+    # NVENC can handle many parallel encodes — raise worker count
+    if _mod._has_nvenc():
+        workers = max(workers, 64)
 
     # ── Step 1: Normalize formats + fix mono audio + fps ──
     do_normalize = False

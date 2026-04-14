@@ -362,7 +362,10 @@ def normalize_videos(
     Returns dict with stats.
     """
     if max_workers is None:
-        max_workers = max(1, min(os.cpu_count() or 4, len(file_paths), 64))
+        cpu = os.cpu_count() or 4
+        # NVENC handles many parallel encodes; CPU-bound libx264 does not.
+        ceiling = 64 if _has_nvenc() else cpu
+        max_workers = max(1, min(ceiling, len(file_paths)))
 
     stats = {
         "converted": 0, "convert_failed": 0, "convert_skipped": 0,
