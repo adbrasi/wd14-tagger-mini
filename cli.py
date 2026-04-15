@@ -23,6 +23,8 @@ from prompt_profiles import (
     describe_prompt_vars,
     list_prompt_profiles,
 )
+from rich.table import Table
+
 from ui import (
     ask_choice,
     ask_input,
@@ -1933,6 +1935,140 @@ def run_tagging(input_dir: str, python: str, media_counts: dict):
 
 
 # -------------------------
+# Video Caption Pipeline (Gemini + Grok)
+# -------------------------
+
+def run_video_caption(input_dir: str, python: str):
+    """Run the Gemini + PixAI + Grok video caption pipeline."""
+    from video_caption_pipeline import run_pipeline
+
+    print_section("VIDEO CAPTION (GEMINI + GROK)")
+
+    vid_count = count_media_quick(input_dir, recursive=True).get("videos", 0)
+    if vid_count == 0:
+        print_warning("No videos found in dataset")
+        return
+
+    print_info(f"Found {vid_count:,} videos")
+
+    # Gemini API key
+    gemini_api_key = check_env_key("GEMINI_API_KEY")
+    if gemini_api_key:
+        print_success(f"Found GEMINI_API_KEY in environment ({gemini_api_key[:4]}****)")
+    else:
+        gemini_api_key = ask_input("Enter Gemini API key")
+        if not gemini_api_key:
+            print_error("No Gemini API key provided.")
+            return
+
+    # xAI API key
+    xai_api_key = check_env_key("XAI_API_KEY")
+    if xai_api_key:
+        print_success(f"Found XAI_API_KEY in environment ({xai_api_key[:4]}****)")
+    else:
+        xai_api_key = ask_input("Enter xAI API key")
+        if not xai_api_key:
+            print_error("No xAI API key provided.")
+            return
+
+    # HF token for PixAI
+    hf_token = check_env_key("HF_TOKEN") or check_env_key("HUGGINGFACE_HUB_TOKEN")
+    if not hf_token:
+        print_warning("PixAI model is gated. You may need a HuggingFace token.")
+        hf_token = ask_input("Enter HF token (or press Enter to skip)", "")
+    if hf_token:
+        os.environ["HF_TOKEN"] = hf_token
+
+    # Gemini model
+    gemini_model = ask_input("Gemini model", "gemini-3.1-flash-lite-preview")
+
+    # xAI model
+    xai_model = ask_input("Grok model", XAI_BATCH_DEFAULT_MODEL)
+
+    # Batch size for PixAI
+    batch_size = ask_input("PixAI batch size (or 'auto')", "auto")
+    if batch_size.lower() == "auto":
+        cmd_args = [
+            python, "-c",
+            "from tag_images_by_wd14_tagger import recommend_batch_by_vram; "
+            "r = recommend_batch_by_vram(); print(r if r else 4)",
+        ]
+        try:
+            r = subprocess.run(cmd_args, capture_output=True, text=True, timeout=10)
+            batch_size = r.stdout.strip() if r.returncode == 0 and r.stdout.strip() else "4"
+            print_success(f"Auto batch size from VRAM: {batch_size}")
+        except Exception:
+            batch_size = "4"
+            print_warning("Could not detect VRAM, using batch_size=4")
+
+    # Prepend text
+    prepend_text = ask_input("Literal text to prepend to every .txt (or Enter to skip)", "")
+
+    # Recursive
+    recursive = ask_yes_no("Search subdirectories recursively?", default=True)
+
+    # Summary
+    summary = Table(title="CONFIGURATION", show_header=False, border_style="blue")
+    summary.add_column("Key", style="bold")
+    summary.add_column("Value")
+    summary.add_row("Input", input_dir)
+    summary.add_row("Videos", str(vid_count))
+    summary.add_row("Gemini model", gemini_model)
+    summary.add_row("Grok model", xai_model)
+    summary.add_row("PixAI batch", batch_size)
+    summary.add_row("Recursive", str(recursive))
+    if prepend_text:
+        summary.add_row("Prepend", prepend_text)
+    console.print(summary)
+
+    if not ask_yes_no("Start pipeline?", default=True):
+        print_info("Aborted")
+        return
+
+    # Progress callback
+    def _on_phase(phase, detail):
+        if phase == "gemini":
+            print_section("PHASE 1: GEMINI (VIDEO UNDERSTANDING)")
+            print_info(detail)
+        elif phase == "gemini_done":
+            print_success(f"Gemini: {detail}")
+        elif phase == "pixai":
+            print_section("PHASE 2: PIXAI (KEYFRAME TAGGING)")
+            print_info(detail)
+        elif phase == "pixai_done":
+            print_success(f"PixAI: {detail}")
+        elif phase == "grok":
+            print_section("PHASE 3: GROK (CAPTION SYNTHESIS)")
+            print_info(detail)
+        elif phase == "done":
+            print_success(detail)
+
+    try:
+        stats = run_pipeline(
+            input_dir=input_dir,
+            gemini_api_key=gemini_api_key,
+            xai_api_key=xai_api_key,
+            python=python,
+            gemini_model=gemini_model,
+            xai_model=xai_model,
+            batch_size=batch_size,
+            recursive=recursive,
+            prepend_text=prepend_text,
+            on_phase_progress=_on_phase,
+        )
+        print_success(
+            f"Pipeline complete: {stats['captioned']}/{stats['total']} videos captioned, "
+            f"{stats['failed']} failed"
+        )
+    except KeyboardInterrupt:
+        print_warning("\nPipeline interrupted")
+    except Exception as e:
+        print_error(f"Pipeline error: {e}")
+        import traceback
+        traceback.print_exc()
+
+
+# -------------------------
 # Frame Pair Pipeline
 # -------------------------
 
@@ -2206,6 +2342,7 @@ def main():
         "Full pipeline (preprocess → tag → upload)",
         "Upload dataset to HuggingFace",
         "Frame Pair Caption (A→B scene-transition pipeline)",
+        "Video Caption (Gemini + Grok)",
     ], default=3)
 
     for proc_dir in selected_dirs:
@@ -2234,6 +2371,10 @@ def main():
 
     if workflow == 5:
         run_frame_pair(input_dir, python, project_name)
+
+    if workflow == 6:
+        for proc_dir in selected_dirs:
+            run_video_caption(proc_dir, python)
 
     print_section("ALL DONE")
     print_success(f"Dataset ready at: {input_dir}")
