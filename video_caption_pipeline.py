@@ -153,6 +153,24 @@ def extract_keyframes(
     return result
 
 
+def _resolve_batch_size(batch_size: str, python: str) -> str:
+    """Resolve 'auto' batch size to a concrete integer string."""
+    if batch_size.lower() != "auto":
+        return batch_size
+    try:
+        r = subprocess.run(
+            [python, "-c",
+             "from tag_images_by_wd14_tagger import recommend_batch_by_vram; "
+             "r = recommend_batch_by_vram(); print(r if r else 4)"],
+            capture_output=True, text=True, timeout=10,
+        )
+        if r.returncode == 0 and r.stdout.strip():
+            return r.stdout.strip()
+    except Exception:
+        pass
+    return "4"
+
+
 def run_pixai_on_frames(
     keyframes: Dict[str, List[str]],
     python: str,
@@ -162,6 +180,9 @@ def run_pixai_on_frames(
 
     Returns mapping of video_path -> {"frame_1": "tag1, tag2, ...", ..., "frame_5": "..."}
     """
+    # Resolve batch_size before passing to subprocess (argparse expects int)
+    batch_size = _resolve_batch_size(batch_size, python)
+
     # Collect all frame paths that exist
     all_frames = []
     frame_to_video: Dict[str, Tuple[str, int]] = {}  # frame_path -> (video_path, frame_index)
@@ -284,111 +305,135 @@ def run_grok_phase(
 ) -> Dict[str, Optional[str]]:
     """Submit Grok synthesis via xAI Batch API.
 
-    Creates temporary files with the pre-built prompts, then calls the
-    tagger script in xAI batch mode (submit → monitor → collect).
+    Creates a persistent work directory (inside the dataset) with image files
+    and pre-built prompts, then calls the tagger in xAI batch mode.
+    The directory persists so collect can resolve paths after submit.
 
     Returns mapping of video_path -> final caption.
     """
-    # Write temporary prompt files for each video
-    with tempfile.TemporaryDirectory(prefix="grok_synthesis_") as work_dir:
-        # Write system prompt
-        sys_prompt_path = os.path.join(work_dir, "system_prompt.md")
-        with open(sys_prompt_path, "w", encoding="utf-8") as f:
-            f.write(grok_system_prompt)
+    # Persistent work dir inside dataset (survives process restarts for resume)
+    work_dir = os.path.join(os.path.abspath(input_dir), ".vcap_grok_work")
+    os.makedirs(work_dir, exist_ok=True)
 
-        # Write user prompt template (with {tags} placeholder for the tagger)
-        # The tagger expects {tags} in the user prompt, but we've already built
-        # the full prompts. We'll use a pass-through: the "tags" will be the
-        # full rendered prompt, and the user prompt template is just "{tags}".
-        user_prompt_path = os.path.join(work_dir, "user_prompt.md")
-        with open(user_prompt_path, "w", encoding="utf-8") as f:
-            f.write("{tags}")
+    # Write system prompt
+    sys_prompt_path = os.path.join(work_dir, "system_prompt.md")
+    with open(sys_prompt_path, "w", encoding="utf-8") as f:
+        f.write(grok_system_prompt)
 
-        # Write per-video .txt files containing the rendered grok prompts
-        # These will be loaded as "existing tags" by the tagger
-        prompt_dir = os.path.join(work_dir, "prompts")
-        os.makedirs(prompt_dir)
+    # Write user prompt template — the tagger expects {tags} in the user prompt.
+    # We pass the full rendered prompt as "tags", so the template is just "{tags}".
+    user_prompt_path = os.path.join(work_dir, "user_prompt.md")
+    with open(user_prompt_path, "w", encoding="utf-8") as f:
+        f.write("{tags}")
 
-        video_to_prompt_file: Dict[str, str] = {}
-        for vpath, prompt_text in grok_prompts.items():
-            stem = Path(vpath).stem
-            uid = hashlib.md5(vpath.encode()).hexdigest()[:8]
-            prompt_file = os.path.join(prompt_dir, f"{stem}_{uid}.txt")
-            with open(prompt_file, "w", encoding="utf-8") as f:
-                f.write(prompt_text)
-            # Create a dummy video symlink so the tagger finds it
-            video_link = os.path.join(prompt_dir, f"{stem}_{uid}.mp4")
-            os.symlink(os.path.abspath(vpath), video_link)
-            video_to_prompt_file[vpath] = video_link
+    # Write per-video files: a .txt with the rendered prompt and a .png placeholder
+    # We use image mode (not --video) to avoid the tagger extracting frames.
+    # Each "image" is a tiny 1x1 PNG so the tagger can glob it.
+    prompt_dir = os.path.join(work_dir, "data")
+    os.makedirs(prompt_dir, exist_ok=True)
 
-        # Build xAI batch state file path
-        state_file = os.path.join(
-            os.path.dirname(os.path.abspath(input_dir)),
-            f".xai_batch_state_vcap_{hashlib.md5(input_dir.encode()).hexdigest()[:10]}.json",
-        )
+    _create_placeholder_png(os.path.join(work_dir, "_placeholder.png"))
 
-        # Run tagger in xAI batch mode: submit
-        cmd_submit = [
-            python, TAGGER_SCRIPT, prompt_dir,
-            "--taggers", "grok",
-            "--grok_provider", "xai-batch",
-            "--xai_batch_action", "submit",
-            "--xai_batch_state_file", state_file,
-            "--xai_batch_model", xai_model,
-            "--grok_system_prompt_file", sys_prompt_path,
-            "--grok_prompt_file", user_prompt_path,
-            "--video",
-            "--force",
-            "--remove_underscore",
-            "--append_tags",
-        ]
+    video_to_file: Dict[str, str] = {}
+    for vpath, prompt_text in grok_prompts.items():
+        stem = Path(vpath).stem
+        uid = hashlib.md5(vpath.encode()).hexdigest()[:8]
+        base_name = f"{stem}_{uid}"
 
-        env = os.environ.copy()
-        if xai_api_key:
-            env["XAI_API_KEY"] = xai_api_key
+        # Write prompt as .txt (loaded as existing tags by the tagger)
+        txt_file = os.path.join(prompt_dir, f"{base_name}.txt")
+        with open(txt_file, "w", encoding="utf-8") as f:
+            f.write(prompt_text)
 
-        logger.info("submitting grok synthesis via xAI batch...")
-        proc = subprocess.run(cmd_submit, env=env, capture_output=True, text=True)
-        if proc.returncode != 0:
-            logger.error(f"grok submit failed: {proc.stderr[-500:]}")
-            return {vp: None for vp in video_paths}
+        # Create a placeholder image (tagger needs an image file to glob)
+        img_file = os.path.join(prompt_dir, f"{base_name}.png")
+        if not os.path.exists(img_file):
+            os.link(os.path.join(work_dir, "_placeholder.png"), img_file)
 
-        # Poll status until done (reuse monitor from CLI)
-        logger.info("waiting for xAI batch to complete...")
-        _wait_for_xai_batch(state_file, xai_api_key)
+        video_to_file[vpath] = img_file
 
-        # Collect results
-        cmd_collect = [
-            python, TAGGER_SCRIPT, prompt_dir,
-            "--taggers", "grok",
-            "--grok_provider", "xai-batch",
-            "--xai_batch_action", "collect",
-            "--xai_batch_state_file", state_file,
-            "--xai_batch_model", xai_model,
-            "--video",
-            "--force",
-            "--remove_underscore",
-        ]
+    # Build xAI batch state file path
+    state_file = os.path.join(
+        os.path.dirname(os.path.abspath(input_dir)),
+        f".xai_batch_state_vcap_{hashlib.md5(input_dir.encode()).hexdigest()[:10]}.json",
+    )
 
-        logger.info("collecting grok results...")
-        proc = subprocess.run(cmd_collect, env=env, capture_output=True, text=True)
-        if proc.returncode != 0:
-            logger.error(f"grok collect failed: {proc.stderr[-500:]}")
+    env = os.environ.copy()
+    if xai_api_key:
+        env["XAI_API_KEY"] = xai_api_key
 
-        # Read the generated .txt files and map back to original video paths
-        results: Dict[str, Optional[str]] = {}
-        for vpath, link_path in video_to_prompt_file.items():
-            txt_path = os.path.splitext(link_path)[0] + ".txt"
-            if os.path.exists(txt_path):
-                with open(txt_path, "r", encoding="utf-8") as f:
-                    content = f.read().strip()
-                # Try to parse JSON caption
-                caption = _extract_caption(content)
-                results[vpath] = caption
-            else:
-                results[vpath] = None
+    # Run tagger in IMAGE mode (not --video) with xAI batch submit
+    cmd_submit = [
+        python, TAGGER_SCRIPT, prompt_dir,
+        "--taggers", "grok",
+        "--grok_provider", "xai-batch",
+        "--xai_batch_action", "submit",
+        "--xai_batch_state_file", state_file,
+        "--xai_batch_model", xai_model,
+        "--grok_system_prompt_file", sys_prompt_path,
+        "--grok_prompt_file", user_prompt_path,
+        "--xai_batch_no_image",
+        "--force",
+        "--remove_underscore",
+        "--append_tags",
+    ]
+
+    logger.info("submitting grok synthesis via xAI batch...")
+    proc = subprocess.run(cmd_submit, env=env, capture_output=True, text=True)
+    if proc.returncode != 0:
+        logger.error(f"grok submit failed: {proc.stderr[-500:]}")
+        return {vp: None for vp in video_paths}
+
+    # Poll status until done
+    logger.info("waiting for xAI batch to complete...")
+    _wait_for_xai_batch(state_file, xai_api_key)
+
+    # Collect results
+    cmd_collect = [
+        python, TAGGER_SCRIPT, prompt_dir,
+        "--taggers", "grok",
+        "--grok_provider", "xai-batch",
+        "--xai_batch_action", "collect",
+        "--xai_batch_state_file", state_file,
+        "--xai_batch_model", xai_model,
+        "--force",
+        "--remove_underscore",
+    ]
+
+    logger.info("collecting grok results...")
+    proc = subprocess.run(cmd_collect, env=env, capture_output=True, text=True)
+    if proc.returncode != 0:
+        logger.error(f"grok collect failed: {proc.stderr[-500:]}")
+
+    # Read the generated .txt files and map back to original video paths
+    results: Dict[str, Optional[str]] = {}
+    for vpath, img_file in video_to_file.items():
+        txt_path = os.path.splitext(img_file)[0] + ".txt"
+        if os.path.exists(txt_path):
+            with open(txt_path, "r", encoding="utf-8") as f:
+                content = f.read().strip()
+            caption = _extract_caption(content)
+            results[vpath] = caption
+        else:
+            results[vpath] = None
+
+    # Cleanup work dir on success
+    import shutil
+    try:
+        shutil.rmtree(work_dir)
+    except Exception:
+        logger.debug(f"could not remove work dir: {work_dir}")
 
     return results
+
+
+def _create_placeholder_png(path: str):
+    """Create a tiny 1x1 white PNG for use as a placeholder image."""
+    if os.path.exists(path):
+        return
+    from PIL import Image
+    img = Image.new("RGB", (1, 1), (255, 255, 255))
+    img.save(path, "PNG")
 
 
 def _extract_caption(text: str) -> Optional[str]:
@@ -436,7 +481,7 @@ def _wait_for_xai_batch(state_file: str, api_key: str, timeout: int = 7200):
     start = time.time()
     while (time.time() - start) < timeout:
         try:
-            r = req.get(f"{base_url}/v1/batch-jobs/{batch_id}", headers=headers, timeout=30)
+            r = req.get(f"{base_url}/v1/batches/{batch_id}", headers=headers, timeout=30)
             r.raise_for_status()
             data = r.json()
             counters = data.get("state", {})
