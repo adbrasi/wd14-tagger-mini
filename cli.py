@@ -2262,6 +2262,29 @@ def main():
         print_error("Project name is required")
         sys.exit(1)
 
+    # Quick workflow check: Video Caption (Gemini + Grok) works in-place,
+    # no data source needed — just ask for the video directory.
+    early_workflow = ask_choice("What do you want to do?", [
+        "Pre-process dataset (trim to max frames)",
+        "Tag dataset (wd14 / pixai / LLM caption pipeline)",
+        "Full pipeline (preprocess → tag → upload)",
+        "Upload dataset to HuggingFace",
+        "Frame Pair Caption (A→B scene-transition pipeline)",
+        "Video Caption (Gemini + Grok)",
+    ], default=3)
+
+    if early_workflow == 6:
+        # Video Caption works in-place — just ask for the directory
+        video_dir = ask_input("Video directory (where your videos are)", "")
+        if not video_dir or not os.path.isdir(video_dir):
+            print_error(f"Directory not found: {video_dir}")
+            sys.exit(1)
+        print_info(f"Working in-place on: {video_dir}")
+        run_video_caption(video_dir, python)
+        print_section("ALL DONE")
+        print_success(f"Captions written in: {video_dir}")
+        return
+
     # Resolve input source (local / HuggingFace / MEGA)
     default_target = os.path.join(os.path.expanduser("~"), "datasets", project_name)
     input_dir = resolve_input_source(python, default_target=default_target)
@@ -2339,14 +2362,13 @@ def main():
             media_counts = {"images": total_imgs, "videos": total_vids}
             print_info(f"Selected {len(selected_dirs)} folder(s): {media_counts['images']:,} images, {media_counts['videos']:,} videos")
 
-    # What to do?
+    # What to do? (workflow 6 already handled above)
     workflow = ask_choice("What do you want to do?", [
         "Pre-process dataset (trim to max frames)",
         "Tag dataset (wd14 / pixai / LLM caption pipeline)",
         "Full pipeline (preprocess → tag → upload)",
         "Upload dataset to HuggingFace",
         "Frame Pair Caption (A→B scene-transition pipeline)",
-        "Video Caption (Gemini + Grok)",
     ], default=3)
 
     for proc_dir in selected_dirs:
@@ -2375,10 +2397,6 @@ def main():
 
     if workflow == 5:
         run_frame_pair(input_dir, python, project_name)
-
-    if workflow == 6:
-        for proc_dir in selected_dirs:
-            run_video_caption(proc_dir, python)
 
     print_section("ALL DONE")
     print_success(f"Dataset ready at: {input_dir}")
