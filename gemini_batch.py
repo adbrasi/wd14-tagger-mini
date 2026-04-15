@@ -2,14 +2,15 @@
 
 Handles:
 - Video upload via File API
-- Context caching for system prompts (90% token discount)
-- Batch job submission and collection
-- Cleanup of uploaded files and caches
+- Batch job submission and collection (inline requests)
+- Cleanup of uploaded files
+
+Note: Context caching is NOT supported with the Batch API.
+The system prompt is sent inline per request.
 """
 
 from __future__ import annotations
 
-import json
 import logging
 import os
 import time
@@ -18,8 +19,6 @@ from typing import Any, Dict, List, Optional, Tuple
 logger = logging.getLogger(__name__)
 
 DEFAULT_MODEL = "gemini-3.1-flash-lite-preview"
-# Minimum tokens for explicit caching (Flash models)
-MIN_CACHE_TOKENS = 1024
 
 
 def _get_client(api_key: Optional[str] = None):
@@ -90,10 +89,15 @@ def _wait_for_processing(
             try:
                 refreshed = client.files.get(name=fobj.name)
                 state = getattr(refreshed, "state", None)
-                if state and str(state) == "PROCESSING":
+                state_str = str(state) if state else ""
+
+                if state_str == "PROCESSING":
                     still_pending[vpath] = fobj
+                elif state_str == "FAILED":
+                    logger.warning(f"file processing failed for {vpath}, skipping")
+                    del uploaded[vpath]
                 else:
-                    # Update with refreshed object
+                    # SUCCEEDED or other terminal state
                     uploaded[vpath] = refreshed
             except Exception as e:
                 logger.warning(f"error checking file state for {vpath}: {e}")
@@ -128,53 +132,6 @@ def cleanup_files(
 
 
 # -------------------------
-# Context caching
-# -------------------------
-
-def create_system_cache(
-    system_prompt: str,
-    model: str = DEFAULT_MODEL,
-    api_key: Optional[str] = None,
-    ttl: str = "3600s",
-) -> Optional[Any]:
-    """Create a context cache for the system prompt.
-
-    Returns the cache object, or None if caching is not possible
-    (e.g., prompt too short).
-    """
-    from google.genai import types
-
-    client = _get_client(api_key)
-
-    try:
-        cache = client.caches.create(
-            model=f"models/{model}",
-            config=types.CreateCachedContentConfig(
-                display_name="video_caption_system_prompt",
-                system_instruction=system_prompt,
-                ttl=ttl,
-            ),
-        )
-        logger.info(f"created system prompt cache: {cache.name}")
-        return cache
-    except Exception as e:
-        logger.warning(f"context caching failed (will proceed without): {e}")
-        return None
-
-
-def delete_cache(cache, api_key: Optional[str] = None):
-    """Delete a context cache."""
-    if cache is None:
-        return
-    try:
-        client = _get_client(api_key)
-        client.caches.delete(cache.name)
-        logger.debug(f"deleted cache: {cache.name}")
-    except Exception as e:
-        logger.debug(f"failed to delete cache: {e}")
-
-
-# -------------------------
 # Batch submission
 # -------------------------
 
@@ -184,60 +141,44 @@ def submit_batch(
     user_prompt: str,
     model: str = DEFAULT_MODEL,
     api_key: Optional[str] = None,
-    cache=None,
-) -> Tuple[Any, Dict[str, str]]:
+) -> Tuple[Any, List[str]]:
     """Submit a batch job for video understanding.
 
     Args:
         video_file_map: mapping of video_path -> uploaded file object
-        system_prompt: system prompt text (ignored if cache is provided)
-        user_prompt: user prompt template (no placeholders needed)
+        system_prompt: system prompt text
+        user_prompt: user prompt text
         model: Gemini model ID
         api_key: API key
-        cache: optional context cache object
 
     Returns:
-        (batch_job, key_to_video_path mapping)
+        (batch_job, ordered list of video paths matching response order)
     """
-    from google.genai import types
-
     client = _get_client(api_key)
 
-    # Build inline requests
+    # Build inline requests — order is preserved in responses
     inline_requests = []
-    key_map: Dict[str, str] = {}  # request key -> video_path
+    ordered_paths: List[str] = []
 
     for vpath, fobj in video_file_map.items():
-        key = os.path.basename(vpath)
-        # Ensure unique keys
-        if key in key_map:
-            import hashlib
-            uid = hashlib.md5(vpath.encode()).hexdigest()[:8]
-            key = f"{uid}_{key}"
-        key_map[key] = vpath
+        ordered_paths.append(vpath)
 
         request = {
-            "key": key,
-            "request": {
-                "contents": [
-                    {
-                        "role": "user",
-                        "parts": [
-                            {"file_data": {"file_uri": fobj.uri, "mime_type": "video/mp4"}},
-                            {"text": user_prompt},
-                        ],
-                    }
-                ],
+            "contents": [
+                {
+                    "role": "user",
+                    "parts": [
+                        {"file_data": {"file_uri": fobj.uri, "mime_type": "video/mp4"}},
+                        {"text": user_prompt},
+                    ],
+                }
+            ],
+            "config": {
+                "system_instruction": {
+                    "parts": [{"text": system_prompt}]
+                },
             },
         }
-
-        # Add system instruction or cached content
-        if cache is not None:
-            request["request"]["cached_content"] = cache.name
-        else:
-            request["request"]["system_instruction"] = {
-                "parts": [{"text": system_prompt}]
-            }
 
         inline_requests.append(request)
 
@@ -250,7 +191,7 @@ def submit_batch(
     )
 
     logger.info(f"batch submitted: {batch_job.name}")
-    return batch_job, key_map
+    return batch_job, ordered_paths
 
 
 # -------------------------
@@ -300,9 +241,11 @@ def poll_batch(
 
 def collect_results(
     batch_job,
-    key_map: Dict[str, str],
+    ordered_paths: List[str],
 ) -> Dict[str, Optional[str]]:
     """Extract text results from a completed batch job.
+
+    Uses positional mapping — inline responses preserve insertion order.
 
     Returns:
         mapping of video_path -> description text (or None if failed/refused)
@@ -312,8 +255,7 @@ def collect_results(
     state_name = batch_job.state.name if batch_job.state else "UNKNOWN"
     if state_name != "JOB_STATE_SUCCEEDED":
         logger.error(f"batch job did not succeed: {state_name}")
-        # Mark all as failed
-        for vpath in key_map.values():
+        for vpath in ordered_paths:
             results[vpath] = None
         return results
 
@@ -321,33 +263,30 @@ def collect_results(
     dest = getattr(batch_job, "dest", None)
     if dest is None:
         logger.error("batch job has no dest attribute")
-        for vpath in key_map.values():
+        for vpath in ordered_paths:
             results[vpath] = None
         return results
 
     responses = getattr(dest, "inlined_responses", None) or []
 
-    for resp in responses:
-        key = getattr(resp, "key", None)
-        vpath = key_map.get(key)
-        if vpath is None:
-            logger.warning(f"unknown response key: {key}")
-            continue
+    for i, resp in enumerate(responses):
+        if i >= len(ordered_paths):
+            logger.warning(f"more responses ({i + 1}) than requests ({len(ordered_paths)})")
+            break
+
+        vpath = ordered_paths[i]
 
         try:
             response = getattr(resp, "response", None)
             if response is None:
+                # Check for error
+                error = getattr(resp, "error", None)
+                if error:
+                    logger.warning(f"gemini refused/errored for {vpath}: {error}")
                 results[vpath] = None
                 continue
 
-            # Check for errors/refusals
-            error = getattr(resp, "error", None)
-            if error:
-                logger.warning(f"gemini refused/errored for {vpath}: {error}")
-                results[vpath] = None
-                continue
-
-            # Extract text from candidates
+            # Extract text from response
             text = getattr(response, "text", None)
             if text:
                 results[vpath] = text.strip()
@@ -367,8 +306,8 @@ def collect_results(
             logger.warning(f"error extracting response for {vpath}: {e}")
             results[vpath] = None
 
-    # Mark any videos without responses
-    for vpath in key_map.values():
+    # Mark any videos without responses (fewer responses than requests)
+    for vpath in ordered_paths:
         if vpath not in results:
             results[vpath] = None
 
@@ -393,12 +332,14 @@ def run_gemini_video_descriptions(
     on_upload_progress=None,
     on_poll_progress=None,
 ) -> Dict[str, Optional[str]]:
-    """End-to-end: upload videos → cache prompt → batch submit → poll → collect → cleanup.
+    """End-to-end: upload videos → batch submit → poll → collect → cleanup.
 
     Returns mapping of video_path -> description text (None for failures).
     """
     if not video_paths:
         return {}
+
+    results: Dict[str, Optional[str]] = {}
 
     # Step 1: Upload videos
     logger.info(f"uploading {len(video_paths)} videos to Gemini File API...")
@@ -409,31 +350,24 @@ def run_gemini_video_descriptions(
         return {vp: None for vp in video_paths}
 
     try:
-        # Step 2: Create context cache for system prompt
-        cache = create_system_cache(system_prompt, model=model, api_key=api_key)
+        # Step 2: Submit batch (system prompt inline per request)
+        batch_job, ordered_paths = submit_batch(
+            uploaded, system_prompt, user_prompt,
+            model=model, api_key=api_key,
+        )
 
-        try:
-            # Step 3: Submit batch
-            batch_job, key_map = submit_batch(
-                uploaded, system_prompt, user_prompt,
-                model=model, api_key=api_key, cache=cache,
-            )
+        # Step 3: Poll until done
+        batch_job = poll_batch(
+            batch_job, api_key=api_key,
+            poll_interval=poll_interval,
+            on_progress=on_poll_progress,
+        )
 
-            # Step 4: Poll until done
-            batch_job = poll_batch(
-                batch_job, api_key=api_key,
-                poll_interval=poll_interval,
-                on_progress=on_poll_progress,
-            )
+        # Step 4: Collect results
+        results = collect_results(batch_job, ordered_paths)
 
-            # Step 5: Collect results
-            results = collect_results(batch_job, key_map)
-
-        finally:
-            # Step 6: Delete cache
-            delete_cache(cache, api_key=api_key)
     finally:
-        # Step 7: Cleanup uploaded files
+        # Step 5: Cleanup uploaded files
         cleanup_files(uploaded, api_key=api_key)
 
     # Include videos that failed to upload

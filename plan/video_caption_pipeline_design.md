@@ -28,18 +28,17 @@ data_araknideo/
 ### Phase 1: Gemini (Video Understanding)
 
 1. Upload all videos via File API (`client.files.upload`)
-2. Create context cache for system prompt (90% discount on cached tokens)
-3. Submit batch job with all videos + system prompt
-4. Poll until complete
-5. Collect descriptions, track which videos Gemini refused/failed
-6. Cleanup: delete uploaded files + cache
+2. Submit batch job with all videos + system prompt (inline per request)
+3. Poll until complete
+4. Collect descriptions, track which videos Gemini refused/failed
+5. Cleanup: delete uploaded files
 
 **Key decisions:**
-- Use `MEDIA_RESOLUTION_LOW` to reduce tokens (~100 tok/s vs 300)
 - Gemini model: `gemini-3.1-flash-lite-preview`
 - Batch API for 50% discount on tokens
-- Context cache for system prompt (90% discount)
+- System prompt sent inline per request (context caching is NOT supported with Batch API)
 - File API upload handles videos up to 2GB each
+- Positional response mapping (inline responses preserve insertion order)
 
 ### Phase 2: PixAI (5 Keyframe Tags)
 
