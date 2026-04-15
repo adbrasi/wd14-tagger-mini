@@ -89,15 +89,16 @@ def _wait_for_processing(
             try:
                 refreshed = client.files.get(name=fobj.name)
                 state = getattr(refreshed, "state", None)
-                state_str = str(state) if state else ""
+                # Use .name for stable enum comparison (avoids "FileState.ACTIVE" vs "ACTIVE")
+                state_name = state.name if hasattr(state, "name") else str(state or "")
 
-                if state_str == "PROCESSING":
-                    still_pending[vpath] = fobj
-                elif state_str == "FAILED":
+                if state_name == "PROCESSING":
+                    still_pending[vpath] = refreshed  # keep refreshed object for next poll
+                elif state_name == "FAILED":
                     logger.warning(f"file processing failed for {vpath}, skipping")
                     del uploaded[vpath]
                 else:
-                    # SUCCEEDED or other terminal state
+                    # ACTIVE or other terminal state
                     uploaded[vpath] = refreshed
             except Exception as e:
                 logger.warning(f"error checking file state for {vpath}: {e}")
@@ -164,6 +165,9 @@ def submit_batch(
         ordered_paths.append(vpath)
 
         request = {
+            "system_instruction": {
+                "parts": [{"text": system_prompt}]
+            },
             "contents": [
                 {
                     "role": "user",
@@ -173,11 +177,6 @@ def submit_batch(
                     ],
                 }
             ],
-            "config": {
-                "system_instruction": {
-                    "parts": [{"text": system_prompt}]
-                },
-            },
         }
 
         inline_requests.append(request)
@@ -231,7 +230,10 @@ def poll_batch(
 
         time.sleep(poll_interval)
 
-    logger.warning(f"batch poll timed out after {timeout}s")
+    logger.warning(
+        f"batch poll timed out after {timeout}s — batch may still be running on Gemini servers. "
+        f"Uploaded files will NOT be cleaned up to avoid breaking the in-flight batch."
+    )
     return batch_job
 
 
