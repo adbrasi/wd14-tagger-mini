@@ -664,3 +664,70 @@ def run_pipeline(
         on_phase_progress("done", f"{written}/{stats['total']} captions written")
 
     return stats
+
+
+# -------------------------
+# CLI entrypoint
+# -------------------------
+
+def main():
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        description="Video Caption Pipeline: Gemini + PixAI + Grok",
+    )
+    parser.add_argument("input_dir", help="directory containing video files")
+    parser.add_argument("--gemini_api_key", default=os.environ.get("GEMINI_API_KEY", ""),
+                        help="Google AI API key (or set GEMINI_API_KEY env var)")
+    parser.add_argument("--xai_api_key", default=os.environ.get("XAI_API_KEY", ""),
+                        help="xAI API key (or set XAI_API_KEY env var)")
+    parser.add_argument("--gemini_model", default="gemini-3.1-flash-lite-preview",
+                        help="Gemini model ID")
+    parser.add_argument("--xai_model", default="grok-4-1-fast-reasoning",
+                        help="Grok model ID for xAI batch")
+    parser.add_argument("--profile", default="default",
+                        help="prompt profile name (folder under prompts/video-caption/)")
+    parser.add_argument("--batch_size", default="auto",
+                        help="PixAI batch size (int or 'auto')")
+    parser.add_argument("--prepend_text", default="",
+                        help="text to prepend to every .txt output")
+    parser.add_argument("--no_recursive", action="store_true",
+                        help="do not search subdirectories")
+    parser.add_argument("--python", default=None,
+                        help="python executable (default: auto-detect venv)")
+
+    args = parser.parse_args()
+
+    if not args.gemini_api_key:
+        parser.error("Gemini API key required: --gemini_api_key or GEMINI_API_KEY env var")
+    if not args.xai_api_key:
+        parser.error("xAI API key required: --xai_api_key or XAI_API_KEY env var")
+
+    # Auto-detect venv python if not specified
+    python = args.python
+    if python is None:
+        venv_python = os.path.join(SCRIPT_DIR, ".venv", "bin", "python")
+        python = venv_python if os.path.exists(venv_python) else "python"
+
+    def _progress(phase, detail):
+        print(f"[{phase}] {detail}")
+
+    stats = run_pipeline(
+        input_dir=args.input_dir,
+        gemini_api_key=args.gemini_api_key,
+        xai_api_key=args.xai_api_key,
+        python=python,
+        profile=args.profile,
+        gemini_model=args.gemini_model,
+        xai_model=args.xai_model,
+        batch_size=args.batch_size,
+        recursive=not args.no_recursive,
+        prepend_text=args.prepend_text,
+        on_phase_progress=_progress,
+    )
+
+    print(f"\nDone: {stats['captioned']}/{stats['total']} captioned, {stats['failed']} failed")
+
+
+if __name__ == "__main__":
+    main()
