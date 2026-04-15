@@ -283,7 +283,7 @@ def build_grok_requests(
 
         prompt = grok_user_prompt_template
         prompt = prompt.replace("{original_tags}", tags)
-        prompt = prompt.replace("{gemini_description}", gemini_desc or "(not available)")
+        prompt = prompt.replace("{source_description}", gemini_desc or "(not available)")
         for i in range(NUM_KEYFRAMES):
             key = f"frame_{i + 1}"
             prompt = prompt.replace(f"{{pixai_frame_{i + 1}}}", pixai.get(key, "(no tags)"))

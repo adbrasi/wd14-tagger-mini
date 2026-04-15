@@ -1,8 +1,8 @@
 ORIGINAL_TAGS:
 {original_tags}
 
-GEMINI_DESCRIPTION:
-{gemini_description}
+SOURCE_DESCRIPTION:
+{source_description}
 
 PIXAI_FRAME_1 (0%):
 {pixai_frame_1}
