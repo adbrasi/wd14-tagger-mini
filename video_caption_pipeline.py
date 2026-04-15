@@ -116,8 +116,6 @@ def extract_keyframes(
 
     Returns mapping of video_path -> [frame_0.jpg, frame_1.jpg, ..., frame_4.jpg]
     """
-    from PIL import Image
-
     result: Dict[str, List[str]] = {}
 
     def _extract_single(vpath: str) -> Tuple[str, List[str]]:
@@ -299,9 +297,6 @@ def run_grok_phase(
     grok_system_prompt: str,
     xai_api_key: str,
     xai_model: str = "grok-4-1-fast-reasoning",
-    input_dir: str = ".",
-    python: str = "python",
-    prepend_text: str = "",
 ) -> Dict[str, Optional[str]]:
     """Submit Grok synthesis via xAI Batch API (direct calls, no subprocess).
 
@@ -650,9 +645,6 @@ def run_pipeline(
         grok_system_prompt,
         xai_api_key=xai_api_key,
         xai_model=xai_model,
-        input_dir=input_dir,
-        python=python,
-        prepend_text=prepend_text,
     )
 
     # ── Write output ──

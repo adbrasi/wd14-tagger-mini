@@ -228,6 +228,10 @@ def poll_batch(
                           "JOB_STATE_CANCELLED", "JOB_STATE_EXPIRED"):
             return batch_job
 
+        known_running = ("JOB_STATE_PENDING", "JOB_STATE_RUNNING")
+        if state_name not in known_running:
+            logger.warning(f"unrecognized batch state: {state_name}")
+
         time.sleep(poll_interval)
 
     logger.warning(
