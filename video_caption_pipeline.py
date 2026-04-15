@@ -355,13 +355,12 @@ def run_grok_phase(
 
     # Step 2: Submit requests (text-only, no images)
     ordered_paths: List[str] = []
-    req_ids: Dict[str, str] = {}  # req_id -> video_path
 
     batch_requests = []
     for vpath, user_prompt in grok_prompts.items():
         ordered_paths.append(vpath)
         req_entry = {
-            "custom_id": hashlib.sha1(vpath.encode()).hexdigest()[:16],
+            "custom_id": hashlib.sha1(vpath.encode()).hexdigest(),
             "params": {
                 "model": xai_model,
                 "messages": [
@@ -398,7 +397,8 @@ def run_grok_phase(
     while (time.time() - start) < timeout:
         try:
             status = _api("GET", f"/v1/batches/{batch_id}")
-            counters = status.get("state", {})
+            # Counters may be nested under "state" or at top level
+            counters = status.get("state") or status
             total = int(counters.get("num_requests", 0) or 0)
             pending = int(counters.get("num_pending", 0) or 0)
             success = int(counters.get("num_success", 0) or 0)
@@ -408,7 +408,7 @@ def run_grok_phase(
             pct = (done / total * 100) if total else 0
             logger.info(f"xAI batch: {done}/{total} ({pct:.1f}%) pending={pending}")
 
-            if pending <= 0 and total > 0:
+            if pending <= 0 and total >= submitted:
                 logger.info("xAI batch complete")
                 break
 
@@ -431,7 +431,7 @@ def run_grok_phase(
     logger.info("collecting xAI batch results...")
     results: Dict[str, Optional[str]] = {}
     custom_id_to_path = {
-        hashlib.sha1(vp.encode()).hexdigest()[:16]: vp for vp in ordered_paths
+        hashlib.sha1(vp.encode()).hexdigest(): vp for vp in ordered_paths
     }
 
     page_token = None
