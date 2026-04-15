@@ -303,137 +303,194 @@ def run_grok_phase(
     python: str = "python",
     prepend_text: str = "",
 ) -> Dict[str, Optional[str]]:
-    """Submit Grok synthesis via xAI Batch API.
+    """Submit Grok synthesis via xAI Batch API (direct calls, no subprocess).
 
-    Creates a persistent work directory (inside the dataset) with image files
-    and pre-built prompts, then calls the tagger in xAI batch mode.
-    The directory persists so collect can resolve paths after submit.
+    Sends text-only requests (no images) with the pre-built prompts directly
+    to the xAI batch API, bypassing the tagger entirely.
 
     Returns mapping of video_path -> final caption.
     """
-    # Persistent work dir inside dataset (survives process restarts for resume)
-    work_dir = os.path.join(os.path.abspath(input_dir), ".vcap_grok_work")
-    os.makedirs(work_dir, exist_ok=True)
+    import requests as req
+    import time
 
-    # Write system prompt
-    sys_prompt_path = os.path.join(work_dir, "system_prompt.md")
-    with open(sys_prompt_path, "w", encoding="utf-8") as f:
-        f.write(grok_system_prompt)
+    if not xai_api_key:
+        raise ValueError("xAI API key is required for Grok phase")
 
-    # Write user prompt template — the tagger expects {tags} in the user prompt.
-    # We pass the full rendered prompt as "tags", so the template is just "{tags}".
-    user_prompt_path = os.path.join(work_dir, "user_prompt.md")
-    with open(user_prompt_path, "w", encoding="utf-8") as f:
-        f.write("{tags}")
+    base_url = "https://api.x.ai"
+    headers = {
+        "Authorization": f"Bearer {xai_api_key}",
+        "Content-Type": "application/json",
+    }
 
-    # Write per-video files: a .txt with the rendered prompt and a .png placeholder
-    # We use image mode (not --video) to avoid the tagger extracting frames.
-    # Each "image" is a tiny 1x1 PNG so the tagger can glob it.
-    prompt_dir = os.path.join(work_dir, "data")
-    os.makedirs(prompt_dir, exist_ok=True)
+    def _api(method, path, payload=None, params=None):
+        for attempt in range(6):
+            try:
+                r = req.request(
+                    method, f"{base_url}{path}",
+                    headers=headers, json=payload, params=params, timeout=120,
+                )
+                if r.status_code == 429 or r.status_code >= 500:
+                    wait = min(2 ** attempt, 30)
+                    logger.warning(f"xAI {r.status_code} on {path}, retry in {wait}s...")
+                    time.sleep(wait)
+                    continue
+                r.raise_for_status()
+                return r.json()
+            except req.exceptions.RequestException as e:
+                if attempt >= 5:
+                    raise
+                logger.warning(f"xAI request error: {e}, retrying...")
+                time.sleep(min(2 ** attempt, 30))
+        return {}
 
-    _create_placeholder_png(os.path.join(work_dir, "_placeholder.png"))
-
-    video_to_file: Dict[str, str] = {}
-    for vpath, prompt_text in grok_prompts.items():
-        stem = Path(vpath).stem
-        uid = hashlib.md5(vpath.encode()).hexdigest()[:8]
-        base_name = f"{stem}_{uid}"
-
-        # Write prompt as .txt (loaded as existing tags by the tagger)
-        txt_file = os.path.join(prompt_dir, f"{base_name}.txt")
-        with open(txt_file, "w", encoding="utf-8") as f:
-            f.write(prompt_text)
-
-        # Create a placeholder image (tagger needs an image file to glob)
-        img_file = os.path.join(prompt_dir, f"{base_name}.png")
-        if not os.path.exists(img_file):
-            os.link(os.path.join(work_dir, "_placeholder.png"), img_file)
-
-        video_to_file[vpath] = img_file
-
-    # Build xAI batch state file path
-    state_file = os.path.join(
-        os.path.dirname(os.path.abspath(input_dir)),
-        f".xai_batch_state_vcap_{hashlib.md5(input_dir.encode()).hexdigest()[:10]}.json",
-    )
-
-    env = os.environ.copy()
-    if xai_api_key:
-        env["XAI_API_KEY"] = xai_api_key
-
-    # Run tagger in IMAGE mode (not --video) with xAI batch submit
-    cmd_submit = [
-        python, TAGGER_SCRIPT, prompt_dir,
-        "--taggers", "grok",
-        "--grok_provider", "xai-batch",
-        "--xai_batch_action", "submit",
-        "--xai_batch_state_file", state_file,
-        "--xai_batch_model", xai_model,
-        "--grok_system_prompt_file", sys_prompt_path,
-        "--grok_prompt_file", user_prompt_path,
-        "--xai_batch_no_image",
-        "--force",
-        "--remove_underscore",
-        "--append_tags",
-    ]
-
-    logger.info("submitting grok synthesis via xAI batch...")
-    proc = subprocess.run(cmd_submit, env=env, capture_output=True, text=True)
-    if proc.returncode != 0:
-        logger.error(f"grok submit failed: {proc.stderr[-500:]}")
+    # Step 1: Create batch
+    logger.info("creating xAI batch...")
+    batch_data = _api("POST", "/v1/batches", {"name": f"vcap_grok_{int(time.time())}"})
+    batch_id = batch_data.get("batch_id")
+    if not batch_id:
+        logger.error(f"failed to create xAI batch: {batch_data}")
         return {vp: None for vp in video_paths}
 
-    # Poll status until done
-    logger.info("waiting for xAI batch to complete...")
-    _wait_for_xai_batch(state_file, xai_api_key)
+    logger.info(f"xAI batch created: {batch_id}")
 
-    # Collect results
-    cmd_collect = [
-        python, TAGGER_SCRIPT, prompt_dir,
-        "--taggers", "grok",
-        "--grok_provider", "xai-batch",
-        "--xai_batch_action", "collect",
-        "--xai_batch_state_file", state_file,
-        "--xai_batch_model", xai_model,
-        "--force",
-        "--remove_underscore",
-    ]
+    # Step 2: Submit requests (text-only, no images)
+    ordered_paths: List[str] = []
+    req_ids: Dict[str, str] = {}  # req_id -> video_path
 
-    logger.info("collecting grok results...")
-    proc = subprocess.run(cmd_collect, env=env, capture_output=True, text=True)
-    if proc.returncode != 0:
-        logger.error(f"grok collect failed: {proc.stderr[-500:]}")
+    batch_requests = []
+    for vpath, user_prompt in grok_prompts.items():
+        ordered_paths.append(vpath)
+        req_entry = {
+            "custom_id": hashlib.sha1(vpath.encode()).hexdigest()[:16],
+            "params": {
+                "model": xai_model,
+                "messages": [
+                    {"role": "system", "content": grok_system_prompt},
+                    {"role": "user", "content": user_prompt},
+                ],
+                "response_format": {"type": "json_object"},
+            },
+        }
+        batch_requests.append(req_entry)
 
-    # Read the generated .txt files and map back to original video paths
+    # Submit in chunks of 500
+    chunk_size = 500
+    submitted = 0
+    for i in range(0, len(batch_requests), chunk_size):
+        chunk = batch_requests[i : i + chunk_size]
+        try:
+            _api("POST", f"/v1/batches/{batch_id}/requests", {"batch_requests": chunk})
+            submitted += len(chunk)
+            logger.info(f"submitted {submitted}/{len(batch_requests)} requests")
+        except Exception as e:
+            logger.error(f"failed to submit chunk at offset {i}: {e}")
+
+    if submitted == 0:
+        logger.error("no requests were submitted")
+        return {vp: None for vp in video_paths}
+
+    # Step 3: Poll until done
+    logger.info(f"polling xAI batch {batch_id}...")
+    start = time.time()
+    timeout = 7200
+    tail_start = None
+
+    while (time.time() - start) < timeout:
+        try:
+            status = _api("GET", f"/v1/batches/{batch_id}")
+            counters = status.get("state", {})
+            total = int(counters.get("num_requests", 0) or 0)
+            pending = int(counters.get("num_pending", 0) or 0)
+            success = int(counters.get("num_success", 0) or 0)
+            errors = int(counters.get("num_error", 0) or 0)
+            done = success + errors
+
+            pct = (done / total * 100) if total else 0
+            logger.info(f"xAI batch: {done}/{total} ({pct:.1f}%) pending={pending}")
+
+            if pending <= 0 and total > 0:
+                logger.info("xAI batch complete")
+                break
+
+            # Tail timeout: 2 min for stragglers at 99%+
+            if total > 0 and pct >= 99.0 and pending > 0:
+                if tail_start is None:
+                    tail_start = time.time()
+                elif time.time() - tail_start >= 120:
+                    logger.warning(f"tail timeout: {pending} straggler(s), moving on")
+                    break
+            else:
+                tail_start = None
+
+        except Exception as e:
+            logger.warning(f"poll error: {e}")
+
+        time.sleep(20)
+
+    # Step 4: Collect results
+    logger.info("collecting xAI batch results...")
     results: Dict[str, Optional[str]] = {}
-    for vpath, img_file in video_to_file.items():
-        txt_path = os.path.splitext(img_file)[0] + ".txt"
-        if os.path.exists(txt_path):
-            with open(txt_path, "r", encoding="utf-8") as f:
-                content = f.read().strip()
-            caption = _extract_caption(content)
-            results[vpath] = caption
-        else:
-            results[vpath] = None
+    custom_id_to_path = {
+        hashlib.sha1(vp.encode()).hexdigest()[:16]: vp for vp in ordered_paths
+    }
 
-    # Cleanup work dir on success
-    import shutil
-    try:
-        shutil.rmtree(work_dir)
-    except Exception:
-        logger.debug(f"could not remove work dir: {work_dir}")
+    page_token = None
+    collected = 0
+
+    while True:
+        params = {"limit": "100"}
+        if page_token:
+            params["after"] = page_token
+
+        try:
+            page = _api("GET", f"/v1/batches/{batch_id}/requests", params=params)
+        except Exception as e:
+            logger.error(f"collect error: {e}")
+            break
+
+        items = page.get("data", [])
+        if not items:
+            break
+
+        for item in items:
+            custom_id = item.get("custom_id", "")
+            vpath = custom_id_to_path.get(custom_id)
+            if vpath is None:
+                continue
+
+            response = item.get("response", {})
+            status_code = response.get("status_code", 0)
+
+            if status_code != 200:
+                logger.warning(f"grok error for {vpath}: status {status_code}")
+                results[vpath] = None
+                continue
+
+            # Extract caption from response body
+            body = response.get("body", {})
+            choices = body.get("choices", [])
+            if choices:
+                content = choices[0].get("message", {}).get("content", "")
+                caption = _extract_caption(content)
+                results[vpath] = caption
+                collected += 1
+            else:
+                results[vpath] = None
+
+        # Pagination
+        if page.get("has_more"):
+            page_token = items[-1].get("id")
+        else:
+            break
+
+    logger.info(f"collected {collected}/{len(ordered_paths)} captions from xAI batch")
+
+    # Mark missing
+    for vp in video_paths:
+        if vp not in results:
+            results[vp] = None
 
     return results
-
-
-def _create_placeholder_png(path: str):
-    """Create a tiny 1x1 white PNG for use as a placeholder image."""
-    if os.path.exists(path):
-        return
-    from PIL import Image
-    img = Image.new("RGB", (1, 1), (255, 255, 255))
-    img.save(path, "PNG")
 
 
 def _extract_caption(text: str) -> Optional[str]:
@@ -457,48 +514,6 @@ def _extract_caption(text: str) -> Optional[str]:
         return text
 
     return None
-
-
-def _wait_for_xai_batch(state_file: str, api_key: str, timeout: int = 7200):
-    """Poll xAI batch status until done."""
-    import time
-
-    if not os.path.exists(state_file):
-        return
-
-    with open(state_file, "r", encoding="utf-8") as f:
-        state = json.load(f)
-
-    batch_id = state.get("batch_id")
-    if not batch_id:
-        return
-
-    import requests as req
-
-    base_url = "https://api.x.ai"
-    headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
-
-    start = time.time()
-    while (time.time() - start) < timeout:
-        try:
-            r = req.get(f"{base_url}/v1/batches/{batch_id}", headers=headers, timeout=30)
-            r.raise_for_status()
-            data = r.json()
-            counters = data.get("state", {})
-            total = int(counters.get("num_requests", 0) or 0)
-            pending = int(counters.get("num_pending", 0) or 0)
-
-            if pending <= 0 and total > 0:
-                logger.info(f"xAI batch complete: {total} requests done")
-                return
-
-            logger.debug(f"xAI batch: {total - pending}/{total} done, {pending} pending")
-        except Exception as e:
-            logger.warning(f"xAI status check error: {e}")
-
-        time.sleep(20)
-
-    logger.warning(f"xAI batch timed out after {timeout}s")
 
 
 # -------------------------
@@ -582,11 +597,21 @@ def run_pipeline(
     if on_phase_progress:
         on_phase_progress("gemini", f"processing {len(video_paths)} videos...")
 
+    def _on_upload(done, total):
+        if on_phase_progress:
+            on_phase_progress("gemini_upload", f"uploading {done}/{total} videos...")
+
+    def _on_poll(state_name, batch_job):
+        if on_phase_progress:
+            on_phase_progress("gemini_poll", f"batch state: {state_name}")
+
     gemini_results = run_gemini_phase(
         video_paths,
         gemini_api_key=gemini_api_key,
         profile=profile,
         model=gemini_model,
+        on_upload_progress=_on_upload,
+        on_poll_progress=_on_poll,
     )
 
     gemini_ok = sum(1 for v in gemini_results.values() if v is not None)

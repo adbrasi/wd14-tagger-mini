@@ -2030,6 +2030,10 @@ def run_video_caption(input_dir: str, python: str):
         if phase == "gemini":
             print_section("PHASE 1: GEMINI (VIDEO UNDERSTANDING)")
             print_info(detail)
+        elif phase == "gemini_upload":
+            print_info(detail)
+        elif phase == "gemini_poll":
+            print_info(detail)
         elif phase == "gemini_done":
             print_success(f"Gemini: {detail}")
         elif phase == "pixai":
