@@ -1244,6 +1244,93 @@ def call_openrouter(
     return None
 
 
+def call_xai_sync(
+    api_key: str,
+    model: str,
+    system_prompt: str,
+    user_prompt: str,
+    image_data_uris: List[str],
+    base_url: str = XAI_API_BASE_URL,
+    max_retries: int = 3,
+    json_mode: bool = True,
+) -> Optional[str]:
+    """Call xAI sync chat completions API (no batch discount, OpenAI-compatible).
+
+    Used as a fallback when xAI Batch API is too slow. Mirrors call_openrouter
+    structure but targets api.x.ai directly. Skips OpenRouter-only features
+    (response-healing plugin, OpenRouter `reasoning` field shape).
+    """
+    url = f"{base_url.rstrip('/')}/v1/chat/completions"
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+    }
+
+    content_parts: List[Dict] = [{"type": "text", "text": user_prompt}]
+    for uri in image_data_uris:
+        content_parts.append({"type": "image_url", "image_url": {"url": uri, "detail": "high"}})
+
+    payload: Dict = {
+        "model": model,
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": content_parts},
+        ],
+        "max_tokens": 1024,
+    }
+
+    # grok-4 (the base model) rejects reasoning_effort; reasoning-flavored variants accept it.
+    if "reasoning" in model.lower() or "fast" in model.lower():
+        payload["reasoning_effort"] = "low"
+
+    if json_mode:
+        payload["response_format"] = CAPTION_JSON_SCHEMA
+
+    for attempt in range(max_retries + 1):
+        try:
+            resp = requests.post(url, headers=headers, json=payload, timeout=120)
+
+            if resp.status_code == 429 or resp.status_code >= 500:
+                wait = min(2 ** attempt * 2, 30)
+                logger.warning(f"xAI sync {resp.status_code} (attempt {attempt + 1}), retrying in {wait}s...")
+                time.sleep(wait)
+                continue
+
+            if 400 <= resp.status_code < 500 and resp.status_code != 429:
+                logger.error(f"xAI sync client error {resp.status_code}: {resp.text[:300]}")
+                return None
+
+            resp.raise_for_status()
+            data = resp.json()
+
+            if "choices" not in data or not data["choices"]:
+                logger.error(f"xAI sync response missing 'choices': {json.dumps(data)[:500]}")
+                return None
+            choice = data["choices"][0]
+            content = choice.get("message", {}).get("content")
+            if not content:
+                if attempt < max_retries:
+                    wait = min(2 ** attempt * 2, 30)
+                    logger.warning(f"xAI sync empty content, retrying in {wait}s (attempt {attempt + 1})...")
+                    time.sleep(wait)
+                    continue
+                logger.error(f"xAI sync empty content after {max_retries + 1} attempts: {json.dumps(data)[:500]}")
+                return None
+            return content.strip()
+        except requests.exceptions.RequestException as e:
+            logger.warning(f"xAI sync API error (attempt {attempt + 1}/{max_retries + 1}): {e}")
+            if attempt < max_retries:
+                wait = min(2 ** attempt * 2, 30)
+                time.sleep(wait)
+            else:
+                logger.error(f"xAI sync API failed after {max_retries + 1} attempts")
+                return None
+        except (KeyError, IndexError, TypeError) as e:
+            logger.error(f"xAI sync response parse error: {e}")
+            return None
+    return None
+
+
 def parse_grok_json_output(raw: str) -> Optional[Dict]:
     """Parse JSON output from grok, handling markdown code blocks and edge cases."""
     text = raw.strip()
@@ -1282,6 +1369,8 @@ def _grok_single_task(
     tags_str: str,
     existing_context_text: Optional[str] = None,
     extra_image_paths: Optional[List[str]] = None,
+    provider: str = "openrouter",
+    xai_base_url: str = XAI_API_BASE_URL,
 ) -> Tuple[str, Optional[str]]:
     """Process a single image through grok. Returns (image_path, caption_or_none).
 
@@ -1312,7 +1401,10 @@ def _grok_single_task(
         existing_context_text,
         template_name=f"user prompt for {image_path}",
     )
-    raw = call_openrouter(api_key, model, system_prompt, user_prompt, image_data_uris)
+    if provider == "xai-sync":
+        raw = call_xai_sync(api_key, model, system_prompt, user_prompt, image_data_uris, base_url=xai_base_url)
+    else:
+        raw = call_openrouter(api_key, model, system_prompt, user_prompt, image_data_uris)
 
     if not raw:
         return image_path, None
@@ -2367,14 +2459,24 @@ def run_grok(
             frame_to_video=frame_to_video or {},
         )
 
-    api_key = args.grok_api_key
-    if not api_key:
-        raise ValueError(
-            "OpenRouter API key is required for grok tagger. "
-            "Set OPENROUTER_API_KEY env var or pass --grok_api_key."
-        )
+    is_xai_sync = args.grok_provider == "xai-sync"
+    if is_xai_sync:
+        api_key = args.xai_api_key
+        if not api_key:
+            raise ValueError(
+                "xAI API key is required for grok provider 'xai-sync'. "
+                "Set XAI_API_KEY env var or pass --xai_api_key."
+            )
+        model = getattr(args, "xai_sync_model", None) or DEFAULT_XAI_BATCH_MODEL
+    else:
+        api_key = args.grok_api_key
+        if not api_key:
+            raise ValueError(
+                "OpenRouter API key is required for grok tagger. "
+                "Set OPENROUTER_API_KEY env var or pass --grok_api_key."
+            )
+        model = args.grok_model
 
-    model = args.grok_model
     system_prompt = get_system_prompt(args)
     user_prompt_template = get_user_prompt_template(args)
     max_workers = args.grok_concurrency
@@ -2407,6 +2509,8 @@ def run_grok(
                 tags_str,
                 existing_context_map.get(image_path),
                 extras,
+                args.grok_provider,
+                getattr(args, "xai_api_base_url", XAI_API_BASE_URL),
             )
             futures[future] = image_path
 
@@ -3156,7 +3260,8 @@ def setup_parser() -> argparse.ArgumentParser:
 
     # Grok (OpenRouter) options
     parser.add_argument("--grok_api_key", type=str, default=None, help="OpenRouter API key (or set OPENROUTER_API_KEY env)")
-    parser.add_argument("--grok_provider", type=str, choices=["openrouter", "xai-batch"], default="openrouter")
+    parser.add_argument("--grok_provider", type=str, choices=["openrouter", "xai-batch", "xai-sync"], default="openrouter")
+    parser.add_argument("--xai_sync_model", type=str, default=DEFAULT_XAI_BATCH_MODEL, help="model ID for xAI native sync chat completions (xai-sync provider)")
     parser.add_argument("--grok_model", type=str, default=DEFAULT_GROK_MODEL, help="OpenRouter model ID")
     parser.add_argument("--grok_system_prompt_file", type=str, default=None, help="path to system prompt .md file")
     parser.add_argument("--grok_prompt_file", type=str, default=None, help="path to user prompt template .md file")
