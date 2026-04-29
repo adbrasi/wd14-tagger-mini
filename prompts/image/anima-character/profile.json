@@ -1,0 +1,17 @@
+{
+  "display_name": "anima-character",
+  "description": "Anima (Cosmos-Predict2 + Qwen3) character LoRA — 5-section official format (tdrussell + lilting v4 validated). Quality anchor + NL paragraph + booru tags. Preserves Qwen3 causal-attention front-loading.",
+  "variables": [
+    {
+      "name": "character_name",
+      "prompt": "Trigger/name do personagem (ex: kanachan, makima, original_kira)",
+      "required": true
+    },
+    {
+      "name": "series_name",
+      "prompt": "Nome da série (deixe vazio para personagem original)",
+      "required": false,
+      "default": ""
+    }
+  ]
+}

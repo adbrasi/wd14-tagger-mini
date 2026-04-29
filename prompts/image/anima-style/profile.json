@@ -1,11 +1,17 @@
 {
   "display_name": "anima-style",
-  "description": "Preset generico para datasets do Anima: pergunta o trigger/estilo e gera prompt hibrido booru + linguagem natural.",
+  "description": "Anima (Cosmos-Predict2 + Qwen3) STYLE LoRA — tdrussell Greg-Rutkowski pattern. Caption begins with @style anchor + quality prefix; rest is natural-language scene description. Use this when training a style LoRA (artist look, screencap aesthetic, painterly aesthetic, etc.) on Anima.",
   "variables": [
     {
       "name": "style_name",
-      "prompt": "Nome/trigger do estilo para o dataset Anima",
+      "prompt": "Style anchor (será prefixado com @, ex: 'greg rutkowski' vira '@greg rutkowski.', ou 'anime screencap style')",
       "required": true
+    },
+    {
+      "name": "use_at_prefix",
+      "prompt": "Adicionar '@' no início do trigger? (yes para artistas, no para estilos genéricos como 'anime screencap style')",
+      "required": false,
+      "default": "yes"
     }
   ]
 }
