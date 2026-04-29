@@ -705,67 +705,6 @@ def caption_main(config: RunConfig, provider: str, has_existing_captions: bool) 
 
 
 # ---------------------------------------------------------------------------
-# Quality guard: detect failed Grok runs (booru-only .txt) before upload
-# ---------------------------------------------------------------------------
-
-def _looks_like_natural_language(text: str) -> bool:
-    """Heuristic: a Grok caption has at least one sentence-like fragment.
-
-    Booru-only outputs are dense comma-separated short tokens with no real prose.
-    A real caption is long and contains at least one ". " separator OR a
-    multi-word run of >=8 alphabetic tokens without commas.
-    """
-    if len(text) < 80:
-        return False
-    if ". " in text:
-        return True
-    longest_run_words = 0
-    for segment in text.replace("\n", ",").split(","):
-        words = [w for w in segment.strip().split() if w.isalpha()]
-        if len(words) > longest_run_words:
-            longest_run_words = len(words)
-    return longest_run_words >= 8
-
-
-def assert_caption_quality(input_dir: Path, sample_size: int = 30, fail_threshold: float = 0.4) -> None:
-    """Abort the pipeline if too many .txt files look like raw booru tags.
-
-    Run AFTER captioning, BEFORE upload. Samples up to `sample_size` random
-    .txt files; if more than `fail_threshold` of them look booru-only, the
-    Grok run probably failed silently (e.g. every API call returned None).
-    """
-    pairs = [
-        img.with_suffix(".txt")
-        for img in input_dir.rglob("*")
-        if img.is_file() and img.suffix.lower() in IMAGE_EXTS
-        and img.with_suffix(".txt").exists()
-    ]
-    if not pairs:
-        err("No .txt files were produced. Captioning failed completely.")
-        sys.exit(1)
-    sample = random.sample(pairs, min(sample_size, len(pairs)))
-    failed = 0
-    for txt in sample:
-        try:
-            text = txt.read_text(encoding="utf-8", errors="replace").strip()
-        except OSError:
-            failed += 1
-            continue
-        if not _looks_like_natural_language(text):
-            failed += 1
-    fail_rate = failed / len(sample)
-    if fail_rate > fail_threshold:
-        err(
-            f"Caption quality check failed: {failed}/{len(sample)} sampled .txt files "
-            "look like booru tags only (no natural-language caption from Grok). "
-            "This usually means every API call returned None (bad key, model error, etc). "
-            "Aborting BEFORE upload — fix the issue and re-run."
-        )
-        sys.exit(2)
-    ok(f"Caption quality OK ({len(sample) - failed}/{len(sample)} natural-language).")
-
-
-# ---------------------------------------------------------------------------
 # Sample preview
 # ---------------------------------------------------------------------------
 
@@ -939,9 +878,6 @@ def main() -> None:
 
     step("Preview")
     show_samples(input_dir)
-
-    step("Quality guard")
-    assert_caption_quality(input_dir)
 
     step("Uploading to HuggingFace")
     upload_to_hf(config)

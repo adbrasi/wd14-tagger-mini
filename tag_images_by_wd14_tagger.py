@@ -1286,7 +1286,12 @@ def call_xai_sync(
     # We omit it entirely. If a model needs it later, expose a CLI flag.
 
     if json_mode:
-        payload["response_format"] = CAPTION_JSON_SCHEMA
+        # Plain json_object instead of strict json_schema. xAI reasoning models
+        # treat the strict CAPTION_JSON_SCHEMA pathologically — they collapse
+        # the caption field to a comma-separated tag dump just to satisfy the
+        # required keys. The simpler json_object lets the system prompt drive
+        # the format (matches the dashboard request that works).
+        payload["response_format"] = {"type": "json_object"}
 
     for attempt in range(max_retries + 1):
         try:
