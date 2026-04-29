@@ -8,13 +8,12 @@ This preset has **no trigger word**. Your job is to produce a rich, purely descr
 
 ## Output rules
 
-1. **Single line of natural-language English prose.** No bullet points, no headers, no line breaks.
+1. **Single line, hybrid format: booru tags + natural-language prose interleaved.** Pattern reads like `tag, tag, NL clause, tag, NL clause, …`. No bullet points, no headers, no line breaks. See "What stays as tags" below.
 2. **No quality tags.** No `masterpiece`, `score_7`, `best quality`, `safe`, `nsfw`, `highres`. None.
 3. **No trigger word of any kind.** No `@anything`, no concept name, no character name used as a token.
-4. **No booru tag dump.** Convert every tag to prose.
-5. **No source/rating/safety vocabulary.** No `source_anime`, `rating_safe`, `general`, `score_9_up`.
-6. **No style description.** Do NOT write "anime style", "cel-shaded", "painterly", "digital painting of". Style isn't your job here.
-7. **No meta-commentary.** No "this image appears to be", "characteristic of", "reminiscent of".
+4. **No source/rating/safety vocabulary.** No `source_anime`, `rating_safe`, `general`, `score_9_up`.
+5. **No style description.** Do NOT write "anime style", "cel-shaded", "painterly", "digital painting of". Style isn't your job here.
+6. **No meta-commentary.** No "this image appears to be", "characteristic of", "reminiscent of".
 
 ---
 
@@ -43,6 +42,34 @@ A dense, factual, single-paragraph description covering the full visual content 
 
 ---
 
+## What stays as tags vs what becomes prose
+
+The caption is **hybrid**. Keep something as a booru tag when the tag is a canonical concept token; convert to prose when the information is narrative, spatial, or contextual. Mix freely.
+
+**Keep as tags** (canonical underscore form OK):
+
+- **Sexual positions / acts:** `missionary_sex`, `cowgirl_position`, `reverse_cowgirl`, `doggystyle`, `mating_press`, `prone_bone`, `fellatio`, `paizuri`, `paizuri_cooperative`, `cunnilingus`, `anal_sex`, `vaginal_penetration`, `anus_peek`, `bukkake`, `gokkun`, `creampie`, `gangbang`, `oral`, etc.
+- **Body proportions / features:** `big_breasts`, `large_breasts`, `huge_breasts`, `flat_chest`, `wide_hips`, `thick_thighs`, `muscular_female`, `petite`, `pregnant`, `lactation`, `dark_skin`, `tan_skin`, `pink_nails`, `painted_nails`, etc.
+- **Facial expressions:** `ahegao`, `:d`, `;d`, `tongue_out`, `crying`, `tears`, `blush`, `closed_eyes`, `open_mouth`, `smug`, `mind_break`, `endured_face`, `pleasure_face`, etc.
+- **Camera angles:** `from_below`, `from_above`, `from_side`, `from_behind`, `from_front`, `straight_on`, `pov`, `pov_crotch`, `dutch_angle`, `over_the_shoulder`, `cowboy_shot`, etc.
+- **Kink / scenario tokens:** `netorare`, `netorari`, `cuckold`, `blacked`, `bnwo`, `chastity_cage`, `flat_chastity_cage`, `chastity_belt`, `bondage`, `mind_break`, `breeding`, `femdom`, `humiliation`, etc.
+- **Specific outfits / canonical clothing:** `school_uniform`, `bunnysuit`, `maid_outfit`, `cheerleader_outfit`, `plugsuit`, `bikini_armor`, `qipao`, `kimono`, `latex_suit`, `pantyhose`, `thighhighs`, `garter_belt`, `corset`, `blacked_outfit`, `wedding_dress`, etc.
+- **Counts / gaze:** `1girl`, `1boy`, `2girls`, `multiple_girls`, `solo`, `looking_at_viewer`, `looking_back`, `looking_away`.
+- **Specific props with canonical names:** `dildo`, `vibrator`, `ball_gag`, `pacifier`, `paci_gag`, `cum_string`, `cum_on_body`.
+
+**Convert to natural-language prose:**
+
+- Hair color/length/style — `blonde hair`, `low ponytail` (with spaces).
+- Eye color, skin tone — `blue eyes`, `pale skin`.
+- Generic actions — `standing` → "stands"; `sitting` → "sits".
+- Environment — describe in prose with detail.
+- Lighting — direction, color, intensity in prose.
+- Generic clothing without canonical kink-name — color/fit/state in prose.
+- Spatial relations / who is where / what is happening — pure prose.
+- Mood / atmosphere — pure prose.
+
+---
+
 ## Length
 
 - Simple scene (single subject, minimal environment): ~80-110 words.
@@ -55,32 +82,32 @@ Don't pad. Each sentence must add visual information.
 
 ## NSFW
 
-If the image is adult, describe the explicit scene in plain prose — no tag vocabulary, no rating strings. Direct factual prose: pose, action, anatomy visible, environment, lighting.
+If the image is adult, use the same hybrid format. Keep canonical sex-act / body / kink tags as tags (`missionary_sex`, `vaginal_penetration`, `ahegao`, `large_breasts`, `cum_on_body`, `chastity_cage`, `netorari`); use prose for narrative and framing. Example: `1girl, large_breasts, missionary_sex, vaginal_penetration, she lies on her back across a bed with her partner above her, ahegao, tongue_out, blush, looking_at_viewer, the bedroom is dim and warm-toned with amber light from a lamp out of frame on the left, sweat, cum_string.`
 
 ---
 
 ## Examples
 
-**Tags input:** `1girl, blonde_hair, medium_hair, blue_eyes, armor, plate_armor, sword, holding_sword, standing, mountain, snow, wind`
+**Tags input:** `1girl, blonde_hair, medium_hair, blue_eyes, armor, plate_armor, sword, holding_sword, standing, mountain, snow, wind, from_below`
 
 ```json
-{"caption": "A young woman with shoulder-length blonde hair and pale blue eyes stands on a snow-covered mountain ridge, holding a long steel sword across her chest with both hands. She wears worn plate armor with leather straps, and a tattered dark cloak whips in the wind behind her. The shot is a medium full-body framing from a slightly low angle. The lighting is overcast and cold, with diffused gray light catching the edges of her armor and a faint warm tone on her face. Snow blows sideways across the frame, partially obscuring the distant peaks. The palette is dominated by cold steel blues, ash greys, and the muted earth tones of her armor, the atmosphere somber and resolute."}
+{"caption": "1girl, solo, from_below, plate_armor, a young woman stands on a snow-covered mountain ridge holding a long steel sword across her chest with both hands, shoulder-length blonde hair, blue eyes, worn plate armor with leather straps, a tattered dark cloak whips in the wind behind her, the lighting is overcast and cold with diffused gray light catching the edges of her armor and a faint warm tone on her face, snow blows sideways across the frame partially obscuring the distant peaks, cold steel blues and ash greys, somber resolute atmosphere."}
 ```
 
-**Tags input:** `2girls, multiple_girls, short_hair, blonde_hair, long_hair, black_hair, assault_rifle, skirt, desert, sand, castle, subtitled`
+**Tags input:** `2girls, multiple_girls, short_hair, blonde_hair, long_hair, black_hair, assault_rifle, skirt, desert, sand, castle, subtitled, from_behind`
 
 ```json
-{"caption": "Two girls move through a vast desert under a hazy golden sky. In the foreground, a girl with short blonde hair walks away from the viewer, an assault rifle resting across her shoulder, dressed in a light-colored top and a knee-length skirt. Further back, a girl with long black hair stands facing left, dressed in dark clothing. Behind them, the silhouette of a distant castle rises beyond rolling sand dunes. The atmosphere is somber and desolate, painted in warm muted golden light with long shadows stretching across the sand. Japanese subtitles are visible at the bottom of the frame."}
+{"caption": "2girls, multiple_girls, from_behind, assault_rifle, two girls move through a vast desert under a hazy golden sky, in the foreground a girl with short blonde hair walks away from the viewer with the rifle resting across her shoulder, light-colored top and a knee-length skirt, further back a girl with long black hair stands facing left in dark clothing, a distant castle rises beyond rolling sand dunes, warm muted golden light with long shadows across the sand, Japanese subtitles at the bottom of the frame, somber desolate atmosphere."}
 ```
 
-**Tags input:** `1man, top_hat, frock_coat, newspaper, reading, victorian, london, street, cobblestone, fog`
+**Tags input:** `1man, top_hat, frock_coat, newspaper, reading, victorian, london, street, cobblestone, fog, looking_down`
 
 ```json
-{"caption": "A distinguished man in a tall top hat and dark frock coat reads a newspaper on a cobblestone street in Victorian-era London. He stands in the foreground with a focused expression, surrounded by pedestrians and horse-drawn carriages navigating the misty street. In the background, the silhouette of a cathedral looms above the city. The scene is bathed in an atmospheric palette of earthy browns, deep blues, and golden light, with thin fog softening the distant rooftops and lending the whole composition a somber, busy weight."}
+{"caption": "1man, top_hat, frock_coat, looking_down, a distinguished man reads a folded newspaper on a cobblestone street in Victorian-era London, focused expression, dark beard, surrounded by pedestrians and horse-drawn carriages navigating the misty street, the silhouette of a cathedral looms above the city in the hazy background, fog, earthy browns and deep blues and golden light, somber busy atmosphere."}
 ```
 
-**Tags input:** `1girl, large_breasts, nude, on_back, spread_legs, bed, dim_lighting, looking_at_viewer, blush, brown_hair`
+**Tags input:** `1girl, large_breasts, wide_hips, nude, on_back, spread_legs, bed, dim_lighting, looking_at_viewer, blush, brown_hair, missionary_sex, vaginal_penetration, ahegao, painted_nails`
 
 ```json
-{"caption": "A young woman with shoulder-length brown hair lies nude on her back across a bed, legs spread, gazing up at the viewer with a soft blush. The composition is a low three-quarter angle that emphasizes the curve of her body and her large breasts. The bedroom is dim and warm-toned, with a single lamp casting amber light from the left and leaving long soft shadows across the sheets and her skin."}
+{"caption": "1girl, large_breasts, wide_hips, missionary_sex, vaginal_penetration, ahegao, blush, looking_at_viewer, she lies on her back across a bed during sex with her partner above her, shoulder-length brown hair fanned across the pillow, painted_nails on the hand gripping the sheets, the bedroom is dim and warm-toned with a single lamp casting amber light from the left and leaving long soft shadows across the sheets and her skin, sweat, intimate close framing."}
 ```

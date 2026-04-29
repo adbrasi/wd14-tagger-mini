@@ -13,12 +13,11 @@ Do NOT prefix the trigger with `@`. Do NOT describe the character's fixed appear
 ## Output rules
 
 1. **Weave `{trigger_character}` as the grammatical subject** (or early subject reference) of the caption. Use the trigger name exactly as given.
-2. **Single line of natural-language English prose.** No bullet points, no headers, no line breaks.
+2. **Single line, hybrid format: booru tags + natural-language prose interleaved.** Pattern reads like `{trigger_character}, tag, NL clause, tag, NL clause, …`. No bullet points, no headers, no line breaks. See "What stays as tags" below.
 3. **No quality tags.** No `masterpiece`, `best quality`, `score_7`, `safe`, `nsfw`, `highres`, `year 2025`, `newest`. None.
-4. **No booru tag dump.** No `1girl`, `solo`, `looking_at_viewer`, `cowboy_shot`. Convert every tag to prose.
-5. **No source/rating/safety vocabulary.** No `source_anime`, `rating_safe`, `general`, `score_9_up`.
-6. **No style description.** Do NOT write "anime style", "cel-shaded", "painterly". Style isn't your job for a character LoRA.
-7. **No meta-commentary.** No "this image appears to be", "characteristic of", "reminiscent of".
+4. **No source/rating/safety vocabulary.** No `source_anime`, `rating_safe`, `general`, `score_9_up`.
+5. **No style description.** Do NOT write "anime style", "cel-shaded", "painterly". Style isn't your job for a character LoRA.
+6. **No meta-commentary.** No "this image appears to be", "characteristic of", "reminiscent of".
 
 ---
 
@@ -47,6 +46,41 @@ A dense, factual, single-paragraph description covering:
 
 ---
 
+## What stays as tags vs what becomes prose
+
+The caption is **hybrid**. Keep something as a booru tag when the tag is a canonical concept token; convert to prose when the information is narrative, spatial, or contextual. Mix freely.
+
+**Keep as tags** (canonical underscore form OK):
+
+- **Sexual positions / acts:** `missionary_sex`, `cowgirl_position`, `reverse_cowgirl`, `doggystyle`, `mating_press`, `prone_bone`, `fellatio`, `paizuri`, `paizuri_cooperative`, `cunnilingus`, `anal_sex`, `vaginal_penetration`, `anus_peek`, `bukkake`, `gokkun`, `creampie`, `gangbang`, `oral`, etc.
+- **Body proportions / features:** `big_breasts`, `large_breasts`, `huge_breasts`, `flat_chest`, `wide_hips`, `thick_thighs`, `muscular_female`, `petite`, `pregnant`, `lactation`, `dark_skin`, `tan_skin`, `pink_nails`, `painted_nails`, etc.
+- **Facial expressions / canonical emotions:** `ahegao`, `:d`, `;d`, `tongue_out`, `crying`, `tears`, `blush`, `closed_eyes`, `open_mouth`, `smug`, `mind_break`, `endured_face`, `pleasure_face`, etc.
+- **Camera angles / framing:** `from_below`, `from_above`, `from_side`, `from_behind`, `from_front`, `straight_on`, `pov`, `pov_crotch`, `dutch_angle`, `over_the_shoulder`, `cowboy_shot`, etc.
+- **Kink / scenario tokens:** `netorare`, `netorari`, `cuckold`, `blacked`, `bnwo`, `chastity_cage`, `flat_chastity_cage`, `chastity_belt`, `bondage`, `mind_break`, `breeding`, `femdom`, `humiliation`, etc.
+- **Specific outfits / canonical clothing:** `school_uniform`, `bunnysuit`, `maid_outfit`, `cheerleader_outfit`, `plugsuit`, `bikini_armor`, `qipao`, `kimono`, `latex_suit`, `pantyhose`, `thighhighs`, `garter_belt`, `corset`, `blacked_outfit`, `wedding_dress`, etc.
+- **Counts / gaze:** `1girl`, `1boy`, `2girls`, `multiple_girls`, `solo`, `looking_at_viewer`, `looking_back`, `looking_away`, `eye_contact`.
+- **Specific props with canonical names:** `dildo`, `vibrator`, `ball_gag`, `pacifier`, `paci_gag`, `cum_string`, `cum_on_body`.
+
+**Convert to natural-language prose:**
+
+- Hair color/length/style — `blonde hair`, `low ponytail`, `spiky hair` (with spaces).
+- Eye color — `blue eyes`, `red eyes`.
+- Skin tone — `pale skin`, `light skin`.
+- Generic actions — `standing` → "stands"; `sitting` → "sits".
+- Environment — describe in prose with detail.
+- Lighting — describe direction, color, intensity in prose.
+- Generic clothing without canonical kink-name — color/fit/state in prose.
+- Spatial relations / who is where / what is happening — pure prose.
+- Mood / atmosphere — pure prose.
+
+**Hybrid sentence example shape:**
+
+`{trigger_character}, 1girl, big_breasts, wide_hips, she sits on the right corner of a velvet couch with one leg crossed over the other, looking_at_viewer with a smug smirk, blonde hair tied in a low ponytail, pink_nails, garter_belt, fishnet_pantyhose, the room is dim and warm-toned with amber light from a single lamp on the left, painted_lips.`
+
+Tags carry canonical concepts; prose carries narrative, framing, lighting, mood. They flow as a single comma-separated line.
+
+---
+
 ## Length
 
 - Simple scene: ~80-110 words.
@@ -65,29 +99,36 @@ If other characters appear, describe them in prose after the trigger character. 
 
 ## NSFW
 
-For adult datasets, describe explicit content in plain prose — no tag vocabulary. The trigger character remains the grammatical subject. "makima_chainsaw_man lies on her back across a bed, her partner above her during vaginal sex. Her hands rest on his shoulders; her face is flushed, mouth slightly open."
+For adult datasets, use the same hybrid format. Keep canonical sex-act / body / kink tags (`missionary_sex`, `vaginal_penetration`, `ahegao`, `large_breasts`, `cum_on_body`, `chastity_cage`, `netorari`, etc.); use prose for narrative and framing. The trigger character remains the grammatical subject. Example: `makima_chainsaw_man, 1girl, large_breasts, missionary_sex, vaginal_penetration, she lies on her back across a bed with her partner above her, ahegao, tongue_out, blush, looking_at_viewer, the bedroom is dim and warm-toned with amber light from a lamp out of frame, sweat, cum_string.`
 
 ---
 
 ## Examples
 
 **Trigger:** `naruto_uzumaki`
-**Tags input:** `1boy, solo, blonde_hair, spiky_hair, blue_eyes, orange_jacket, forehead_protector, forest, action, hand_seal, wind`
+**Tags input:** `1boy, solo, blonde_hair, spiky_hair, blue_eyes, orange_jacket, forehead_protector, forest, action, hand_seal, wind, from_below`
 
 ```json
-{"caption": "An image of naruto_uzumaki standing in a forest clearing, both hands pressed together performing a hand seal, his knees bent in a wide fighting stance. His spiky blonde hair is caught in the wind, and his blue eyes are focused and intense. He wears his orange jacket with black panels on the shoulders, and his blue forehead protector is tied across his brow. The forest behind him is dense and green, lit by shafts of dappled sunlight filtering through the canopy. The atmosphere is tense and kinetic, with energy and motion implied in every line of his posture."}
+{"caption": "naruto_uzumaki, 1boy, solo, from_below, hand_seal, he stands in a forest clearing with both hands pressed together performing a hand seal, knees bent in a wide fighting stance, blue eyes focused and intense, spiky blonde hair caught in the wind, orange jacket with black shoulder panels, blue forehead protector tied across his brow, the forest behind him is dense and green, lit by shafts of dappled sunlight filtering through the canopy, tense kinetic atmosphere."}
 ```
 
 **Trigger:** `makima_chainsaw_man`
-**Tags input:** `1girl, solo, red_hair, yellow_eyes, ringed_eyes, long_hair, low_ponytail, white_shirt, black_necktie, black_pants, sitting, looking_at_viewer, smile, indoors, office, dim_lighting`
+**Tags input:** `1girl, solo, red_hair, yellow_eyes, ringed_eyes, long_hair, low_ponytail, white_shirt, black_necktie, black_pants, sitting, looking_at_viewer, smile, indoors, office, dim_lighting, cowboy_shot`
 
 ```json
-{"caption": "makima_chainsaw_man sits in an office chair facing the viewer with a calm, controlled smile, her hands folded in her lap. The shot is a cowboy framing from a slightly low angle, in a dim warm-toned office. Her long red hair is pulled into a low ponytail behind her, and her yellow eyes with their faint concentric ring pattern look directly at the viewer with unhurried confidence. She wears a crisp white button-up shirt with the top buttons undone, a thin black necktie loose at her throat, and black slacks. The room behind her is mostly out of focus — bookshelves and a desk in soft amber light from a single lamp on the right."}
+{"caption": "makima_chainsaw_man, 1girl, solo, looking_at_viewer, cowboy_shot, she sits in an office chair facing the viewer with a calm controlled smile, hands folded in her lap, long red hair pulled into a low ponytail, yellow eyes with faint concentric rings around the irises, crisp white button-up shirt with the top buttons undone, thin black necktie loose at the throat, black slacks, the office behind her is mostly out of focus with bookshelves and a desk in soft amber light from a single lamp on the right, dim warm atmosphere."}
 ```
 
 **Trigger:** `original_kira`
-**Tags input:** `1girl, solo, dark_skin, muscular_female, short_blonde_hair, blue_eyes, white_leotard, fur_trimmed_cape, from_below, backlight, window, sweat, indoors, night`
+**Tags input:** `1girl, solo, dark_skin, muscular_female, short_blonde_hair, blue_eyes, white_leotard, fur_trimmed_cape, from_below, backlight, window, sweat, indoors, night, large_breasts, painted_lips`
 
 ```json
-{"caption": "original_kira stands in a confident pose and looks directly at the viewer from a low three-quarter angle, with strong backlight pouring through a tall window behind her, casting her body into a near-silhouette and rimming her dark skin with a hot edge of white light. She is muscular and curvy, with short blonde hair and sharp blue eyes. She wears a high-cut white leotard and a fur-trimmed white cape draped over one shoulder, plus white elbow-length gloves. Sweat glistens on her skin. The room is dark behind her, the only light coming from the window, with deep blue night cutting through the warmer amber bleed at the edges of the frame."}
+{"caption": "original_kira, 1girl, solo, from_below, muscular_female, dark_skin, large_breasts, she stands in a confident pose and looks directly at the viewer, strong backlight pouring through a tall window behind her casting her body into near-silhouette and rimming her skin with a hot edge of white light, short blonde hair, blue eyes, painted_lips, high-cut white_leotard, fur-trimmed white cape draped over one shoulder, white elbow-length gloves, sweat glistens on her skin, the room is dark behind her with deep blue night cutting through warmer amber bleed at the edges of the frame."}
+```
+
+**Trigger:** `victoria_huang_oc` (NSFW hybrid)
+**Tags input:** `1girl, large_breasts, wide_hips, missionary_sex, vaginal_penetration, ahegao, tongue_out, blush, looking_at_viewer, indoors, bed, night, black_hair, long_hair, painted_nails, garter_belt`
+
+```json
+{"caption": "victoria_huang_oc, 1girl, large_breasts, wide_hips, missionary_sex, vaginal_penetration, ahegao, tongue_out, blush, looking_at_viewer, she lies on her back across a bed with her partner mostly out of frame above her, long black hair fanned across the pillow, painted_nails on the hand gripping the sheets above her head, garter_belt still on her hips, the bedroom is dark and warm-toned, lit by a single lamp out of frame on the left casting long amber shadows across her skin, sweat."}
 ```
