@@ -1,0 +1,12 @@
+{
+  "display_name": "anima-outfit",
+  "description": "Anima outfit LoRA — trigger_outfit é inserido literalmente na caption onde a roupa seria descrita. Sem detalhes visuais da roupa (o LoRA aprende aparência pelo trigger). Personagem identificado pelos booru tags.",
+  "variables": [
+    {
+      "name": "trigger_outfit",
+      "prompt": "Outfit trigger name (e.g. red_kimono_v2, Jeans_calça_azul, dark_ops_bodysuit) — placed literally in the caption where clothing is mentioned",
+      "required": true,
+      "default": ""
+    }
+  ]
+}

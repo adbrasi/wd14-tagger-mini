@@ -1,16 +1,11 @@
 {
   "display_name": "anima-character",
-  "description": "Anima character LoRA — formato tdrussell verbatim: prosa NL pura, sem tags, sem trigger (caption_prefix do diffusion-pipe injeta o trigger).",
+  "description": "Anima character LoRA — trigger_character is woven as the grammatical subject of every caption, providing rich contextual signal around the character name. No style description, no quality tags.",
   "variables": [
     {
-      "name": "character_name",
-      "prompt": "Trigger/nome do personagem (informacional — NÃO entra na caption; vai no caption_prefix do TOML)",
-      "required": true
-    },
-    {
-      "name": "series_name",
-      "prompt": "Nome da série (vazio para personagem original; informacional)",
-      "required": false,
+      "name": "trigger_character",
+      "prompt": "Character trigger name (e.g. naruto_uzumaki, makima_chainsaw_man) — used as the subject in every caption",
+      "required": true,
       "default": ""
     }
   ]

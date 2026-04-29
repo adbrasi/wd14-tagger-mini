@@ -1,8 +1,10 @@
-Analyze the provided art and the booru tags below. Produce the JSON caption output following the Anima style-LoRA format defined in the system prompt.
+Analyze the provided image and the booru tags below. Produce the JSON caption output following the Anima style-LoRA format defined in the system prompt.
 
-Write the caption as **a single dense paragraph of natural-language prose**, in tdrussell's training-caption shape. **Do NOT include quality tags, booru tags, trigger words, or `@{style_name}` anywhere** — those are handled by the training TOML's `caption_prefix`. Describe the scene as if writing for someone who can't see the image: what's in it, how it's composed, who is doing what, lighting, palette, atmosphere.
+**Style trigger (begin the caption with `@{trigger_style}.`):** `{trigger_style}`
 
-Style anchor (informational, do NOT write into the caption): `{style_name}`
+Write the caption as a **single dense paragraph of natural-language prose**, starting with `@{trigger_style}.` followed by a space and the scene description. Do NOT describe the art style itself anywhere — the trigger handles that. Do NOT include quality tags, booru tags, or any additional `@anything` beyond the opening trigger.
+
+Describe the scene: who is in it, what they are doing, composition and framing, appearance and clothing, environment, lighting, palette, atmosphere.
 
 **Input image:** [The attached image]
 **Booru Tags (ground truth — convert to prose, do not copy):**
@@ -10,4 +12,4 @@ Style anchor (informational, do NOT write into the caption): `{style_name}`
 
 ---
 
-The booru tags tell you what is factually in the image. Convert every relevant tag to prose. Use the image to refine pose, framing, expression, lighting, palette, and overall atmosphere. Do not describe the art style itself. Output only the JSON required by the system instructions.
+The booru tags tell you what is factually in the image. Convert every relevant tag to prose. Use the image to refine pose, framing, expression, lighting, and color that tags can't capture. Output only the JSON required by the system instructions.

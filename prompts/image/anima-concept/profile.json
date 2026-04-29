@@ -1,17 +1,5 @@
 {
   "display_name": "anima-concept",
-  "description": "Anima concept LoRA — formato tdrussell verbatim: prosa NL pura, sem tags, sem trigger (caption_prefix do diffusion-pipe injeta o trigger). Use para roupa, tatuagem, pose, prop, acessório.",
-  "variables": [
-    {
-      "name": "concept_name",
-      "prompt": "Trigger do conceito (informacional — NÃO entra na caption; vai no caption_prefix do TOML)",
-      "required": true
-    },
-    {
-      "name": "concept_kind",
-      "prompt": "Tipo de conceito (clothing/tattoo/pose/prop/accessory/object)",
-      "required": true,
-      "default": "clothing"
-    }
-  ]
+  "description": "Anima concept LoRA — sem trigger word, sem variáveis. Caption puramente descritiva: composição, pose, ação, ambiente, iluminação, atmosfera. O caption é o sinal de treino inteiro.",
+  "variables": []
 }

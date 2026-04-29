@@ -1,11 +1,12 @@
 {
   "display_name": "anima-style",
-  "description": "Anima style LoRA — formato tdrussell verbatim: prosa NL pura, sem tags, sem trigger (caption_prefix do diffusion-pipe injeta o anchor). Use para LoRA de artista, screencap, painterly, etc.",
+  "description": "Anima style LoRA — captions start with @trigger_style. followed by dense NL prose describing the scene content. The trigger token teaches the style; the caption teaches the content.",
   "variables": [
     {
-      "name": "style_name",
-      "prompt": "Nome/anchor do estilo (informacional — NÃO entra na caption; vai no caption_prefix do TOML)",
-      "required": true
+      "name": "trigger_style",
+      "prompt": "Style/artist trigger tag (e.g. greg_rutkowski, studio_ghibli, vintage_anime_90s) — placed as @trigger_style. at the start of every caption",
+      "required": true,
+      "default": ""
     }
   ]
 }

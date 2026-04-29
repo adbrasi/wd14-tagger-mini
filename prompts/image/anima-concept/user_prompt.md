@@ -1,9 +1,6 @@
-Analyze the provided art and the booru tags below. Produce the JSON caption output following the Anima concept-LoRA format defined in the system prompt.
+Analyze the provided image and the booru tags below. Produce the JSON caption output following the Anima concept-LoRA format defined in the system prompt.
 
-Write the caption as **a single dense paragraph of natural-language prose**, in tdrussell's training-caption shape. **Do NOT include quality tags, booru tags, the concept trigger, or `@anything`** — the training TOML's `caption_prefix` handles the trigger. The first portion of the caption MUST describe the concept itself tangibly (per `{concept_kind}`); the remainder describes the rest of the scene.
-
-Concept (informational — do NOT write into the caption): `{concept_name}`
-Concept kind: `{concept_kind}` (clothing/tattoo/pose/prop/accessory/object)
+Write the caption as a **single dense paragraph of natural-language prose**. There is no trigger word — the caption is the entire learning signal. Do NOT include quality tags, booru tags, trigger words, style descriptions, or `@anything`. Describe what is in the image: who, what they are doing, composition and framing, appearance and clothing, environment, lighting, palette, atmosphere.
 
 **Input image:** [The attached image]
 **Booru Tags (ground truth — convert to prose, do not copy):**
@@ -11,4 +8,4 @@ Concept kind: `{concept_kind}` (clothing/tattoo/pose/prop/accessory/object)
 
 ---
 
-The tags tell you what is factually in the image. Convert every relevant tag to prose, with extra concrete physical detail on the concept itself (color, material, shape, placement, fit, decoration). Output only the JSON required by the system instructions.
+The booru tags tell you what is factually in the image. Convert every relevant tag to prose. Use the image to refine pose, framing, expression, lighting, and color that the tags can't capture. Output only the JSON required by the system instructions.
