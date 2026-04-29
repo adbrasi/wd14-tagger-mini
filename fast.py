@@ -628,7 +628,9 @@ def caption_main(config: RunConfig, provider: str, has_existing_captions: bool) 
             sys.exit(rc)
     else:
         info("Running xAI Sync (real-time, no discount)...")
-        rc = run_tagger(base_args + ["--grok_concurrency", "16"])
+        # 64 concurrent requests is well within xAI's grok-4-fast tier limit
+        # and gives ~4x the throughput of the previous default (16).
+        rc = run_tagger(base_args + ["--grok_concurrency", "64"])
         if rc != 0:
             err(f"Sync run failed (exit {rc})")
             sys.exit(rc)

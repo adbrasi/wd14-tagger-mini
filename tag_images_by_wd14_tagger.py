@@ -1174,7 +1174,8 @@ def call_openrouter(
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": content_parts},
         ],
-        "max_tokens": 1024,
+        # 4096 = same ceiling as call_xai_sync; avoids truncating long captions.
+        "max_tokens": 4096,
     }
 
     # OpenRouter ignores reasoning for models that don't support it
@@ -1276,7 +1277,10 @@ def call_xai_sync(
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": content_parts},
         ],
-        "max_tokens": 1024,
+        # 4096 leaves ample room for reasoning tokens + a 230-word caption.
+        # 1024 was truncating mid-output (finish_reason=length) and the
+        # truncated JSON was being persisted to .txt as gibberish.
+        "max_tokens": 4096,
     }
 
     # NOTE: xAI's grok-4 family — including "*-fast-reasoning" variants — rejects
@@ -1431,7 +1435,15 @@ def _grok_single_task(
         logger.debug(f"JSON parsed but no 'caption' key, using full JSON for {image_path}")
         return image_path, json.dumps(parsed, ensure_ascii=False)
 
-    # Fallback: use raw text as-is (model didn't return valid JSON)
+    # If the raw text LOOKS like JSON (starts with '{') but didn't parse, it's
+    # almost always truncated mid-stream. Writing it to .txt would persist
+    # gibberish like '{"caption":"foo,bar,baz...'  — drop it instead.
+    stripped = raw.lstrip()
+    if stripped.startswith(("{", "[", "```")):
+        logger.warning(f"Dropping truncated/malformed JSON output for {image_path}")
+        return image_path, None
+
+    # Fallback: model returned plain text without JSON wrapping — accept it.
     return image_path, raw
 
 
