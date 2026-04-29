@@ -44,9 +44,22 @@ A dense, factual, single-paragraph description covering the full visual content 
 
 ## What stays as tags vs what becomes prose
 
-The caption is **hybrid**. Keep something as a booru tag when the tag is a canonical concept token; convert to prose when the information is narrative, spatial, or contextual. Mix freely.
+The caption is **hybrid**. The principle, NOT the list, is what matters.
 
-**Keep as tags** (canonical underscore form OK):
+**Principle — keep as tag when:**
+- It is a **canonical concept token** (a specific term widely used in booru tagging that the model has learned as a single unit with a defined meaning).
+- It is **more information-dense as a tag than as prose** (e.g., `paizuri_cooperative`, `mind_break`, `flat_chastity_cage`).
+- It is **short and specific** with a known visual referent.
+- Conversion to prose would *paraphrase* without adding clarity.
+
+**Principle — convert to prose when:**
+- It is a **generic descriptor** without strong canonical meaning (`blonde_hair`, `bedroom`, `night`, `standing`).
+- The tag benefits from **spatial/contextual nuance** prose can express better.
+- The tag is **part of the narrative** (who is doing what, where, in relation to whom).
+
+**The lists below are illustrative, NOT exhaustive.** Tag categories that aren't listed (monster-girl features, specific hair styles, eye features, accessories, magical/fantasy attributes, specific props, genre/setting tokens, image-type tokens, etc.) follow the same principle. **When in doubt, keep canonical short tags as tags.**
+
+**Keep as tags** (canonical underscore form OK) — illustrative categories:
 
 - **Sexual positions / acts:** `missionary_sex`, `cowgirl_position`, `reverse_cowgirl`, `doggystyle`, `mating_press`, `prone_bone`, `fellatio`, `paizuri`, `paizuri_cooperative`, `cunnilingus`, `anal_sex`, `vaginal_penetration`, `anus_peek`, `bukkake`, `gokkun`, `creampie`, `gangbang`, `oral`, etc.
 - **Body proportions / features:** `big_breasts`, `large_breasts`, `huge_breasts`, `flat_chest`, `wide_hips`, `thick_thighs`, `muscular_female`, `petite`, `pregnant`, `lactation`, `dark_skin`, `tan_skin`, `pink_nails`, `painted_nails`, etc.
@@ -56,6 +69,11 @@ The caption is **hybrid**. Keep something as a booru tag when the tag is a canon
 - **Specific outfits / canonical clothing:** `school_uniform`, `bunnysuit`, `maid_outfit`, `cheerleader_outfit`, `plugsuit`, `bikini_armor`, `qipao`, `kimono`, `latex_suit`, `pantyhose`, `thighhighs`, `garter_belt`, `corset`, `blacked_outfit`, `wedding_dress`, etc.
 - **Counts / gaze:** `1girl`, `1boy`, `2girls`, `multiple_girls`, `solo`, `looking_at_viewer`, `looking_back`, `looking_away`.
 - **Specific props with canonical names:** `dildo`, `vibrator`, `ball_gag`, `pacifier`, `paci_gag`, `cum_string`, `cum_on_body`.
+- **Hair styles (canonical):** `twintails`, `side_ponytail`, `low_ponytail`, `high_ponytail`, `ahoge`, `hair_over_one_eye`, `sidecut`, `undercut`, `bob_cut`, `braids`, `bun`, `messy_hair`, `wavy_hair`, etc.
+- **Monster-girl / fantasy features:** `cat_ears`, `fox_ears`, `wolf_ears`, `tail`, `horns`, `wings`, `fangs`, `slit_pupils`, `kemonomimi`, `succubus`, `monster_girl`, `slime_girl`, `elf`, `dark_elf`, `demon_girl`, etc.
+- **Eye features (canonical):** `heterochromia`, `heart-shaped_pupils`, `slit_pupils`, `glowing_eyes`, `+_+`, `closed_eyes`, `half-closed_eyes`, `tareme`, `tsurime`, etc.
+- **Accessories (canonical):** `glasses`, `sunglasses`, `monocle`, `eyepatch`, `headphones`, `crown`, `tiara`, `choker`, `collar`, `tie`, `bowtie`, etc.
+- **Genre / setting / image-type tokens:** `cyberpunk`, `steampunk`, `post-apocalyptic`, `fantasy`, `medieval`, `sci-fi`, `screencap`, `2koma`, `4koma`, `comic`, `monochrome`, `greyscale`, `subtitled`, `letterboxed`, etc.
 
 **Convert to natural-language prose:**
 
