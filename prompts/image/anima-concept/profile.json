@@ -1,15 +1,15 @@
 {
   "display_name": "anima-concept",
-  "description": "Anima (Cosmos-Predict2 + Qwen3) CONCEPT LoRA — para roupas, tatuagens, acessórios, poses, objetos. Trigger curto + descrição NL focada no conceito + tags booru de suporte. Derivado do estilo tdrussell mas com ênfase no conceito-alvo.",
+  "description": "Anima concept LoRA — formato tdrussell verbatim: prosa NL pura, sem tags, sem trigger (caption_prefix do diffusion-pipe injeta o trigger). Use para roupa, tatuagem, pose, prop, acessório.",
   "variables": [
     {
       "name": "concept_name",
-      "prompt": "Trigger do conceito (ex: dragon_tattoo, cyber_jacket, kira_armor, pose_lotus). Use snake_case curto e único.",
+      "prompt": "Trigger do conceito (informacional — NÃO entra na caption; vai no caption_prefix do TOML)",
       "required": true
     },
     {
       "name": "concept_kind",
-      "prompt": "Tipo de conceito (clothing/tattoo/accessory/pose/prop/object)",
+      "prompt": "Tipo de conceito (clothing/tattoo/pose/prop/accessory/object)",
       "required": true,
       "default": "clothing"
     }

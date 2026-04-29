@@ -1,15 +1,15 @@
 {
   "display_name": "anima-character",
-  "description": "Anima (Cosmos-Predict2 + Qwen3) character LoRA — 5-section official format (tdrussell + lilting v4 validated). Quality anchor + NL paragraph + booru tags. Preserves Qwen3 causal-attention front-loading.",
+  "description": "Anima character LoRA — formato tdrussell verbatim: prosa NL pura, sem tags, sem trigger (caption_prefix do diffusion-pipe injeta o trigger).",
   "variables": [
     {
       "name": "character_name",
-      "prompt": "Trigger/name do personagem (ex: kanachan, makima, original_kira)",
+      "prompt": "Trigger/nome do personagem (informacional — NÃO entra na caption; vai no caption_prefix do TOML)",
       "required": true
     },
     {
       "name": "series_name",
-      "prompt": "Nome da série (deixe vazio para personagem original)",
+      "prompt": "Nome da série (vazio para personagem original; informacional)",
       "required": false,
       "default": ""
     }

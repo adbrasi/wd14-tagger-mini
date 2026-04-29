@@ -1,17 +1,11 @@
 {
   "display_name": "anima-style",
-  "description": "Anima (Cosmos-Predict2 + Qwen3) STYLE LoRA — tdrussell Greg-Rutkowski pattern. Caption begins with @style anchor + quality prefix; rest is natural-language scene description. Use this when training a style LoRA (artist look, screencap aesthetic, painterly aesthetic, etc.) on Anima.",
+  "description": "Anima style LoRA — formato tdrussell verbatim: prosa NL pura, sem tags, sem trigger (caption_prefix do diffusion-pipe injeta o anchor). Use para LoRA de artista, screencap, painterly, etc.",
   "variables": [
     {
       "name": "style_name",
-      "prompt": "Style anchor (será prefixado com @, ex: 'greg rutkowski' vira '@greg rutkowski.', ou 'anime screencap style')",
+      "prompt": "Nome/anchor do estilo (informacional — NÃO entra na caption; vai no caption_prefix do TOML)",
       "required": true
-    },
-    {
-      "name": "use_at_prefix",
-      "prompt": "Adicionar '@' no início do trigger? (yes para artistas, no para estilos genéricos como 'anime screencap style')",
-      "required": false,
-      "default": "yes"
     }
   ]
 }
