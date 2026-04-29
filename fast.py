@@ -255,12 +255,16 @@ def ask_input_source(project_name: str) -> Path:
     project_workdir.mkdir(parents=True, exist_ok=True)
 
     if choice == "1":
-        raw = Prompt.ask("Path to local folder").strip().rstrip("/")
-        path = Path(os.path.expanduser(raw)).resolve()
-        if not path.is_dir():
+        while True:
+            raw = Prompt.ask("Path to local folder").strip().rstrip("/")
+            if not raw:
+                err("Path is required.")
+                continue
+            path = Path(os.path.expanduser(raw)).resolve()
+            if path.is_dir():
+                return path
             err(f"Not a directory: {path}")
-            sys.exit(1)
-        return path
+            warn("Tip: leading '/' makes the path absolute; otherwise it's relative to CWD.")
 
     if choice == "2":
         link = Prompt.ask("MEGA link").strip()
