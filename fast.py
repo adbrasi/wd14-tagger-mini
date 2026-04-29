@@ -260,6 +260,19 @@ def ask_input_source(project_name: str) -> Path:
     return _download_hf(link, project_workdir / "raw")
 
 
+def _safe_zip_extract(zf: zipfile.ZipFile, dest: Path) -> None:
+    """Extract a zip after checking for path traversal (zip slip)."""
+    dest_resolved = dest.resolve()
+    for member in zf.namelist():
+        # zipfile normalizes "/" but we still need to reject absolute paths and "..".
+        target = (dest_resolved / member).resolve()
+        try:
+            target.relative_to(dest_resolved)
+        except ValueError:
+            raise RuntimeError(f"Refusing zip with unsafe member path: {member!r}")
+    zf.extractall(dest_resolved)
+
+
 def _download_mega(link: str, target: Path) -> Path:
     target.mkdir(parents=True, exist_ok=True)
     sys.path.insert(0, str(SCRIPT_DIR))
@@ -271,18 +284,21 @@ def _download_mega(link: str, target: Path) -> Path:
             err("Could not install MEGAcmd")
             sys.exit(1)
     tmp = Path(tempfile.mkdtemp(prefix="fast_mega_"))
-    if not mega_download(link, str(tmp)):
-        err("MEGA download failed")
-        sys.exit(1)
-    # Auto-extract zips
-    for fpath in tmp.rglob("*.zip"):
-        if zipfile.is_zipfile(fpath):
-            with zipfile.ZipFile(fpath, "r") as z:
-                z.extractall(tmp)
-            fpath.unlink()
-    stats = merge_directory(str(tmp), str(target))
-    ok(f"MEGA: {stats.get('moved', 0)} files moved into {target}")
-    return target
+    try:
+        if not mega_download(link, str(tmp)):
+            err("MEGA download failed")
+            sys.exit(1)
+        # Auto-extract zips defensively against zip-slip.
+        for fpath in tmp.rglob("*.zip"):
+            if zipfile.is_zipfile(fpath):
+                with zipfile.ZipFile(fpath, "r") as z:
+                    _safe_zip_extract(z, tmp)
+                fpath.unlink()
+        stats = merge_directory(str(tmp), str(target))
+        ok(f"MEGA: {stats.get('moved', 0)} files moved into {target}")
+        return target
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
 
 
 def _download_hf(ref: str, target: Path) -> Path:
@@ -334,9 +350,16 @@ def ask_trigger(preset: dict) -> Optional[str]:
         return None
     while True:
         value = Prompt.ask(preset["trigger_prompt"]).strip()
-        if value:
-            return value
-        err("Trigger is required for this preset.")
+        if not value:
+            err("Trigger is required for this preset.")
+            continue
+        # The tagger parses --prompt_var KEY=VALUE with split("=", 1), so a value
+        # containing "=" would corrupt the key. Whitespace also breaks shell-style
+        # tooling that may consume these args.
+        if "=" in value or any(c.isspace() for c in value):
+            err("Trigger cannot contain '=' or whitespace. Use underscores instead.")
+            continue
+        return value
 
 
 # ---------------------------------------------------------------------------
@@ -356,10 +379,11 @@ def scan_images(root: Path) -> tuple[list[Path], list[Path]]:
     return with_caption, without_caption
 
 
-def warn_videos_present(root: Path) -> None:
+def warn_videos_present(root: Path) -> bool:
     has_videos = any(p.is_file() and p.suffix.lower() in VIDEO_EXTS for p in root.rglob("*"))
     if has_videos:
         warn("Videos found in dataset — fast.py is image-only. Videos will be ignored.")
+    return has_videos
 
 
 # ---------------------------------------------------------------------------
@@ -482,6 +506,15 @@ def probe_xai_batch(
             f"Batch slow (still {last_status} after {PROBE_TIMEOUT_SECS}s) — "
             "falling back to xAI Sync. Losing 50% batch discount."
         )
+        # Cancel the orphan probe batch so it does not consume credits in the background.
+        try:
+            requests.post(
+                f"{XAI_API_BASE_URL}/v1/batches/{batch_id}/cancel",
+                headers=headers,
+                timeout=10,
+            )
+        except requests.RequestException:
+            pass
         return "xai-sync"
     finally:
         shutil.rmtree(probe_dir, ignore_errors=True)
@@ -495,7 +528,7 @@ def probe_xai_batch(
 # Main captioning
 # ---------------------------------------------------------------------------
 
-def caption_main(config: RunConfig, provider: str) -> None:
+def caption_main(config: RunConfig, provider: str, has_existing_captions: bool) -> None:
     """Run the final captioning pass over the whole dataset."""
     state_file = SCRIPT_DIR / f"_fast_state_{config.project_name}.json"
 
@@ -506,10 +539,15 @@ def caption_main(config: RunConfig, provider: str) -> None:
         "--force",
         "--remove_underscore",
         "--grok_provider", provider,
-        "--grok_context_from_existing",
         "--prompt_profile", config.preset_id,
         "--thresh", "0.30",
     ]
+    # Only pass --grok_context_from_existing when at least one image has a
+    # sibling .txt to use as context. Passing it on a dataset without prior
+    # captions (or after the pixai pre-pass overwrote them) makes the tagger
+    # try to read non-existent files.
+    if has_existing_captions:
+        base_args.append("--grok_context_from_existing")
     if config.trigger_var and config.trigger_value:
         base_args += ["--prompt_var", f"{config.trigger_var}={config.trigger_value}"]
 
@@ -663,11 +701,14 @@ def main() -> None:
     input_dir = ask_input_source(project_name)
     ok(f"Input: {input_dir}")
 
-    warn_videos_present(input_dir)
+    has_videos = warn_videos_present(input_dir)
     with_caption, without_caption = scan_images(input_dir)
     total = len(with_caption) + len(without_caption)
     if total == 0:
-        err("No images found in input directory.")
+        if has_videos:
+            err("Dataset contains only videos — fast.py is image-only. Use the legacy cli.py for video pipelines.")
+        else:
+            err("No images found in input directory.")
         sys.exit(1)
     info(f"Found {total} images ({len(with_caption)} with .txt, {len(without_caption)} without)")
 
@@ -697,12 +738,16 @@ def main() -> None:
         step("Local pixai pre-pass")
         run_pixai_for_uncaptioned(input_dir, without_caption)
 
+    # Re-scan after pixai pre-pass: at this point most/all images should have .txt.
+    post_pixai_with_caption, _ = scan_images(input_dir)
+    has_existing_captions = len(post_pixai_with_caption) > 0
+
     step("Probe xAI Batch (60s)")
     sample = random.choice(with_caption + without_caption)
     provider = probe_xai_batch(config, sample)
 
     step(f"Captioning ({provider})")
-    caption_main(config, provider)
+    caption_main(config, provider, has_existing_captions)
 
     step("Preview")
     show_samples(input_dir)

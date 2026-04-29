@@ -1279,8 +1279,9 @@ def call_xai_sync(
         "max_tokens": 1024,
     }
 
-    # grok-4 (the base model) rejects reasoning_effort; reasoning-flavored variants accept it.
-    if "reasoning" in model.lower() or "fast" in model.lower():
+    # Only reasoning-flavored models accept reasoning_effort. xAI returns 400
+    # otherwise, and "*-fast" without "-reasoning" is not a reasoning model.
+    if "reasoning" in model.lower():
         payload["reasoning_effort"] = "low"
 
     if json_mode:
@@ -1296,6 +1297,12 @@ def call_xai_sync(
                 time.sleep(wait)
                 continue
 
+            # 401 is fatal — abort the whole run instead of failing every image silently.
+            if resp.status_code == 401:
+                msg = f"xAI sync auth failed (401): {resp.text[:300]}"
+                logger.error(msg)
+                raise RuntimeError(msg)
+
             if 400 <= resp.status_code < 500 and resp.status_code != 429:
                 logger.error(f"xAI sync client error {resp.status_code}: {resp.text[:300]}")
                 return None
@@ -1308,7 +1315,13 @@ def call_xai_sync(
                 return None
             choice = data["choices"][0]
             content = choice.get("message", {}).get("content")
+            finish_reason = choice.get("finish_reason")
             if not content:
+                # finish_reason='length' means the model hit max_tokens — retrying
+                # the same payload will produce the same truncation. Bail out instead.
+                if finish_reason == "length":
+                    logger.error(f"xAI sync truncated at max_tokens (finish_reason=length); not retrying.")
+                    return None
                 if attempt < max_retries:
                     wait = min(2 ** attempt * 2, 30)
                     logger.warning(f"xAI sync empty content, retrying in {wait}s (attempt {attempt + 1})...")
