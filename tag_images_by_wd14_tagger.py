@@ -1279,10 +1279,9 @@ def call_xai_sync(
         "max_tokens": 1024,
     }
 
-    # Only reasoning-flavored models accept reasoning_effort. xAI returns 400
-    # otherwise, and "*-fast" without "-reasoning" is not a reasoning model.
-    if "reasoning" in model.lower():
-        payload["reasoning_effort"] = "low"
+    # NOTE: xAI's grok-4 family — including "*-fast-reasoning" variants — rejects
+    # `reasoning_effort` with HTTP 400 ("does not support parameter reasoningEffort").
+    # We omit it entirely. If a model needs it later, expose a CLI flag.
 
     if json_mode:
         payload["response_format"] = CAPTION_JSON_SCHEMA
