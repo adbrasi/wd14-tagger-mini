@@ -76,7 +76,7 @@ import signal
 
 from rich.console import Console
 from rich.panel import Panel
-from rich.prompt import Prompt
+from rich.prompt import Confirm, Prompt
 from rich.table import Table
 
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -578,6 +578,74 @@ def probe_xai_batch(
 
 
 # ---------------------------------------------------------------------------
+# Preview gate: caption ONE image, show it, ask Y/N before the full run.
+# ---------------------------------------------------------------------------
+
+def preview_and_confirm(config: RunConfig, sample_image: Path) -> None:
+    """Caption a single image via xai-sync, show the result, abort if user says N.
+
+    Always uses xai-sync regardless of the chosen provider — the preview's job is
+    to validate the prompt/trigger config quickly, not to benchmark the full run.
+    """
+    info(f"Captioning preview image: {sample_image.name}")
+    preview_dir = Path(tempfile.mkdtemp(prefix=f"fast_preview_{config.project_name}_"))
+    try:
+        link = preview_dir / sample_image.name
+        try:
+            link.symlink_to(sample_image)
+        except OSError:
+            shutil.copy2(sample_image, link)
+        sibling = sample_image.with_suffix(".txt")
+        has_sibling_txt = sibling.exists()
+        if has_sibling_txt:
+            try:
+                (preview_dir / sibling.name).symlink_to(sibling)
+            except OSError:
+                shutil.copy2(sibling, preview_dir / sibling.name)
+
+        args = [
+            str(preview_dir),
+            "--taggers", "grok",
+            "--recursive",
+            "--force",
+            "--remove_underscore",
+            "--grok_provider", "xai-sync",
+            "--prompt_profile", config.preset_id,
+            "--grok_concurrency", "1",
+            "--thresh", "0.30",
+        ]
+        if has_sibling_txt:
+            args.append("--grok_context_from_existing")
+        if config.trigger_var and config.trigger_value:
+            args += ["--prompt_var", f"{config.trigger_var}={config.trigger_value}"]
+
+        rc = run_tagger(args)
+        if rc != 0:
+            err(f"Preview run failed (exit {rc}). Aborting.")
+            sys.exit(rc)
+
+        result_txt = preview_dir / sample_image.with_suffix(".txt").name
+        if not result_txt.exists() or result_txt.stat().st_size == 0:
+            err("Preview produced no .txt output — Grok call probably failed. Aborting.")
+            sys.exit(1)
+        caption = result_txt.read_text(encoding="utf-8", errors="replace").strip()
+
+        console.print()
+        console.print(Panel.fit(
+            f"[bold]{sample_image.name}[/bold]\n\n{caption}",
+            title="[bold cyan]preview caption[/bold cyan]",
+            border_style="cyan",
+            padding=(0, 1),
+        ))
+        console.print()
+        if not Confirm.ask("Looks good? Proceed with the full dataset?", default=True):
+            warn("Aborted by user. Re-run after adjusting prompts/trigger.")
+            sys.exit(0)
+    finally:
+        shutil.rmtree(preview_dir, ignore_errors=True)
+
+
+# ---------------------------------------------------------------------------
 # Main captioning
 # ---------------------------------------------------------------------------
 
@@ -861,6 +929,10 @@ def main() -> None:
     step("Probe xAI Batch (60s)")
     sample = random.choice(with_caption + without_caption)
     provider = probe_xai_batch(config, sample)
+
+    step("Preview (1 image, awaits your approval)")
+    preview_sample = random.choice(post_pixai_with_caption or [sample])
+    preview_and_confirm(config, preview_sample)
 
     step(f"Captioning ({provider})")
     caption_main(config, provider, has_existing_captions)
