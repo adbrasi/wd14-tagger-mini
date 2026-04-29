@@ -516,26 +516,43 @@ def probe_xai_batch(
         deadline = poll_start + PROBE_TIMEOUT_SECS
         headers = {"Authorization": f"Bearer {config.xai_api_key}"}
         url = f"{XAI_API_BASE_URL}/v1/batches/{batch_id}"
-        last_status = "unknown"
+        last_summary = "unknown"
         while time.time() < deadline:
             try:
                 resp = requests.get(url, headers=headers, timeout=15)
                 if resp.status_code == 200:
                     data = resp.json()
-                    last_status = data.get("status", "unknown")
-                    if last_status == "completed":
+                    # xAI batch progress lives in `state.num_*`. The top-level
+                    # `status` field can stay "in_progress" even while requests
+                    # have completed — what really matters is pending == 0.
+                    counters = data.get("state") or {}
+                    num_requests = int(counters.get("num_requests", 0))
+                    num_pending = int(counters.get("num_pending", 0))
+                    num_success = int(counters.get("num_success", 0))
+                    num_error = int(counters.get("num_error", 0))
+                    last_summary = (
+                        f"req={num_requests} pending={num_pending} "
+                        f"ok={num_success} err={num_error}"
+                    )
+                    # Single-image probe: any terminal result (success or error)
+                    # tells us the queue is responsive.
+                    if num_requests > 0 and num_pending == 0 and (num_success + num_error) >= num_requests:
                         elapsed = time.time() - poll_start
-                        ok(f"Batch fast (probe done in {elapsed:.1f}s) — using xAI Batch (50% discount).")
-                        return "xai-batch"
-                    if last_status in ("failed", "cancelled", "expired"):
-                        warn(f"Probe ended with status={last_status} — defaulting to xai-sync.")
+                        if num_success > 0:
+                            ok(f"Batch fast (probe done in {elapsed:.1f}s) — using xAI Batch (50% discount).")
+                            return "xai-batch"
+                        warn(f"Probe ended with all errors ({last_summary}) — defaulting to xai-sync.")
+                        return "xai-sync"
+                    top_status = (data.get("status") or "").lower()
+                    if top_status in ("failed", "cancelled", "expired"):
+                        warn(f"Probe ended with status={top_status} — defaulting to xai-sync.")
                         return "xai-sync"
             except requests.RequestException as e:
                 warn(f"Probe poll error: {e}")
             time.sleep(PROBE_POLL_SECS)
 
         warn(
-            f"Batch slow (still {last_status} after {PROBE_TIMEOUT_SECS}s) — "
+            f"Batch slow ({last_summary} after {PROBE_TIMEOUT_SECS}s) — "
             "falling back to xAI Sync. Losing 50% batch discount."
         )
         # Cancel the orphan probe batch so it does not consume credits in the background.
