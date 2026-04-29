@@ -1379,6 +1379,29 @@ def parse_grok_json_output(raw: str) -> Optional[Dict]:
     return None
 
 
+def _extract_caption_from_malformed_json(raw: str) -> Optional[str]:
+    """Recover a complete caption string when surrounding JSON is malformed."""
+    text = raw.strip()
+
+    if text.startswith("```"):
+        text = re.sub(r"^```(?:json)?\s*\n?", "", text)
+        text = re.sub(r"\n?```\s*$", "", text)
+        text = text.strip()
+
+    match = re.search(r'"caption"\s*:\s*"((?:\\.|[^"\\])*)"', text, flags=re.DOTALL)
+    if not match:
+        return None
+
+    value = match.group(1)
+    try:
+        caption = json.loads(f'"{value}"')
+    except json.JSONDecodeError:
+        caption = value.replace(r"\\", "\\").replace(r"\"", '"').replace(r"\n", "\n")
+
+    caption = caption.strip()
+    return caption or None
+
+
 def _grok_single_task(
     api_key: str,
     model: str,
@@ -1443,6 +1466,10 @@ def _grok_single_task(
     # gibberish like '{"caption":"foo,bar,baz...'  — drop it instead.
     stripped = raw.lstrip()
     if stripped.startswith(("{", "[", "```")):
+        recovered_caption = _extract_caption_from_malformed_json(raw)
+        if recovered_caption:
+            logger.warning(f"Recovered caption from malformed JSON output for {image_path}")
+            return image_path, recovered_caption
         logger.warning(f"Dropping truncated/malformed JSON output for {image_path}")
         return image_path, None
 
