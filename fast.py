@@ -48,10 +48,11 @@ def _bootstrap_venv() -> None:
     except ImportError:
         pass
     here = Path(__file__).resolve().parent
-    venv_python = here / ".venv" / "bin" / "python"
+    venv_root = here / ".venv"
+    venv_python = venv_root / "bin" / "python"
     if not venv_python.exists():
-        print(f"[fast] Creating virtual env at {venv_python.parent}...", flush=True)
-        subprocess.run([sys.executable, "-m", "venv", str(venv_python.parent)], check=True)
+        print(f"[fast] Creating virtual env at {venv_root}...", flush=True)
+        subprocess.run([sys.executable, "-m", "venv", str(venv_root)], check=True)
     pip = venv_python.parent / "pip"
     req = here / "requirements.txt"
     print("[fast] Installing dependencies (one-time)...", flush=True)
@@ -89,6 +90,8 @@ XAI_API_BASE_URL = "https://api.x.ai"
 XAI_BATCH_MODEL = "grok-4-1-fast-reasoning"
 PROBE_TIMEOUT_SECS = 60
 PROBE_POLL_SECS = 4
+BATCH_POLL_SECS = 15
+BATCH_MAX_WAIT_SECS = int(os.environ.get("FAST_XAI_BATCH_MAX_WAIT_SECS", str(6 * 60 * 60)))
 
 PRESETS = [
     {
@@ -577,6 +580,175 @@ def probe_xai_batch(
             pass
 
 
+def _read_batch_id(state_file: Path) -> str:
+    try:
+        state = json.loads(state_file.read_text(encoding="utf-8"))
+    except Exception as e:
+        err(f"Cannot read xAI batch state file {state_file}: {e}")
+        sys.exit(1)
+    batch_id = state.get("batch_id")
+    if not batch_id:
+        err(f"xAI batch state file has no batch_id: {state_file}")
+        sys.exit(1)
+    return batch_id
+
+
+def _get_batch_counters(api_key: str, batch_id: str) -> tuple[int, int, int, int]:
+    headers = {"Authorization": f"Bearer {api_key}"}
+    resp = requests.get(f"{XAI_API_BASE_URL}/v1/batches/{batch_id}", headers=headers, timeout=30)
+    resp.raise_for_status()
+    counters = (resp.json().get("state") or {})
+    total = int(counters.get("num_requests", 0) or 0)
+    pending = int(counters.get("num_pending", 0) or 0)
+    success = int(counters.get("num_success", 0) or 0)
+    error_count = int(counters.get("num_error", 0) or 0)
+    return total, pending, success, error_count
+
+
+def wait_for_batch_complete(config: RunConfig, state_file: Path) -> None:
+    batch_id = _read_batch_id(state_file)
+    start = time.time()
+    last_line = ""
+    while True:
+        try:
+            total, pending, success, error_count = _get_batch_counters(config.xai_api_key, batch_id)
+        except requests.RequestException as e:
+            warn(f"Batch status poll failed: {e}")
+            time.sleep(BATCH_POLL_SECS)
+            continue
+
+        elapsed = time.time() - start
+        line = f"Batch status: total={total} pending={pending} success={success} error={error_count} elapsed={elapsed:.0f}s"
+        if line != last_line:
+            info(line)
+            last_line = line
+
+        if total > 0 and pending == 0 and (success + error_count) >= total:
+            if error_count:
+                warn(f"xAI Batch completed with {error_count}/{total} errors; failed items will use xAI Sync fallback.")
+            return
+
+        if elapsed > BATCH_MAX_WAIT_SECS:
+            err(
+                f"xAI Batch still pending after {BATCH_MAX_WAIT_SECS}s. "
+                "Aborting before upload; run collect later when it finishes."
+            )
+            sys.exit(1)
+
+        time.sleep(BATCH_POLL_SECS)
+
+
+def incomplete_batch_image_paths(state_file: Path, input_dir: Path) -> list[Path]:
+    try:
+        state = json.loads(state_file.read_text(encoding="utf-8"))
+    except Exception as e:
+        err(f"Cannot verify xAI batch state file {state_file}: {e}")
+        sys.exit(1)
+
+    request_map = state.get("request_map") or {}
+    if not request_map:
+        err("xAI batch state has no tracked requests after collect. Aborting before upload.")
+        sys.exit(1)
+
+    missing: list[Path] = []
+    for meta in request_map.values():
+        if not isinstance(meta, dict) or meta.get("state") == "succeeded":
+            continue
+        rel = meta.get("image_path_rel")
+        raw_path = input_dir / rel if rel else Path(str(meta.get("image_path", "")))
+        path = raw_path.resolve()
+        if path.is_file() and path.suffix.lower() in IMAGE_EXTS:
+            missing.append(path)
+    return sorted(set(missing))
+
+
+def run_sync_fallback_for_images(
+    config: RunConfig,
+    images: list[Path],
+    has_existing_captions: bool,
+) -> None:
+    if not images:
+        return
+
+    info(f"xAI Sync fallback for {len(images)} failed/missing batch captions...")
+    fallback_dir = Path(tempfile.mkdtemp(prefix=f"fast_xai_sync_fallback_{config.project_name}_"))
+    before_text: dict[Path, Optional[str]] = {}
+    try:
+        for image in images:
+            try:
+                rel = image.resolve().relative_to(config.input_dir.resolve())
+            except ValueError:
+                rel = Path(image.name)
+            target = fallback_dir / rel
+            target.parent.mkdir(parents=True, exist_ok=True)
+            try:
+                target.symlink_to(image)
+            except OSError:
+                shutil.copy2(image, target)
+
+            sibling = image.with_suffix(".txt")
+            before_text[image] = sibling.read_text(encoding="utf-8", errors="replace") if sibling.exists() else None
+            if sibling.exists():
+                txt_target = target.with_suffix(".txt")
+                try:
+                    txt_target.symlink_to(sibling)
+                except OSError:
+                    shutil.copy2(sibling, txt_target)
+
+        args = [
+            str(fallback_dir),
+            "--taggers", "grok",
+            "--recursive",
+            "--force",
+            "--remove_underscore",
+            "--grok_provider", "xai-sync",
+            "--prompt_profile", config.preset_id,
+            "--grok_concurrency", str(min(16, max(1, len(images)))),
+            "--thresh", "0.30",
+        ]
+        if has_existing_captions:
+            args.append("--grok_context_from_existing")
+        if config.trigger_var and config.trigger_value:
+            args += ["--prompt_var", f"{config.trigger_var}={config.trigger_value}"]
+
+        rc = run_tagger(args)
+        if rc != 0:
+            err(f"xAI Sync fallback failed (exit {rc}). Aborting before upload.")
+            sys.exit(rc)
+
+        still_missing: list[Path] = []
+        for image in images:
+            final_txt = image.with_suffix(".txt")
+            try:
+                rel = image.resolve().relative_to(config.input_dir.resolve())
+            except ValueError:
+                rel = Path(image.name)
+            fallback_txt = (fallback_dir / rel).with_suffix(".txt")
+            if fallback_txt.exists() and fallback_txt.stat().st_size > 0:
+                new_text = fallback_txt.read_text(encoding="utf-8", errors="replace")
+                if before_text.get(image) is not None and new_text == before_text[image]:
+                    still_missing.append(image)
+                    continue
+                final_txt.parent.mkdir(parents=True, exist_ok=True)
+                try:
+                    same_file = final_txt.exists() and fallback_txt.samefile(final_txt)
+                except OSError:
+                    same_file = False
+                if not same_file:
+                    shutil.copy2(fallback_txt, final_txt)
+            else:
+                still_missing.append(image)
+
+        if still_missing:
+            err(f"{len(still_missing)} fallback captions are still missing. Aborting before upload.")
+            for image in still_missing[:10]:
+                console.print(f"    [dim]{image}[/dim]")
+            sys.exit(1)
+        ok(f"xAI Sync fallback wrote {len(images)} captions.")
+    finally:
+        shutil.rmtree(fallback_dir, ignore_errors=True)
+
+
 # ---------------------------------------------------------------------------
 # Preview gate: caption ONE image, show it, ask Y/N before the full run.
 # ---------------------------------------------------------------------------
@@ -673,7 +845,7 @@ def caption_main(config: RunConfig, provider: str, has_existing_captions: bool) 
         base_args += ["--prompt_var", f"{config.trigger_var}={config.trigger_value}"]
 
     if provider == "xai-batch":
-        # Submit then collect (collect blocks until the whole batch is done).
+        # Submit, wait until the remote batch is complete, then collect all results.
         submit_args = base_args + [
             "--xai_batch_action", "submit",
             "--xai_batch_state_file", str(state_file),
@@ -684,16 +856,20 @@ def caption_main(config: RunConfig, provider: str, has_existing_captions: bool) 
         if rc != 0:
             err(f"Batch submit failed (exit {rc})")
             sys.exit(rc)
+        info("Waiting for xAI Batch to finish before collect/upload...")
+        wait_for_batch_complete(config, state_file)
         collect_args = base_args + [
             "--xai_batch_action", "collect",
             "--xai_batch_state_file", str(state_file),
             "--xai_batch_model", XAI_BATCH_MODEL,
         ]
-        info("Collecting xAI Batch results (blocks until complete)...")
+        info("Collecting xAI Batch results...")
         rc = run_tagger(collect_args)
         if rc != 0:
             err(f"Batch collect failed (exit {rc})")
             sys.exit(rc)
+        missing = incomplete_batch_image_paths(state_file, config.input_dir)
+        run_sync_fallback_for_images(config, missing, has_existing_captions)
     else:
         info("Running xAI Sync (real-time, no discount)...")
         # 64 concurrent requests is well within xAI's grok-4-fast tier limit
