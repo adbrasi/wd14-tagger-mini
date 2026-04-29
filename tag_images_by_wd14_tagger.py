@@ -1168,14 +1168,14 @@ def call_openrouter(
     for uri in image_data_uris:
         content_parts.append({"type": "image_url", "image_url": {"url": uri}})
 
+    # No max_tokens: same reasoning as call_xai_sync — let the provider use
+    # its default ceiling instead of clipping captions mid-output.
     payload = {
         "model": model,
         "messages": [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": content_parts},
         ],
-        # 4096 = same ceiling as call_xai_sync; avoids truncating long captions.
-        "max_tokens": 4096,
     }
 
     # OpenRouter ignores reasoning for models that don't support it
@@ -1271,16 +1271,14 @@ def call_xai_sync(
     for uri in image_data_uris:
         content_parts.append({"type": "image_url", "image_url": {"url": uri, "detail": "high"}})
 
+    # No max_tokens: let xAI use its model default. Setting any explicit cap
+    # was causing finish_reason=length truncation for hybrid tag+prose captions.
     payload: Dict = {
         "model": model,
         "messages": [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": content_parts},
         ],
-        # 4096 leaves ample room for reasoning tokens + a 230-word caption.
-        # 1024 was truncating mid-output (finish_reason=length) and the
-        # truncated JSON was being persisted to .txt as gibberish.
-        "max_tokens": 4096,
     }
 
     # NOTE: xAI's grok-4 family — including "*-fast-reasoning" variants — rejects
