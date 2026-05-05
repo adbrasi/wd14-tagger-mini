@@ -347,6 +347,31 @@ def parse_grok_json(raw: str) -> Optional[Dict[str, Any]]:
     return None
 
 
+def recover_caption_from_malformed_json(raw: str) -> Optional[str]:
+    """Pull the caption value out of partially-corrupted JSON output."""
+    text = (raw or "").strip()
+    if not text:
+        return None
+    if text.startswith("```"):
+        text = re.sub(r"^```(?:json)?\s*\n?", "", text)
+        text = re.sub(r"\n?```\s*$", "", text)
+        text = text.strip()
+    match = re.search(r'"caption"\s*:\s*"((?:\\.|[^"\\])*)"', text, flags=re.DOTALL)
+    if not match:
+        return None
+    value = match.group(1)
+    try:
+        caption = json.loads(f'"{value}"')
+    except json.JSONDecodeError:
+        caption = (
+            value.replace(r"\\", "\\")
+                 .replace(r"\"", '"')
+                 .replace(r"\n", "\n")
+        )
+    caption = caption.strip()
+    return caption or None
+
+
 def extract_caption_from_result(result_obj: Dict) -> Tuple[Optional[str], Optional[Dict]]:
     """Return (caption_text, full_parsed_json) from an xAI batch result item.
 
@@ -383,6 +408,9 @@ def extract_caption_from_result(result_obj: Dict) -> Tuple[Optional[str], Option
                 return parsed["caption"], parsed
             if parsed:
                 return None, parsed
+            recovered = recover_caption_from_malformed_json(content)
+            if recovered:
+                return recovered, None
             return content.strip(), None
     return None, None
 
@@ -538,9 +566,15 @@ def submit_phase(
     request_map: Dict[str, Dict[str, Any]] = state.setdefault("request_map", {})
 
     if force and request_map:
-        logger.info("force mode: clearing %d prior request entries", len(request_map))
+        logger.info("force mode: clearing %d prior request entries and rotating batch",
+                    len(request_map))
         request_map.clear()
         state["request_map_force_reset_at"] = time.time()
+        # xAI request IDs are deterministic per video; if we kept the old
+        # batch_id, those IDs would collide with whatever was already added.
+        state.pop("batch_id", None)
+        state.pop("batch_name", None)
+        state.pop("batch_created_at", None)
         save_state(state_file, state)
 
     if not state.get("batch_id"):
@@ -583,7 +617,7 @@ def submit_phase(
 
     # --- Pass 1: scan, dedupe against prior submissions ---
     input_abs = input_dir.resolve()
-    to_process: List[Tuple[str, str, Optional[str], str, str]] = []
+    to_process: List[Tuple[str, str, Optional[str], str, str, int]] = []
     use_pbar = not no_progress
     scan_pbar = tqdm(total=len(videos), desc="scan", unit="vid", smoothing=0.0) if use_pbar else None
 
@@ -593,14 +627,27 @@ def submit_phase(
             v_rel = str(video.resolve().relative_to(input_abs))
         except ValueError:
             v_rel = None
-        req_id = request_id_for(v_abs, v_rel)
+        base_req_id = request_id_for(v_abs, v_rel)
         if scan_pbar is not None:
             scan_pbar.update(1)
-        prior = request_map.get(req_id, {})
-        if prior.get("state") in ("submitted", "succeeded"):
+        # Walk all attempts of this video already in state. If any reached
+        # submitted/succeeded we skip; otherwise mint a fresh req_id with
+        # the next attempt suffix so we never collide with a prior id that
+        # may already live in the same xAI batch (xAI rejects duplicates).
+        attempt = 0
+        skip = False
+        for key, entry in request_map.items():
+            if key == base_req_id or key.startswith(f"{base_req_id}_a"):
+                attempt = max(attempt, int(entry.get("attempt", 1) or 1))
+                if entry.get("state") in ("submitted", "succeeded"):
+                    skip = True
+                    break
+        if skip:
             continue
+        next_attempt = attempt + 1
+        req_id = base_req_id if next_attempt == 1 else f"{base_req_id}_a{next_attempt}"
         tags = read_tags_for_video(video)
-        to_process.append((v_abs, str(video), v_rel, req_id, tags))
+        to_process.append((v_abs, str(video), v_rel, req_id, tags, next_attempt))
     if scan_pbar is not None:
         scan_pbar.close()
 
@@ -640,11 +687,11 @@ def submit_phase(
     session.mount("https://", adapter)
     session.mount("http://", adapter)
 
-    def _encode(item: Tuple[str, str, Optional[str], str, str]) -> Optional[Tuple[str, str, Optional[str], List[Dict], str]]:
-        v_abs, v_path, v_rel, req_id, tags = item
+    def _encode(item: Tuple[str, str, Optional[str], str, str, int]) -> Optional[Tuple[str, str, Optional[str], List[Dict], str, int]]:
+        v_abs, v_path, v_rel, req_id, tags, attempt = item
         user_prompt = render_user_prompt(user_template, tags)
         if not include_images:
-            return req_id, v_abs, v_rel, [{"type": "text", "text": user_prompt}], tags
+            return req_id, v_abs, v_rel, [{"type": "text", "text": user_prompt}], tags, attempt
         try:
             jpeg = extract_middle_frame_jpeg(v_path, image_max_side, image_quality)
         except Exception as exc:
@@ -658,6 +705,7 @@ def submit_phase(
                     "video_path_rel": v_rel,
                     "state": "failed_frame",
                     "error_message": "could not extract middle frame",
+                    "attempt": attempt,
                     "updated_at": time.time(),
                 }
             if submit_pbar is not None:
@@ -668,7 +716,7 @@ def submit_phase(
             {"type": "text", "text": user_prompt},
             {"type": "image_url", "image_url": {"url": jpeg_to_data_url(jpeg)}},
         ]
-        return req_id, v_abs, v_rel, content, tags
+        return req_id, v_abs, v_rel, content, tags, attempt
 
     def _drain_rate_window() -> float:
         wait = 0.0
@@ -827,7 +875,7 @@ def submit_phase(
                 break
             chunk = to_process[chunk_start : chunk_start + submit_chunk]
 
-            encoded: List[Tuple[str, str, Optional[str], List[Dict], str]] = []
+            encoded: List[Tuple[str, str, Optional[str], List[Dict], str, int]] = []
             if frame_workers > 1 and len(chunk) > 1:
                 with ThreadPoolExecutor(max_workers=frame_workers) as ex:
                     futures = [ex.submit(_encode, it) for it in chunk]
@@ -852,7 +900,7 @@ def submit_phase(
             sub_batch: List[Dict] = []
             sub_batch_bytes = 0
 
-            for req_id, v_abs, v_rel, content, tags in encoded:
+            for req_id, v_abs, v_rel, content, tags, attempt in encoded:
                 if fatal_error["err"] is not None:
                     break
                 request_body = {
@@ -886,6 +934,7 @@ def submit_phase(
                         "video_path": v_abs,
                         "video_path_rel": v_rel,
                         "state": "queued_for_submission",
+                        "attempt": attempt,
                         "updated_at": time.time(),
                     }
 
@@ -970,6 +1019,12 @@ def resolve_local_video_path(meta: Dict[str, Any], input_dir: Path) -> Optional[
     return None
 
 
+def _atomic_write_text(target: Path, text: str) -> None:
+    tmp = target.with_suffix(target.suffix + ".tmp")
+    tmp.write_text(text, encoding="utf-8")
+    os.replace(tmp, target)
+
+
 def write_caption_output(
     video: Path,
     caption: str,
@@ -978,10 +1033,16 @@ def write_caption_output(
     output_suffix: str,
     overwrite: bool,
 ) -> Optional[Path]:
-    # Use `<video>.caption.json` (e.g. clip.mp4.caption.json) so we never
-    # collide with existing tag files like `clip.txt`.
-    out_path = Path(str(video) + output_suffix)
-    if out_path.exists() and not overwrite:
+    # Primary training output: `<video>.txt` with just the caption string.
+    # OVERWRITES the original tag file (clip.mp4 -> clip.txt) — those tags
+    # were already consumed at submit time and live as a backup inside the
+    # JSON sidecar, so this is the canonical state of the dataset.
+    txt_path = video.with_suffix(".txt")
+    # Sidecar: `<video>.caption.json` with caption + original tags + any
+    # extra fields the model returned. Used as the skip sentinel on rerun
+    # and as a backup of the pre-caption state.
+    json_path = Path(str(video) + output_suffix)
+    if json_path.exists() and not overwrite:
         return None
     payload = {
         "video": video.name,
@@ -990,16 +1051,13 @@ def write_caption_output(
     if tags:
         payload["tags"] = tags
     if parsed:
-        # Surface any extra fields the model returned alongside `caption`
-        # (e.g. structured metadata) without losing the canonical caption text.
         for key, value in parsed.items():
             if key == "caption":
                 continue
             payload[f"raw_{key}"] = value
-    tmp_path = out_path.with_suffix(out_path.suffix + ".tmp")
-    tmp_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-    os.replace(tmp_path, out_path)
-    return out_path
+    _atomic_write_text(json_path, json.dumps(payload, ensure_ascii=False, indent=2))
+    _atomic_write_text(txt_path, caption)
+    return json_path
 
 
 def collect_phase(
@@ -1041,6 +1099,8 @@ def collect_phase(
 
     counts = {"written": 0, "errors": 0, "missing_video": 0, "skipped_existing": 0, "no_caption": 0}
 
+    if jsonl_output is not None:
+        jsonl_output.parent.mkdir(parents=True, exist_ok=True)
     jsonl_fp = jsonl_output.open("a", encoding="utf-8") if jsonl_output else None
     jsonl_lock = threading.Lock()
 
@@ -1273,7 +1333,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--output-suffix", default=DEFAULT_OUTPUT_SUFFIX,
                    help="output filename suffix appended to the video name")
     p.add_argument("--overwrite", action="store_true",
-                   help="overwrite existing caption files on collect")
+                   help="overwrite existing caption files on collect (both .txt and .caption.json)")
     p.add_argument("--jsonl-output", default=None,
                    help="optional path for an aggregated JSONL of all captions")
     p.add_argument("--poll-interval", type=int, default=30,
