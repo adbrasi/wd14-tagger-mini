@@ -210,7 +210,33 @@ def resolve_default_state_file(input_dir: Path) -> Path:
     parent = base.parent
     name = base.name
     key = hashlib.md5(str(base).encode("utf-8")).hexdigest()[:10]
-    return parent / f".video_caption_batch_state_{name}_{key}.json"
+    primary = parent / f".video_caption_batch_state_{name}_{key}.json"
+
+    def _has_data(p: Path) -> bool:
+        try:
+            with p.open("r", encoding="utf-8") as f:
+                data = json.load(f)
+            return bool(data.get("request_map"))
+        except Exception:
+            return False
+
+    if primary.exists() and _has_data(primary):
+        return primary
+    # Cross-machine resilience: when the dataset is moved to a different
+    # absolute path the md5 hash changes. Reuse a sibling state file that
+    # already has data, preferring the most recent.
+    candidates = sorted(
+        parent.glob(f".video_caption_batch_state_{name}_*.json"),
+        key=lambda p: p.stat().st_mtime,
+        reverse=True,
+    )
+    for cand in candidates:
+        if cand == primary:
+            continue
+        if _has_data(cand):
+            logger.info("using existing state file from a different path: %s", cand)
+            return cand
+    return primary
 
 
 def load_state(path: Path) -> Dict[str, Any]:
@@ -928,14 +954,17 @@ def status_phase(
 # ---------------------------------------------------------------------------
 
 def resolve_local_video_path(meta: Dict[str, Any], input_dir: Path) -> Optional[Path]:
-    abs_path = meta.get("video_path")
-    if abs_path:
-        p = Path(abs_path)
-        if p.exists():
-            return p
+    # Prefer rel+input_dir so we always write captions next to the videos
+    # under the *current* --input-dir, even when the state was created on
+    # another machine (different absolute path).
     rel = meta.get("video_path_rel")
     if rel:
         p = (input_dir / rel).resolve()
+        if p.exists():
+            return p
+    abs_path = meta.get("video_path")
+    if abs_path:
+        p = Path(abs_path)
         if p.exists():
             return p
     return None
@@ -1304,57 +1333,69 @@ def main() -> int:
             logger.warning("no videos found; nothing to submit")
             return 0
 
-    if args.action == "submit":
-        submit_phase(
-            videos=videos,
-            input_dir=input_dir,
-            state=state,
-            state_file=state_file,
-            api_key=args.xai_api_key,
-            api_base_url=args.api_base_url,
-            model=args.xai_model,
-            system_prompt=system_prompt,
-            user_template=user_template,
-            include_images=not args.no_image,
-            image_max_side=args.image_max_side,
-            image_quality=args.image_quality,
-            submit_chunk=args.submit_chunk,
-            frame_workers=args.frame_workers,
-            force=args.force,
-            no_progress=args.no_progress,
-        )
-    elif args.action == "status":
-        status_phase(
-            state=state,
-            state_file=state_file,
-            api_key=args.xai_api_key,
-            api_base_url=args.api_base_url,
-        )
-    elif args.action == "collect":
-        collect_phase(
-            input_dir=input_dir,
-            state=state,
-            state_file=state_file,
-            api_key=args.xai_api_key,
-            api_base_url=args.api_base_url,
-            page_size=args.page_size,
-            output_suffix=args.output_suffix,
-            overwrite=args.overwrite,
-            jsonl_output=Path(args.jsonl_output).expanduser().resolve() if args.jsonl_output else None,
-            no_progress=args.no_progress,
-        )
-    elif args.action == "run":
-        run_phase(
-            args=args,
-            videos=videos,
-            input_dir=input_dir,
-            state=state,
-            state_file=state_file,
-            api_key=args.xai_api_key,
-            api_base_url=args.api_base_url,
-            system_prompt=system_prompt,
-            user_template=user_template,
-        )
+    try:
+        if args.action == "submit":
+            submit_phase(
+                videos=videos,
+                input_dir=input_dir,
+                state=state,
+                state_file=state_file,
+                api_key=args.xai_api_key,
+                api_base_url=args.api_base_url,
+                model=args.xai_model,
+                system_prompt=system_prompt,
+                user_template=user_template,
+                include_images=not args.no_image,
+                image_max_side=args.image_max_side,
+                image_quality=args.image_quality,
+                submit_chunk=args.submit_chunk,
+                frame_workers=args.frame_workers,
+                force=args.force,
+                no_progress=args.no_progress,
+            )
+        elif args.action == "status":
+            status_phase(
+                state=state,
+                state_file=state_file,
+                api_key=args.xai_api_key,
+                api_base_url=args.api_base_url,
+            )
+        elif args.action == "collect":
+            collect_phase(
+                input_dir=input_dir,
+                state=state,
+                state_file=state_file,
+                api_key=args.xai_api_key,
+                api_base_url=args.api_base_url,
+                page_size=args.page_size,
+                output_suffix=args.output_suffix,
+                overwrite=args.overwrite,
+                jsonl_output=Path(args.jsonl_output).expanduser().resolve() if args.jsonl_output else None,
+                no_progress=args.no_progress,
+            )
+        elif args.action == "run":
+            run_phase(
+                args=args,
+                videos=videos,
+                input_dir=input_dir,
+                state=state,
+                state_file=state_file,
+                api_key=args.xai_api_key,
+                api_base_url=args.api_base_url,
+                system_prompt=system_prompt,
+                user_template=user_template,
+            )
+    except requests.exceptions.HTTPError as e:
+        status = e.response.status_code if e.response is not None else None
+        body = (e.response.text or "")[:300] if e.response is not None else ""
+        if status == 401 or (status == 400 and "API key" in body):
+            logger.error(
+                "xAI authentication failed (HTTP %s). Verify XAI_API_KEY (or --xai-api-key). "
+                "Server said: %s",
+                status, body.strip().replace("\n", " "),
+            )
+            return 2
+        raise
 
     return 0
 
