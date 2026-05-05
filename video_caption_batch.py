@@ -66,9 +66,9 @@ XAI_BATCH_PAYLOAD_SAFETY_MARGIN_BYTES = 2 * 1024 * 1024
 XAI_BATCH_IMAGE_SAFE_PAYLOAD_BYTES = 4 * 1024 * 1024
 XAI_BATCH_ADAPTIVE_PAYLOAD_FLOOR_BYTES = 2 * 1024 * 1024
 
-# xAI rolling rate limit on add-requests: 100 calls / 30 s. We keep a 10 %
-# safety headroom on top of that.
-XAI_BATCH_MAX_ADD_CALLS_PER_30S = 100
+# xAI rolling rate limit on add-requests: 1000 calls / 30 s (per docs).
+# We keep a 10 % safety headroom on top of that.
+XAI_BATCH_MAX_ADD_CALLS_PER_30S = 1000
 XAI_BATCH_ADD_WINDOW_SECONDS = 30.0
 XAI_BATCH_POST_WORKERS = 8
 
@@ -837,7 +837,6 @@ def submit_phase(
                             {"role": "user", "content": content if include_images else content[0]["text"]},
                         ],
                         "response_format": {"type": "json_object"},
-                        "reasoning": {"effort": "low"},
                     }
                 }
                 wrapper = {
@@ -968,7 +967,9 @@ def write_caption_output(
             if key == "caption":
                 continue
             payload[f"raw_{key}"] = value
-    out_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    tmp_path = out_path.with_suffix(out_path.suffix + ".tmp")
+    tmp_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    os.replace(tmp_path, out_path)
     return out_path
 
 
@@ -1016,7 +1017,7 @@ def collect_phase(
 
     try:
         while True:
-            params = {"page_size": page_size}
+            params = {"limit": page_size}
             if pagination_token:
                 params["pagination_token"] = pagination_token
             page = xai_request(
