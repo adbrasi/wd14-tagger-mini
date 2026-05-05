@@ -731,6 +731,13 @@ def submit_phase(
             status = e.response.status_code if e.response is not None else None
             err_text = ((e.response.text or "") if e.response is not None else str(e)).strip()
 
+        if status == 401:
+            with fatal_lock:
+                fatal_error["err"] = RuntimeError(
+                    "xAI 401 Unauthorized — verify XAI_API_KEY"
+                )
+            return
+
         if status in (400, 403, 404, 413, 422) and len(sub_batch) > 1:
             if status == 413:
                 cur = json_byte_size({"batch_requests": sub_batch})
@@ -853,7 +860,6 @@ def submit_phase(
                     request_map[req_id] = {
                         "video_path": v_abs,
                         "video_path_rel": v_rel,
-                        "tags": tags,
                         "state": "queued_for_submission",
                         "updated_at": time.time(),
                     }
@@ -1086,7 +1092,6 @@ def collect_phase(
                 request_map[req_id] = {
                     **meta_entry,
                     "state": "succeeded",
-                    "caption": final_caption,
                     "output_path": str(out_path) if out_path else meta_entry.get("output_path"),
                     "updated_at": time.time(),
                 }
